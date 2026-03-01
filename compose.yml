@@ -41,6 +41,12 @@ services:
       ARTIFACT_STORE_PATH: /app/artifacts
       XYNSEED_WORKSPACE: /app/workspace
       XYNSEED_CONTRACTS_ROOT: /xyn-contracts
+      XYN_SEED_ENABLE_LEGACY_PRODUCT: "false"
+      # Canonical xyn-api upstream base URL used by kernel binding fetch and api proxy role.
+      XYN_API_BASE_URL: ${XYN_API_BASE_URL:-http://host.docker.internal:8000}
+      XYN_KERNEL_WORKSPACE_ID: ${XYN_KERNEL_WORKSPACE_ID:-}
+      XYENCE_INTERNAL_TOKEN: ${XYENCE_INTERNAL_TOKEN:-}
+      XYN_KERNEL_MANIFEST_ROOTS: ${XYN_KERNEL_MANIFEST_ROOTS:-/home/ubuntu/src}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ENV_ID: local-dev
@@ -51,6 +57,8 @@ services:
       - ./artifacts:/app/artifacts
       - ./workspace:/app/workspace
       - ./core:/app/core
+      - /home/ubuntu/src/xyn-api:/home/ubuntu/src/xyn-api:ro
+      - /home/ubuntu/src/xyn-ui:/home/ubuntu/src/xyn-ui:ro
       - /home/ubuntu/src/xyn-contracts:/xyn-contracts:ro
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
