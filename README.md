@@ -16,6 +16,7 @@ This is the **v0.0 implementation** - a local-first proof of concept demonstrati
 ✅ Basic UI (Event Console, Run Launcher, Artifact Browser)
 ✅ REST API (versioned `/api/v1`)
 ✅ `xynctl` bootstrap tool with preflight checks
+✅ Kernel boot mode that dynamically loads workspace-bound artifacts
 
 ## What's NOT Included in v0.0
 
@@ -26,6 +27,10 @@ This is the **v0.0 implementation** - a local-first proof of concept demonstrati
 ❌ Federation/workcells
 ❌ CI/CD automation
 ❌ Full blueprint compilation
+
+## Host Ingress Note (Xyn Runtime)
+- In Xyn-managed deployments with `tls.mode=host-ingress`, application stacks should not bind host `80/443`.
+- A host ingress layer (Traefik) owns `80/443` and routes by FQDN.
 
 These features are planned for v1 and beyond.
 
@@ -76,6 +81,20 @@ Open your browser to:
 **http://localhost:8000**
 
 You'll be redirected to the Event Console.
+
+### Kernel Artifact Loading (Phase 1)
+
+Seed kernel now defaults to legacy routes **OFF** and loads artifact roles dynamically.
+
+Set these variables when running kernel mode:
+
+```bash
+XYN_SEED_ENABLE_LEGACY_PRODUCT=false
+XYN_API_BASE_URL=http://localhost:8000
+XYN_KERNEL_WORKSPACE_ID=<workspace-uuid>
+XYENCE_INTERNAL_TOKEN=<same token used by xyn-api internal endpoints>
+XYN_KERNEL_MANIFEST_ROOTS=/home/ubuntu/src
+```
 
 ### 5. Create Your First Run
 
