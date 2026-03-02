@@ -42,6 +42,7 @@ services:
       XYNSEED_WORKSPACE: /app/workspace
       XYNSEED_CONTRACTS_ROOT: /xyn-contracts
       XYN_SEED_ENABLE_LEGACY_PRODUCT: "false"
+      XYN_ENABLE_BLUEPRINTS_LEGACY: ${XYN_ENABLE_BLUEPRINTS_LEGACY:-false}
       # Canonical xyn-api upstream base URL used by kernel binding fetch and api proxy role.
       XYN_API_BASE_URL: ${XYN_API_BASE_URL:-http://host.docker.internal:8000}
       XYN_KERNEL_WORKSPACE_ID: ${XYN_KERNEL_WORKSPACE_ID:-}

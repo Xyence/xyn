@@ -7,14 +7,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from fastapi import FastAPI
 
 from core.api import artifacts, debug, domain, drafts, events, health, ops, packs, releases, runs
-from core.blueprints.registry import list_blueprints
 from core.middleware import CorrelationIdMiddleware
 from core.ui import ui_artifacts, ui_domain, ui_events, ui_runs
 
 logger = logging.getLogger(__name__)
+ENABLE_BLUEPRINTS_LEGACY = os.getenv("XYN_ENABLE_BLUEPRINTS_LEGACY", "false").strip().lower() in {"1", "true", "yes"}
 
 
 def register_legacy_product_routes(app: FastAPI) -> asyncio.Task | None:
@@ -36,10 +37,14 @@ def register_legacy_product_routes(app: FastAPI) -> asyncio.Task | None:
     app.include_router(ui_artifacts.router, prefix="/ui", tags=["UI - Artifacts"])
     app.include_router(ui_domain.router, prefix="/ui", tags=["UI - Domain"])
 
-    from core.blueprints import core_migrations_apply_v1, pack_install, pack_upgrade, test_orchestrator  # noqa: F401
+    if ENABLE_BLUEPRINTS_LEGACY:
+        from core.blueprints import core_migrations_apply_v1, pack_install, pack_upgrade, test_orchestrator  # noqa: F401
+        from core.blueprints.registry import list_blueprints
 
-    registered = list_blueprints()
-    logger.info("legacy mode registered %d blueprints: %s", len(registered), ", ".join(registered))
+        registered = list_blueprints()
+        logger.info("legacy mode registered %d blueprints: %s", len(registered), ", ".join(registered))
+    else:
+        logger.info("legacy mode started with blueprints disabled (XYN_ENABLE_BLUEPRINTS_LEGACY=false)")
 
     try:
         from core.releases.reconciler import reconcile_loop

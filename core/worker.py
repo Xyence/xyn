@@ -14,8 +14,6 @@ from sqlalchemy.orm import Session
 
 from core.database import SessionLocal
 from core import models
-from core.blueprints.runner import run_blueprint
-from core.blueprints.registry import get_blueprint
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,6 +26,7 @@ WORKER_ID = os.getenv("WORKER_ID", f"worker-{os.getpid()}")
 LEASE_DURATION_SECONDS = int(os.getenv("LEASE_DURATION_SECONDS", "60"))
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "2"))
 BATCH_SIZE = int(os.getenv("WORKER_BATCH_SIZE", "1"))
+ENABLE_BLUEPRINTS_LEGACY = os.getenv("XYN_ENABLE_BLUEPRINTS_LEGACY", "false").strip().lower() in {"1", "true", "yes"}
 
 shutdown_requested = False
 
@@ -228,11 +227,15 @@ async def periodic_lease_renewal(run_id: uuid.UUID, interval_seconds: int):
 
 async def worker_loop():
     """Main worker loop: claim and execute runs."""
-    # Register blueprints at startup
-    from core.blueprints import pack_install, pack_upgrade, test_orchestrator, core_migrations_apply_v1  # noqa - Import to register
-    from core.blueprints.registry import list_blueprints
-    registered = list_blueprints()
-    logger.info(f"Registered {len(registered)} blueprints: {', '.join(registered)}")
+    # Register blueprints only in legacy mode.
+    if ENABLE_BLUEPRINTS_LEGACY:
+        from core.blueprints import pack_install, pack_upgrade, test_orchestrator, core_migrations_apply_v1  # noqa - Import to register
+        from core.blueprints.registry import list_blueprints
+
+        registered = list_blueprints()
+        logger.info(f"Registered {len(registered)} blueprints: {', '.join(registered)}")
+    else:
+        logger.info("Blueprint execution is disabled (XYN_ENABLE_BLUEPRINTS_LEGACY=false)")
 
     # Start metrics collector
     from core.observability.collector import metrics_collector_loop

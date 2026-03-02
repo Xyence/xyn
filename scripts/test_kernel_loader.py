@@ -25,11 +25,16 @@ BANNED_MODULES = [
     "core.api.packs",
     "core.api.ops",
     "core.api.releases",
+    "core.blueprints.registry",
+    "core.blueprints.runner",
+    "core.blueprints.pack_install",
+    "core.blueprints.pack_upgrade",
 ]
 
 
 def test_kernel_boot_does_not_import_legacy_modules():
     os.environ["XYN_SEED_ENABLE_LEGACY_PRODUCT"] = "false"
+    os.environ["XYN_ENABLE_BLUEPRINTS_LEGACY"] = "false"
 
     for name in BANNED_MODULES + ["core.kernel_app"]:
         sys.modules.pop(name, None)
@@ -38,6 +43,15 @@ def test_kernel_boot_does_not_import_legacy_modules():
 
     leaked = [name for name in BANNED_MODULES if name in sys.modules]
     assert leaked == [], f"kernel imported legacy modules: {leaked}"
+
+
+def test_worker_import_does_not_load_blueprints_when_legacy_flag_false():
+    os.environ["XYN_ENABLE_BLUEPRINTS_LEGACY"] = "false"
+    for name in ["core.worker", *BANNED_MODULES]:
+        sys.modules.pop(name, None)
+    importlib.import_module("core.worker")
+    leaked = [name for name in BANNED_MODULES if name in sys.modules]
+    assert leaked == [], f"worker imported blueprint modules while legacy disabled: {leaked}"
 
 
 def test_dummy_artifact_router_loads_and_registers():
@@ -224,6 +238,7 @@ def test_hello_artifact_manifest_loads_api_and_ui_roles():
 
 if __name__ == "__main__":
     test_kernel_boot_does_not_import_legacy_modules()
+    test_worker_import_does_not_load_blueprints_when_legacy_flag_false()
     test_dummy_artifact_router_loads_and_registers()
     test_root_mount_collision_fails_fast()
     test_deterministic_routing_api_before_ui_root()
