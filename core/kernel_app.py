@@ -14,6 +14,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from core import __version__
 from core.ai_bootstrap import ensure_default_agent_via_api
+from core.provisioning_local import router as provisioning_router
 from core.database import init_db
 from core.env_config import export_runtime_env, load_seed_config
 from core.kernel_loader import load_workspace_artifacts_into_app
@@ -118,6 +119,8 @@ def create_app() -> FastAPI:
     @app.get("/metrics")
     async def metrics():
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+    app.include_router(provisioning_router)
 
     return app
 
