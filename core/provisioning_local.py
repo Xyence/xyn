@@ -98,6 +98,11 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       POSTGRES_PASSWORD: xyn_dev_password
     volumes:
       - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xyn -d xyn"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   redis:
     image: redis:7-alpine
@@ -112,6 +117,11 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
     environment:
       DATABASE_URL: postgresql://xyn:xyn_dev_password@db:5432/xyn
       REDIS_URL: redis://redis:6379/0
+      POSTGRES_DB: xyn
+      POSTGRES_USER: xyn
+      POSTGRES_PASSWORD: xyn_dev_password
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
       XYN_ENV: local
       XYN_AI_PROVIDER: ${{XYN_AI_PROVIDER:-openai}}
       XYN_AI_MODEL: ${{XYN_AI_MODEL:-gpt-5-mini}}
@@ -133,8 +143,54 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       - "traefik.http.routers.{project}-api-https.tls={str(tls).lower()}"
       - "traefik.http.routers.{project}-api-https.tls.certresolver={resolver}"
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+
+  migrate:
+    image: {api_image}
+    restart: "no"
+    networks:
+      - default
+    environment:
+      DATABASE_URL: postgresql://xyn:xyn_dev_password@db:5432/xyn
+      REDIS_URL: redis://redis:6379/0
+      POSTGRES_DB: xyn
+      POSTGRES_USER: xyn
+      POSTGRES_PASSWORD: xyn_dev_password
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      XYN_ENV: local
+      XYN_AI_PROVIDER: ${{XYN_AI_PROVIDER:-openai}}
+      XYN_AI_MODEL: ${{XYN_AI_MODEL:-gpt-5-mini}}
+      XYN_OPENAI_API_KEY: ${{XYN_OPENAI_API_KEY:-}}
+      XYN_GEMINI_API_KEY: ${{XYN_GEMINI_API_KEY:-}}
+      XYN_ANTHROPIC_API_KEY: ${{XYN_ANTHROPIC_API_KEY:-}}
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        set -e
+        python - <<'PY'
+        from pathlib import Path
+
+        p = Path("/app/xyn_orchestrator/migrations/0068_providercredential_agentdefinition_and_more.py")
+        if p.exists():
+            marker = "atomic = False"
+            target = "class Migration(migrations.Migration):\\n\\n    dependencies = ["
+            source = p.read_text()
+            if marker not in source and target in source:
+                p.write_text(source.replace(target, "class Migration(migrations.Migration):\\n    atomic = False\\n\\n    dependencies = ["))
+        PY
+        exec python manage.py migrate --noinput
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
 
   ui:
     image: {ui_image}
@@ -512,6 +568,7 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail={"message": str(exc)}) from exc
 
     up_cmd = [*_compose_cmd(), "-p", project, "-f", str(compose_path), "up", "-d"]
+    down_cmd = [*_compose_cmd(), "-p", project, "-f", str(compose_path), "down", "--remove-orphans", "--volumes"]
     ui_host, api_host = _resolved_hosts(project)
     tls = _tls_enabled()
     scheme = "https" if tls else "http"
@@ -523,6 +580,8 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
         api_host=api_host,
     )
     compose_path.write_text(compose_yaml, encoding="utf-8")
+    if request.force:
+        _run(down_cmd, cwd=deploy_dir)
     code, stdout, stderr = _run(up_cmd, cwd=deploy_dir)
     status = "succeeded" if code == 0 else "failed"
 
