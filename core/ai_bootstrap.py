@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
-
-import requests
+import json
+from urllib.error import URLError, HTTPError
+from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
@@ -22,21 +23,25 @@ def ensure_default_agent_via_api() -> None:
         return
     url = f"{base_url}/xyn/internal/ai/bootstrap-default-agent"
     try:
-        response = requests.post(
-            url,
-            timeout=15,
+        req = Request(
+            url=url,
+            method="POST",
             headers={"X-Internal-Token": token, "Content-Type": "application/json"},
-            json={},
+            data=b"{}",
         )
-        if response.status_code >= 400:
-            logger.warning("AI bootstrap request failed status=%s body=%s", response.status_code, response.text[:300])
-            return
-        payload = response.json() if response.content else {}
+        with urlopen(req, timeout=15) as response:
+            body = response.read().decode("utf-8") if response else ""
+        payload = json.loads(body or "{}")
         logger.info(
             "AI bootstrap ensured default agent provider=%s model=%s key_present=%s",
             payload.get("provider"),
             payload.get("model"),
             payload.get("key_present"),
         )
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="ignore")[:300]
+        logger.warning("AI bootstrap request failed status=%s body=%s", exc.code, body)
+    except URLError:
+        logger.exception("AI bootstrap handshake failed")
     except Exception:
         logger.exception("AI bootstrap handshake failed")
