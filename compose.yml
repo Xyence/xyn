@@ -36,6 +36,9 @@ services:
     container_name: xyn-core
     restart: unless-stopped
     environment:
+      XYN_ENV: ${XYN_ENV:-local}
+      XYN_BASE_DOMAIN: ${XYN_BASE_DOMAIN:-${DOMAIN:-}}
+      XYN_AUTH_MODE: ${XYN_AUTH_MODE:-simple}
       DATABASE_URL: postgresql://xyn:xyn_dev_password@postgres:5432/xyn
       REDIS_URL: redis://redis:6379/0
       ARTIFACT_STORE_PATH: /app/artifacts
@@ -46,8 +49,13 @@ services:
       # Canonical xyn-api upstream base URL used by kernel binding fetch and api proxy role.
       XYN_API_BASE_URL: ${XYN_API_BASE_URL:-http://host.docker.internal:8000}
       XYN_KERNEL_WORKSPACE_ID: ${XYN_KERNEL_WORKSPACE_ID:-}
-      XYENCE_INTERNAL_TOKEN: ${XYENCE_INTERNAL_TOKEN:-}
+      XYN_INTERNAL_TOKEN: ${XYN_INTERNAL_TOKEN:-${XYENCE_INTERNAL_TOKEN:-}}
       XYN_KERNEL_MANIFEST_ROOTS: ${XYN_KERNEL_MANIFEST_ROOTS:-/home/ubuntu/src}
+      XYN_OIDC_ISSUER: ${XYN_OIDC_ISSUER:-}
+      XYN_OIDC_CLIENT_ID: ${XYN_OIDC_CLIENT_ID:-}
+      XYN_OIDC_REDIRECT_URI: ${XYN_OIDC_REDIRECT_URI:-}
+      XYN_AI_PROVIDER: ${XYN_AI_PROVIDER:-openai}
+      XYN_AI_MODEL: ${XYN_AI_MODEL:-gpt-5-mini}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ENV_ID: local-dev

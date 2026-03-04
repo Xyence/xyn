@@ -14,6 +14,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from core import __version__
 from core.database import init_db
+from core.env_config import export_runtime_env, load_seed_config
 from core.kernel_loader import load_workspace_artifacts_into_app
 
 
@@ -46,6 +47,15 @@ _STARTUP_TS = time.time()
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    config = load_seed_config()
+    os.environ.update(export_runtime_env(config))
+    logger.info(
+        "seed bootstrap config env=%s auth=%s ai_provider=%s ai_model=%s",
+        config.env,
+        config.auth_mode,
+        config.ai_provider,
+        config.ai_model,
+    )
     logger.info("starting xyn-seed kernel v%s", __version__)
     init_db()
 
