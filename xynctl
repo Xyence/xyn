@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
@@ -45,6 +46,10 @@ AI_KEY_SPECS = {
     "gemini": ("XYN_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
     "anthropic": ("XYN_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),
 }
+DEFAULT_ARTIFACT_REGISTRY = "public.ecr.aws/i0h0h0n4/xyn/artifacts"
+DEFAULT_UI_IMAGE_NAME = "xyn-ui"
+DEFAULT_API_IMAGE_NAME = "xyn-api"
+DEFAULT_IMAGE_TAG = "dev"
 
 
 def _as_bool(value: str) -> bool:
@@ -77,6 +82,7 @@ def check_env_file() -> bool:
     template_candidates = [Path(".env.example"), Path(".env.template")]
     template = next((candidate for candidate in template_candidates if candidate.exists()), None)
     if env_file.exists():
+        _ensure_env_defaults_file()
         return True
     if not template:
         print_error(".env.example/.env.template not found")
@@ -84,6 +90,7 @@ def check_env_file() -> bool:
     print_warning(".env not found")
     print_info(f"Creating .env from {template.name} ...")
     env_file.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+    _ensure_env_defaults_file()
     print_success("Created .env. Add one AI key (e.g., XYN_OPENAI_API_KEY) and re-run.")
     return True
 
@@ -102,8 +109,35 @@ def load_env() -> dict[str, str]:
     return env_vars
 
 
-def normalize_ai_env(env_vars: dict[str, str]) -> dict[str, str]:
+def _artifact_defaults(env_vars: dict[str, str]) -> dict[str, str]:
     normalized = dict(env_vars)
+    registry = str(normalized.get("XYN_ARTIFACT_REGISTRY", "")).strip() or DEFAULT_ARTIFACT_REGISTRY
+    normalized["XYN_ARTIFACT_REGISTRY"] = registry
+    normalized.setdefault("XYN_UI_IMAGE", f"{registry}/{DEFAULT_UI_IMAGE_NAME}:{DEFAULT_IMAGE_TAG}")
+    normalized.setdefault("XYN_API_IMAGE", f"{registry}/{DEFAULT_API_IMAGE_NAME}:{DEFAULT_IMAGE_TAG}")
+    return normalized
+
+
+def _ensure_env_defaults_file() -> None:
+    env_path = Path(".env")
+    if not env_path.exists():
+        return
+    existing = load_env()
+    desired = _artifact_defaults(existing)
+    lines = env_path.read_text(encoding="utf-8").splitlines()
+    appended = False
+    for key in ("XYN_ARTIFACT_REGISTRY", "XYN_UI_IMAGE", "XYN_API_IMAGE"):
+        if str(existing.get(key, "")).strip():
+            continue
+        lines.append(f"{key}={desired[key]}")
+        appended = True
+    if appended:
+        env_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        print_success("Added default artifact registry/image settings to .env")
+
+
+def normalize_ai_env(env_vars: dict[str, str]) -> dict[str, str]:
+    normalized = _artifact_defaults(env_vars)
     for provider, names in AI_KEY_SPECS.items():
         canonical = names[0]
         first = ""
@@ -248,7 +282,107 @@ def _wait_for_seed_health(seed_url: str, timeout_seconds: int = 120) -> bool:
     return False
 
 
-def _provision_local(seed_url: str, *, name: Optional[str], force: bool, job_prompt: Optional[str], repo_ref: Optional[str]) -> tuple[bool, dict[str, Any]]:
+def _docker_image_exists(image_ref: str) -> bool:
+    code, _, _ = _run_capture(["docker", "image", "inspect", image_ref])
+    return code == 0
+
+
+def _context_has_dockerfile(path_text: str) -> bool:
+    candidate = Path(path_text).expanduser().resolve()
+    return candidate.is_dir() and (candidate / "Dockerfile").exists()
+
+
+def _print_pull_error(image_ref: str) -> None:
+    print_error("Unable to pull artifact image:")
+    print_error(image_ref)
+    print()
+    print_info("Possible fixes:")
+    print_info("  - Verify network access")
+    print_info("  - Override XYN_ARTIFACT_REGISTRY in .env")
+    print_info("  - Provide local build contexts:")
+    print_info("      XYN_LOCAL_API_CONTEXT")
+    print_info("      XYN_LOCAL_UI_CONTEXT")
+
+
+def _resolve_artifacts(env: dict[str, str]) -> tuple[bool, dict[str, str]]:
+    resolved = {
+        "registry": str(env.get("XYN_ARTIFACT_REGISTRY", "")).strip() or DEFAULT_ARTIFACT_REGISTRY,
+        "ui_image": str(env.get("XYN_UI_IMAGE", "")).strip(),
+        "api_image": str(env.get("XYN_API_IMAGE", "")).strip(),
+        "mode": "artifact_pull",
+    }
+    if not resolved["ui_image"]:
+        resolved["ui_image"] = f"{resolved['registry']}/{DEFAULT_UI_IMAGE_NAME}:{DEFAULT_IMAGE_TAG}"
+    if not resolved["api_image"]:
+        resolved["api_image"] = f"{resolved['registry']}/{DEFAULT_API_IMAGE_NAME}:{DEFAULT_IMAGE_TAG}"
+    local_ui_context = str(env.get("XYN_LOCAL_UI_CONTEXT", "")).strip()
+    local_api_context = str(env.get("XYN_LOCAL_API_CONTEXT", "")).strip()
+    if local_ui_context and local_api_context and _context_has_dockerfile(local_ui_context) and _context_has_dockerfile(local_api_context):
+        resolved["mode"] = "local_build"
+        print_info(f"Building local API image from: {local_api_context}")
+        code, _, err = _run_capture(["docker", "build", "-t", DEFAULT_API_IMAGE_NAME, local_api_context])
+        if code != 0:
+            print_error(err or "docker build failed for API context")
+            return False, resolved
+        print_info(f"Building local UI image from: {local_ui_context}")
+        code, _, err = _run_capture(["docker", "build", "-t", DEFAULT_UI_IMAGE_NAME, local_ui_context])
+        if code != 0:
+            print_error(err or "docker build failed for UI context")
+            return False, resolved
+        resolved["api_image"] = DEFAULT_API_IMAGE_NAME
+        resolved["ui_image"] = DEFAULT_UI_IMAGE_NAME
+        return True, resolved
+
+    for image_ref in (resolved["api_image"], resolved["ui_image"]):
+        if _docker_image_exists(image_ref):
+            print_info(f"Using cached artifact image {image_ref}")
+            continue
+        print_info("Pulling artifact:")
+        print(image_ref)
+        code, _, _ = _run_capture(["docker", "pull", image_ref])
+        if code != 0:
+            _print_pull_error(image_ref)
+            return False, resolved
+    return True, resolved
+
+
+def _resolve_artifacts_via_seed(seed_url: str, env: dict[str, str]) -> tuple[bool, dict[str, Any]]:
+    params: dict[str, str] = {
+        "workspace_slug": str(env.get("XYN_WORKSPACE_SLUG", "default")).strip() or "default",
+        "ensure_local": "true",
+    }
+    registry_slug = str(env.get("XYN_ARTIFACT_REGISTRY_SLUG", "")).strip()
+    channel = str(env.get("XYN_ARTIFACT_CHANNEL", "")).strip()
+    if registry_slug:
+        params["registry_slug"] = registry_slug
+    if channel:
+        params["channel"] = channel
+    url = f"{seed_url.rstrip('/')}/api/v1/artifact-registries/resolve?{urlencode(params)}"
+    req = Request(url, method="GET")
+    try:
+        with urlopen(req, timeout=180) as response:
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+        return True, payload
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="ignore")
+        return False, {"error": body or f"HTTP {exc.code}"}
+    except URLError as exc:
+        return False, {"error": str(exc)}
+
+
+def _provision_local(
+    seed_url: str,
+    *,
+    name: Optional[str],
+    force: bool,
+    job_prompt: Optional[str],
+    repo_ref: Optional[str],
+    ui_image: Optional[str],
+    api_image: Optional[str],
+    registry_slug: Optional[str],
+    channel: Optional[str],
+    workspace_slug: Optional[str],
+) -> tuple[bool, dict[str, Any]]:
     payload: dict[str, Any] = {}
     if name:
         payload["name"] = name
@@ -256,6 +390,16 @@ def _provision_local(seed_url: str, *, name: Optional[str], force: bool, job_pro
         payload["force"] = True
     if job_prompt:
         payload["job"] = {"prompt": job_prompt, "repo_ref": repo_ref or str(Path.cwd().resolve())}
+    if ui_image:
+        payload["ui_image"] = ui_image
+    if api_image:
+        payload["api_image"] = api_image
+    if registry_slug:
+        payload["registry_slug"] = registry_slug
+    if channel:
+        payload["channel"] = channel
+    if workspace_slug:
+        payload["workspace_slug"] = workspace_slug
     request = Request(
         f"{seed_url.rstrip('/')}/api/v1/provision/local-instance",
         method="POST",
@@ -274,7 +418,7 @@ def _provision_local(seed_url: str, *, name: Optional[str], force: bool, job_pro
 
 
 def start(detached: bool, env: dict[str, str]) -> bool:
-    print_info("\nStarting Xyn Seed platform...\n")
+    print_info("Starting seed core stack...")
     if not _compose_up(detached=detached, env=env):
         return False
     return True
@@ -283,13 +427,57 @@ def start(detached: bool, env: dict[str, str]) -> bool:
 def start_with_provision(env: dict[str, str], *, force: bool, name: Optional[str], job_prompt: Optional[str], repo_ref: Optional[str], seed_url: str) -> int:
     if not start(detached=True, env=env):
         return 1
-    print_info("Waiting for seed API readiness...")
+    print_info("Waiting for seed API health...")
     if not _wait_for_seed_health(seed_url):
         print_error(f"Seed API did not become healthy at {seed_url}/health")
         return 2
     print_success("Seed API is healthy")
-    print_info("Provisioning local sibling Xyn instance...")
-    ok, payload = _provision_local(seed_url, name=name, force=force, job_prompt=job_prompt, repo_ref=repo_ref)
+    print_info("Resolving artifacts...")
+    artifacts_ok, resolved = _resolve_artifacts_via_seed(seed_url, env)
+    if not artifacts_ok:
+        print_warning(f"Seed registry resolver failed; falling back to local env resolution: {resolved.get('error')}")
+        artifacts_ok, fallback = _resolve_artifacts(env)
+        resolved = {
+            "registry_slug": str(env.get("XYN_ARTIFACT_REGISTRY_SLUG", "")).strip() or "env-fallback",
+            "registry": {"endpoint": fallback.get("registry"), "defaults": {"channel": DEFAULT_IMAGE_TAG}},
+            "images": {
+                "ui_image": fallback.get("ui_image"),
+                "api_image": fallback.get("api_image"),
+                "channel": DEFAULT_IMAGE_TAG,
+            },
+            "operations": [],
+        }
+    if not artifacts_ok:
+        return 4
+    registry = resolved.get("registry") if isinstance(resolved.get("registry"), dict) else {}
+    images = resolved.get("images") if isinstance(resolved.get("images"), dict) else {}
+    endpoint = str(registry.get("endpoint") or "").strip()
+    reg_slug = str(resolved.get("registry_slug") or "default-registry").strip() or "default-registry"
+    eff_channel = str(images.get("channel") or DEFAULT_IMAGE_TAG).strip() or DEFAULT_IMAGE_TAG
+    print_info(f"Using ArtifactRegistry: {reg_slug} ({endpoint}) channel={eff_channel}")
+    for op in list(resolved.get("operations") or []):
+        op_text = str(op or "").strip()
+        if op_text.startswith("Pulled artifact image "):
+            image_ref = op_text.replace("Pulled artifact image ", "", 1)
+            print_info("Pulling artifact:")
+            print(image_ref)
+        elif op_text.startswith("Using cached artifact image "):
+            print_info(op_text)
+        elif op_text:
+            print_info(op_text)
+    print_info("Provisioning local instance...")
+    ok, payload = _provision_local(
+        seed_url,
+        name=name,
+        force=force,
+        job_prompt=job_prompt,
+        repo_ref=repo_ref,
+        ui_image=str(images.get("ui_image") or ""),
+        api_image=str(images.get("api_image") or ""),
+        registry_slug=reg_slug,
+        channel=eff_channel,
+        workspace_slug=str(env.get("XYN_WORKSPACE_SLUG", "default")).strip() or "default",
+    )
     if not ok:
         print_error(f"Provisioning failed: {payload.get('error')}")
         return 3
@@ -304,7 +492,7 @@ def start_with_provision(env: dict[str, str], *, force: bool, name: Optional[str
     if api_url:
         print_info(f"API:  {api_url}")
     if ui_url:
-        print_success(f"Open: {ui_url}")
+        print_success(f"UI available at: {ui_url}")
     else:
         print_warning("Provisioning completed but no UI URL was returned")
     return 0
@@ -471,16 +659,37 @@ def main() -> None:
             if not _wait_for_seed_health(seed_url):
                 print_error("Seed API is unavailable; cannot provision local instance")
                 sys.exit(3)
+        print_info("Resolving artifacts...")
+        artifacts_ok, resolved = _resolve_artifacts_via_seed(seed_url, env)
+        if not artifacts_ok:
+            print_warning(f"Seed registry resolver failed; falling back to local env resolution: {resolved.get('error')}")
+            artifacts_ok, fallback = _resolve_artifacts(env)
+            resolved = {
+                "registry_slug": str(env.get("XYN_ARTIFACT_REGISTRY_SLUG", "")).strip() or "env-fallback",
+                "images": {
+                    "ui_image": fallback.get("ui_image"),
+                    "api_image": fallback.get("api_image"),
+                    "channel": DEFAULT_IMAGE_TAG,
+                },
+            }
+        if not artifacts_ok:
+            sys.exit(4)
+        images = resolved.get("images") if isinstance(resolved.get("images"), dict) else {}
         ok, payload = _provision_local(
             seed_url,
             name=args["name"],
             force=args["force"],
             job_prompt=args["job_prompt"],
             repo_ref=args["repo_ref"],
+            ui_image=str(images.get("ui_image") or ""),
+            api_image=str(images.get("api_image") or ""),
+            registry_slug=str(resolved.get("registry_slug") or ""),
+            channel=str(images.get("channel") or DEFAULT_IMAGE_TAG),
+            workspace_slug=str(env.get("XYN_WORKSPACE_SLUG", "default")).strip() or "default",
         )
         if not ok:
             print_error(f"Provisioning failed: {payload.get('error')}")
-            sys.exit(4)
+            sys.exit(5)
         print_success(f"Provision status: {payload.get('status')}")
         if payload.get("ui_url"):
             print_success(f"Open: {payload.get('ui_url')}")

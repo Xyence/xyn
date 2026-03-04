@@ -34,7 +34,7 @@ This is the **v0.0 implementation** - a local-first proof of concept demonstrati
 
 These features are planned for v1 and beyond.
 
-## Quickstart (local)
+## Quickstart (Fresh Host)
 
 ### Prerequisites
 
@@ -44,14 +44,15 @@ These features are planned for v1 and beyond.
 ### 1. Clone and Configure
 
 ```bash
+git clone <repo>
 cd xyn-seed
 cp .env.example .env
 ```
 
-Edit `.env` and add exactly one key for the happy path:
+Add AI key in `.env`:
 
 ```bash
-XYN_OPENAI_API_KEY=sk-...
+XYN_OPENAI_API_KEY=your_key_here
 ```
 
 ### 2. Make `xynctl` executable
@@ -60,22 +61,45 @@ XYN_OPENAI_API_KEY=sk-...
 chmod +x xynctl
 ```
 
-### 3. Start + provision a local sibling instance
+### 3. Run quickstart
 
 ```bash
 ./xynctl quickstart
-# same as: ./xynctl start --provision
 ```
 
 This will:
-- Run preflight checks (Docker, API keys, etc.)
-- Start seed core stack
-- Wait for seed API health
-- Provision a local sibling Xyn instance via docker compose
-- Print final URL: `Open: http://localhost:<port>`
+1. start the seed core stack
+2. pull platform artifacts from
 
-### 4. Open the printed URL
-Use the `Open:` URL printed by `xynctl`.
+   `public.ecr.aws/i0h0h0n4/xyn/artifacts`
+
+3. provision a sibling Xyn instance
+4. print the UI URL
+
+## Artifact Registry (Managed Artifact)
+
+Xyn Seed now treats the artifact registry itself as a managed artifact (`kind=artifact-registry`).
+
+- On first startup, seed creates `default-registry` automatically.
+- Default seeded endpoint:
+  - `public.ecr.aws/i0h0h0n4/xyn/artifacts`
+- Provisioning resolves registry in this order:
+  1. explicit `registry_slug`
+  2. workspace default registry
+  3. seeded `default-registry`
+  4. `XYN_ARTIFACT_REGISTRY` env fallback (only if no registry artifact exists)
+
+API endpoints:
+
+- `GET /api/v1/artifact-registries`
+- `POST /api/v1/artifact-registries`
+- `GET /api/v1/artifact-registries/resolve`
+- `GET|PATCH|DELETE /api/v1/artifact-registries/{slug}`
+- `GET|PATCH /api/v1/workspaces/{workspace_slug}/artifact-registry`
+
+Local dev override remains supported:
+
+- If both `XYN_LOCAL_API_CONTEXT` and `XYN_LOCAL_UI_CONTEXT` are set and contain Dockerfiles, seed builds and uses local images (`xyn-api`, `xyn-ui`).
 
 ### Kernel Artifact Loading (Phase 1)
 
@@ -91,7 +115,7 @@ XYENCE_INTERNAL_TOKEN=<same token used by xyn-api internal endpoints>
 XYN_KERNEL_MANIFEST_ROOTS=/home/ubuntu/src
 ```
 
-### 5. Create Your First Run
+### Create Your First Run
 
 1. Navigate to http://localhost:8000/ui/runs/new
 2. Enter a run name (e.g., "My First Run")

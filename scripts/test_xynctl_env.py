@@ -38,6 +38,13 @@ class XynCtlEnvTests(unittest.TestCase):
         normalized = mod.normalize_ai_env(env)
         self.assertEqual(normalized.get("XYN_AI_PROVIDER"), "none")
 
+    def test_artifact_defaults_are_added(self):
+        mod = _load_xynctl_module()
+        normalized = mod.normalize_ai_env({})
+        self.assertEqual(normalized.get("XYN_ARTIFACT_REGISTRY"), "public.ecr.aws/i0h0h0n4/xyn/artifacts")
+        self.assertEqual(normalized.get("XYN_UI_IMAGE"), "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:dev")
+        self.assertEqual(normalized.get("XYN_API_IMAGE"), "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:dev")
+
 
 if __name__ == "__main__":
     unittest.main()

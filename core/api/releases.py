@@ -16,6 +16,8 @@ from core.releases.compiler import compile_release_to_runtime
 from core.releases.compose_renderer import render_compose
 from core.releases.k8s_backend import validate_runtime_spec, K8sValidationError
 from core.releases import store
+from core.artifact_registry import apply_release_spec_artifact_resolution
+from core.database import SessionLocal
 from core import schemas
 
 router = APIRouter()
@@ -239,6 +241,12 @@ async def plan_release(request: PlanRequest, authorization: str | None = Header(
         _validate_schema(release_spec, "ReleaseSpec.schema.json")
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=f"ReleaseSpec validation error: {exc.message}")
+
+    db = SessionLocal()
+    try:
+        release_spec = apply_release_spec_artifact_resolution(db, release_spec, workspace_slug="default")
+    finally:
+        db.close()
 
     metadata = release_spec["metadata"]
     release_id = f"{metadata['namespace']}.{metadata['name']}"

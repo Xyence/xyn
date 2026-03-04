@@ -14,10 +14,13 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from core import __version__
 from core.ai_bootstrap import ensure_default_agent_via_api
+from core.artifact_registry import ensure_seed_default_registry
 from core.provisioning_local import router as provisioning_router
 from core.database import init_db
+from core.database import SessionLocal
 from core.env_config import export_runtime_env, load_seed_config
 from core.kernel_loader import load_workspace_artifacts_into_app
+from core.api.artifact_registries import router as artifact_registry_router
 
 
 class CorrelationIdFilter(logging.Filter):
@@ -61,6 +64,11 @@ async def _lifespan(app: FastAPI):
     )
     logger.info("starting xyn-seed kernel v%s", __version__)
     init_db()
+    db = SessionLocal()
+    try:
+        ensure_seed_default_registry(db)
+    finally:
+        db.close()
     ensure_default_agent_via_api()
 
     loaded = await load_workspace_artifacts_into_app(app)
@@ -121,6 +129,7 @@ def create_app() -> FastAPI:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     app.include_router(provisioning_router)
+    app.include_router(artifact_registry_router)
 
     return app
 

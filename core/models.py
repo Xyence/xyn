@@ -211,6 +211,28 @@ class Artifact(Base):
     step = relationship("Step", back_populates="artifacts", foreign_keys=[step_id])
 
 
+class WorkspaceSetting(Base):
+    """Workspace-level settings used by seed control-plane features."""
+    __tablename__ = "workspace_settings"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_slug = Column(String(255), nullable=False, unique=True, index=True)
+    default_artifact_registry_slug = Column(String(255), nullable=False, default="default-registry")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Secret(Base):
+    """Minimal secrets table for reference-based auth configuration."""
+    __tablename__ = "secrets"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(255), nullable=False, unique=True, index=True)
+    value = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class Node(Base):
     """Node model - deployed instance."""
     __tablename__ = "nodes"

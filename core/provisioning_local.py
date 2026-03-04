@@ -16,10 +16,16 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from core.artifact_registry import resolve_registry_images
 from core.database import SessionLocal
 from core.models import Artifact
 
 router = APIRouter(prefix="/api/v1/provision", tags=["provision"])
+
+DEFAULT_ARTIFACT_REGISTRY = "public.ecr.aws/i0h0h0n4/xyn/artifacts"
+DEFAULT_UI_IMAGE_NAME = "xyn-ui"
+DEFAULT_API_IMAGE_NAME = "xyn-api"
+DEFAULT_IMAGE_TAG = "dev"
 
 
 def _utc_now() -> datetime:
@@ -73,7 +79,7 @@ def _find_free_port(start: int = 42000, end: int = 42999, used_ports: Optional[s
     raise RuntimeError("No free port available in allocation range")
 
 
-def _compose_yaml(project: str, ui_port: int, api_port: int) -> str:
+def _compose_yaml(project: str, ui_port: int, api_port: int, *, ui_image: str, api_image: str) -> str:
     return f"""services:
   db:
     image: postgres:16-alpine
@@ -90,7 +96,7 @@ def _compose_yaml(project: str, ui_port: int, api_port: int) -> str:
     restart: unless-stopped
 
   backend:
-    image: xyn-api-backend
+    image: {api_image}
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://xyn:xyn_dev_password@db:5432/xyn
@@ -108,7 +114,7 @@ def _compose_yaml(project: str, ui_port: int, api_port: int) -> str:
       - redis
 
   ui:
-    image: xyn-ui
+    image: {ui_image}
     restart: unless-stopped
     environment:
       VITE_API_BASE_URL: http://localhost:{api_port}
@@ -298,6 +304,11 @@ class ProvisionLocalRequest(BaseModel):
     name: Optional[str] = None
     force: bool = False
     job: Optional[LocalDevChangeInput] = None
+    ui_image: Optional[str] = None
+    api_image: Optional[str] = None
+    registry_slug: Optional[str] = None
+    channel: Optional[str] = None
+    workspace_slug: Optional[str] = None
 
 
 def _load_state(deploy_dir: Path) -> Optional[Dict[str, Any]]:
@@ -322,7 +333,6 @@ def _ensure_required_artifacts() -> list[dict[str, str]]:
     expected = [
         ("xyn-api", "xyn-api/artifact.manifest.json"),
         ("xyn-ui", "xyn-ui/artifact.manifest.json"),
-        ("xyn-ai", "xyn-ai/artifact.manifest.json"),
     ]
     ensured: list[dict[str, str]] = []
     for slug, rel in expected:
@@ -344,6 +354,91 @@ def _ensure_required_artifacts() -> list[dict[str, str]]:
     return ensured
 
 
+def _artifact_image_defaults() -> dict[str, str]:
+    registry = str(os.getenv("XYN_ARTIFACT_REGISTRY", "")).strip() or DEFAULT_ARTIFACT_REGISTRY
+    ui_image = str(os.getenv("XYN_UI_IMAGE", "")).strip() or f"{registry}/{DEFAULT_UI_IMAGE_NAME}:{DEFAULT_IMAGE_TAG}"
+    api_image = str(os.getenv("XYN_API_IMAGE", "")).strip() or f"{registry}/{DEFAULT_API_IMAGE_NAME}:{DEFAULT_IMAGE_TAG}"
+    return {
+        "registry": registry,
+        "ui_image": ui_image,
+        "api_image": api_image,
+    }
+
+
+def _context_has_dockerfile(path_text: str) -> bool:
+    candidate = Path(path_text).expanduser().resolve()
+    return candidate.is_dir() and (candidate / "Dockerfile").exists()
+
+
+def _resolve_images_for_provision(request: ProvisionLocalRequest) -> dict[str, Any]:
+    defaults = _artifact_image_defaults()
+    operations: list[str] = []
+
+    requested_ui = str(request.ui_image or "").strip()
+    requested_api = str(request.api_image or "").strip()
+    if requested_ui and requested_api:
+        return {
+            "mode": "explicit",
+            "registry": defaults["registry"],
+            "ui_image": requested_ui,
+            "api_image": requested_api,
+            "registry_slug": None,
+            "registry_source": "explicit",
+            "channel": str(request.channel or DEFAULT_IMAGE_TAG).strip() or DEFAULT_IMAGE_TAG,
+            "operations": operations,
+        }
+
+    local_ui_context = str(os.getenv("XYN_LOCAL_UI_CONTEXT", "")).strip()
+    local_api_context = str(os.getenv("XYN_LOCAL_API_CONTEXT", "")).strip()
+    local_contexts_ready = bool(local_ui_context and local_api_context)
+    if local_contexts_ready and _context_has_dockerfile(local_ui_context) and _context_has_dockerfile(local_api_context):
+        code, _, stderr = _run(["docker", "build", "-t", DEFAULT_API_IMAGE_NAME, local_api_context])
+        if code != 0:
+            raise RuntimeError(f"Failed to build local API context: {stderr or local_api_context}")
+        operations.append(f"Built local image {DEFAULT_API_IMAGE_NAME} from {local_api_context}")
+
+        code, _, stderr = _run(["docker", "build", "-t", DEFAULT_UI_IMAGE_NAME, local_ui_context])
+        if code != 0:
+            raise RuntimeError(f"Failed to build local UI context: {stderr or local_ui_context}")
+        operations.append(f"Built local image {DEFAULT_UI_IMAGE_NAME} from {local_ui_context}")
+
+        return {
+            "mode": "local_build",
+            "registry": defaults["registry"],
+            "ui_image": DEFAULT_UI_IMAGE_NAME,
+            "api_image": DEFAULT_API_IMAGE_NAME,
+            "registry_slug": None,
+            "registry_source": "local_build",
+            "channel": str(request.channel or DEFAULT_IMAGE_TAG).strip() or DEFAULT_IMAGE_TAG,
+            "operations": operations,
+        }
+    db = SessionLocal()
+    try:
+        resolved = resolve_registry_images(
+            db,
+            explicit_registry_slug=str(request.registry_slug or "").strip() or None,
+            workspace_slug=str(request.workspace_slug or "default").strip() or "default",
+            channel=str(request.channel or "").strip() or None,
+            ensure_local=True,
+        )
+    finally:
+        db.close()
+
+    operations.extend(list(resolved.get("operations") or []))
+    images = resolved.get("images") if isinstance(resolved.get("images"), dict) else {}
+    return {
+        "mode": "artifact_registry",
+        "registry": str((resolved.get("registry") or {}).get("endpoint") or defaults["registry"]),
+        "ui_image": str(images.get("ui_image") or defaults["ui_image"]),
+        "api_image": str(images.get("api_image") or defaults["api_image"]),
+        "registry_slug": str(resolved.get("registry_slug") or ""),
+        "registry_source": str(resolved.get("registry_source") or ""),
+        "channel": str(images.get("channel") or DEFAULT_IMAGE_TAG),
+        "registry_spec": resolved.get("registry") if isinstance(resolved.get("registry"), dict) else {},
+        "operations": operations,
+    }
+
+
 @router.post("/local-instance")
 def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
     project_suffix = _sanitize_slug(request.name or "local")[:20]
@@ -362,12 +457,17 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
             "api_url": existing.get("api_url") or "",
             "surfaces": {"deployment": {"label": "Deployment", "path": existing.get("ui_url") or ""}},
             "ensured_artifacts": existing.get("ensured_artifacts") or [],
+            "artifact_resolution": existing.get("artifact_resolution") or {},
         }
     deployment_id = str(uuid.uuid4())
     compose_path = deploy_dir / "compose.yaml"
     ensured_artifacts = _ensure_required_artifacts()
+    try:
+        artifact_resolution = _resolve_images_for_provision(request)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail={"message": str(exc)}) from exc
 
-    up_cmd = [*_compose_cmd(), "-p", project, "-f", str(compose_path), "up", "-d", "--build"]
+    up_cmd = [*_compose_cmd(), "-p", project, "-f", str(compose_path), "up", "-d"]
     down_cmd = [*_compose_cmd(), "-p", project, "-f", str(compose_path), "down", "--remove-orphans"]
     code = 1
     stdout = ""
@@ -379,7 +479,13 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
         ui_port = _find_free_port(used_ports=used_ports)
         used_ports.add(ui_port)
         api_port = _find_free_port(start=ui_port + 1, used_ports=used_ports)
-        compose_yaml = _compose_yaml(project=project, ui_port=ui_port, api_port=api_port)
+        compose_yaml = _compose_yaml(
+            project=project,
+            ui_port=ui_port,
+            api_port=api_port,
+            ui_image=artifact_resolution["ui_image"],
+            api_image=artifact_resolution["api_image"],
+        )
         compose_path.write_text(compose_yaml, encoding="utf-8")
         code, stdout, stderr = _run(up_cmd, cwd=deploy_dir)
         if code == 0:
@@ -402,6 +508,7 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
         "ui_url": ui_url,
         "api_url": api_url,
         "ensured_artifacts": ensured_artifacts,
+        "artifact_resolution": artifact_resolution,
         "created_at": _utc_now().isoformat(),
     }
     deployment_metadata = {
@@ -471,6 +578,7 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
         "ui_url": ui_url,
         "api_url": api_url,
         "ensured_artifacts": ensured_artifacts,
+        "artifact_resolution": artifact_resolution,
         "surfaces": {
             "deployment": {"label": "Deployment", "path": ui_url},
         },
@@ -495,6 +603,7 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
             "ui_url": ui_url,
             "api_url": api_url,
             "ensured_artifacts": ensured_artifacts,
+            "artifact_resolution": artifact_resolution,
             "updated_at": _utc_now().isoformat(),
         },
     )
