@@ -105,6 +105,8 @@ def _resolve_ai_provider_and_keys() -> tuple[str, bool, dict[str, str]]:
         return explicit, True, keys
     if len(available) == 0:
         return "none", False, keys
+    if keys.get("openai"):
+        return "openai", True, keys
     if len(available) == 1:
         return available[0], True, keys
     raise RuntimeError("Multiple AI provider keys are set; specify XYN_AI_PROVIDER explicitly")

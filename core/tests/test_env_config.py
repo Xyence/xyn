@@ -24,10 +24,19 @@ class SeedEnvConfigTests(unittest.TestCase):
         self.assertEqual(config.ai_provider, "openai")
         self.assertEqual(config.ai_model, "gpt-5-mini")
 
-    def test_requires_provider_when_multiple_keys_present(self):
+    def test_defaults_to_openai_when_multiple_keys_include_openai(self):
         env = self._base_env()
         env["XYN_OPENAI_API_KEY"] = "sk-test-openai"
         env["XYN_GEMINI_API_KEY"] = "gem-test"
+        with patch("core.env_config._load_seed_dotenv_once", return_value=None), patch.dict(os.environ, env, clear=True):
+            config = load_seed_config()
+        self.assertEqual(config.ai_provider, "openai")
+        self.assertTrue(config.ai_enabled)
+
+    def test_requires_provider_when_multiple_non_openai_keys_present(self):
+        env = self._base_env()
+        env["XYN_GEMINI_API_KEY"] = "gem-test"
+        env["XYN_ANTHROPIC_API_KEY"] = "ant-test"
         with patch("core.env_config._load_seed_dotenv_once", return_value=None), patch.dict(os.environ, env, clear=True):
             with self.assertRaises(RuntimeError):
                 load_seed_config()
