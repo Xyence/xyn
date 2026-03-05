@@ -127,6 +127,7 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       POSTGRES_PORT: 5432
       XYN_ENV: local
       XYN_AUTH_MODE: ${{XYN_AUTH_MODE:-dev}}
+      XYN_INTENT_ENGINE_V1: ${{XYN_INTENT_ENGINE_V1:-1}}
       XYN_PUBLIC_BASE_URL: ${{XYN_PUBLIC_BASE_URL:-{ui_scheme}://{ui_host}}}
       XYN_TRUST_PROXY: ${{XYN_TRUST_PROXY:-true}}
       XYN_TRUSTED_PROXY_CIDRS: ${{XYN_TRUSTED_PROXY_CIDRS:-127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}}
@@ -179,6 +180,7 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       POSTGRES_PORT: 5432
       XYN_ENV: local
       XYN_AUTH_MODE: ${{XYN_AUTH_MODE:-dev}}
+      XYN_INTENT_ENGINE_V1: ${{XYN_INTENT_ENGINE_V1:-1}}
       XYN_PUBLIC_BASE_URL: ${{XYN_PUBLIC_BASE_URL:-{ui_scheme}://{ui_host}}}
       XYN_TRUST_PROXY: ${{XYN_TRUST_PROXY:-true}}
       XYN_TRUSTED_PROXY_CIDRS: ${{XYN_TRUSTED_PROXY_CIDRS:-127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}}
