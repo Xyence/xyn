@@ -123,6 +123,16 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
       XYN_ENV: local
+      XYN_AUTH_MODE: ${{XYN_AUTH_MODE:-dev}}
+      XYN_PUBLIC_BASE_URL: ${{XYN_PUBLIC_BASE_URL:-{ui_scheme}://{ui_host}}}
+      XYN_TRUST_PROXY: ${{XYN_TRUST_PROXY:-true}}
+      XYN_TRUSTED_PROXY_CIDRS: ${{XYN_TRUSTED_PROXY_CIDRS:-127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}}
+      XYN_DEBUG_AUTH: ${{XYN_DEBUG_AUTH:-false}}
+      XYN_OIDC_ISSUER: ${{XYN_OIDC_ISSUER:-}}
+      XYN_OIDC_CLIENT_ID: ${{XYN_OIDC_CLIENT_ID:-}}
+      OIDC_ISSUER: ${{XYN_OIDC_ISSUER:-}}
+      OIDC_CLIENT_ID: ${{XYN_OIDC_CLIENT_ID:-}}
+      XYN_UI_BEARER_TOKEN: ${{XYN_UI_BEARER_TOKEN:-}}
       XYN_AI_PROVIDER: ${{XYN_AI_PROVIDER:-openai}}
       XYN_AI_MODEL: ${{XYN_AI_MODEL:-gpt-5-mini}}
       XYN_OPENAI_API_KEY: ${{XYN_OPENAI_API_KEY:-}}
@@ -164,6 +174,16 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
       XYN_ENV: local
+      XYN_AUTH_MODE: ${{XYN_AUTH_MODE:-dev}}
+      XYN_PUBLIC_BASE_URL: ${{XYN_PUBLIC_BASE_URL:-{ui_scheme}://{ui_host}}}
+      XYN_TRUST_PROXY: ${{XYN_TRUST_PROXY:-true}}
+      XYN_TRUSTED_PROXY_CIDRS: ${{XYN_TRUSTED_PROXY_CIDRS:-127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}}
+      XYN_DEBUG_AUTH: ${{XYN_DEBUG_AUTH:-false}}
+      XYN_OIDC_ISSUER: ${{XYN_OIDC_ISSUER:-}}
+      XYN_OIDC_CLIENT_ID: ${{XYN_OIDC_CLIENT_ID:-}}
+      OIDC_ISSUER: ${{XYN_OIDC_ISSUER:-}}
+      OIDC_CLIENT_ID: ${{XYN_OIDC_CLIENT_ID:-}}
+      XYN_UI_BEARER_TOKEN: ${{XYN_UI_BEARER_TOKEN:-}}
       XYN_AI_PROVIDER: ${{XYN_AI_PROVIDER:-openai}}
       XYN_AI_MODEL: ${{XYN_AI_MODEL:-gpt-5-mini}}
       XYN_OPENAI_API_KEY: ${{XYN_OPENAI_API_KEY:-}}

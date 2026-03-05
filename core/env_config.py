@@ -71,6 +71,10 @@ class SeedConfig:
     env: str
     base_domain: str
     auth_mode: str
+    public_base_url: str
+    trust_proxy: bool
+    trusted_proxy_cidrs: str
+    debug_auth: bool
     internal_token: str
     oidc_issuer: str
     oidc_client_id: str
@@ -128,9 +132,21 @@ def load_seed_config() -> SeedConfig:
     if env not in {"local", "dev", "prod"}:
         raise RuntimeError("XYN_ENV must be one of: local|dev|prod")
 
-    auth_mode = _env("XYN_AUTH_MODE", "simple").lower()
-    if auth_mode not in {"simple", "oidc"}:
-        raise RuntimeError("XYN_AUTH_MODE must be one of: simple|oidc")
+    raw_auth_mode = _env("XYN_AUTH_MODE", "dev").lower()
+    if raw_auth_mode in {"simple", "local"}:
+        auth_mode = "dev"
+    else:
+        auth_mode = raw_auth_mode
+    if auth_mode not in {"dev", "token", "oidc"}:
+        raise RuntimeError("XYN_AUTH_MODE must be one of: dev|token|oidc")
+
+    public_base_url = _env("XYN_PUBLIC_BASE_URL", "http://localhost")
+    trust_proxy = _env("XYN_TRUST_PROXY", "true").lower() in {"1", "true", "yes", "on"}
+    trusted_proxy_cidrs = _env(
+        "XYN_TRUSTED_PROXY_CIDRS",
+        "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
+    )
+    debug_auth = _env("XYN_DEBUG_AUTH", "false").lower() in {"1", "true", "yes", "on"}
 
     base_domain = _env("XYN_BASE_DOMAIN", "", aliases=("DOMAIN",))
     internal_token = _env("XYN_INTERNAL_TOKEN", "", aliases=("XYENCE_INTERNAL_TOKEN",))
@@ -161,6 +177,10 @@ def load_seed_config() -> SeedConfig:
         env=env,
         base_domain=base_domain,
         auth_mode=auth_mode,
+        public_base_url=public_base_url,
+        trust_proxy=trust_proxy,
+        trusted_proxy_cidrs=trusted_proxy_cidrs,
+        debug_auth=debug_auth,
         internal_token=internal_token,
         oidc_issuer=oidc_issuer,
         oidc_client_id=oidc_client_id,
@@ -184,6 +204,10 @@ def export_runtime_env(config: SeedConfig) -> dict[str, str]:
         "XYN_ENV": config.env,
         "XYN_BASE_DOMAIN": config.base_domain,
         "XYN_AUTH_MODE": config.auth_mode,
+        "XYN_PUBLIC_BASE_URL": config.public_base_url,
+        "XYN_TRUST_PROXY": "true" if config.trust_proxy else "false",
+        "XYN_TRUSTED_PROXY_CIDRS": config.trusted_proxy_cidrs,
+        "XYN_DEBUG_AUTH": "true" if config.debug_auth else "false",
         "XYN_INTERNAL_TOKEN": config.internal_token,
         "XYN_OIDC_ISSUER": config.oidc_issuer,
         "XYN_OIDC_CLIENT_ID": config.oidc_client_id,

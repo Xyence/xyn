@@ -235,9 +235,15 @@ def build_runtime_env() -> dict[str, str]:
         runtime["XYN_HOST_SRC_ROOT"] = str(Path.cwd().resolve().parent)
     runtime.setdefault("XYN_TRAEFIK_NETWORK", "xyn_traefik")
     runtime.setdefault("XYN_SEED_HOST", "seed.localhost")
+    runtime.setdefault("XYN_AUTH_MODE", "dev")
+    runtime.setdefault("XYN_PUBLIC_BASE_URL", "http://localhost")
+    runtime.setdefault("XYN_TRUST_PROXY", "true")
     if not str(runtime.get("XYN_SEED_URL", "")).strip():
         seed_scheme = "https" if _as_bool(runtime.get("XYN_TRAEFIK_ENABLE_TLS", "false")) else "http"
         runtime["XYN_SEED_URL"] = f"{seed_scheme}://{runtime['XYN_SEED_HOST']}"
+    if str(runtime.get("XYN_AUTH_MODE", "")).strip().lower() == "token":
+        if not str(runtime.get("XYN_UI_BEARER_TOKEN", "")).strip():
+            runtime["XYN_UI_BEARER_TOKEN"] = "xyn-local-bootstrap-token"
     if not str(runtime.get("DOCKER_GID", "")).strip():
         sock = Path("/var/run/docker.sock")
         if sock.exists():
@@ -510,6 +516,14 @@ def start_with_provision(env: dict[str, str], *, force: bool, name: Optional[str
         print_success(f"UI available at: {ui_url}")
     else:
         print_warning("Provisioning completed but no UI URL was returned")
+    auth_mode = str(env.get("XYN_AUTH_MODE", "dev")).strip().lower()
+    if auth_mode in {"simple", "local"}:
+        auth_mode = "dev"
+    print_info(f"Auth mode: {auth_mode}")
+    if auth_mode == "token":
+        token_value = str(env.get("XYN_UI_BEARER_TOKEN", "")).strip()
+        if token_value:
+            print_info(f"Bootstrap token: {token_value}")
     return 0
 
 
@@ -532,40 +546,44 @@ def _deployment_states() -> list[dict[str, Any]]:
 
 
 def _discover_provisioned_instances_from_docker() -> list[dict[str, Any]]:
-    code, stdout, _ = _run_capture(["docker", "ps", "--format", "{{.Names}}"])
+    code, stdout, _ = _run_capture(
+        ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Label \"com.docker.compose.project\"}}"]
+    )
     if code != 0:
         return []
+    projects: set[str] = set()
+    for row in (stdout or "").splitlines():
+        row = row.strip()
+        if not row:
+            continue
+        parts = row.split("\t")
+        project = parts[1].strip() if len(parts) > 1 else ""
+        if not project.startswith("xyn-"):
+            continue
+        projects.add(project)
+
     discovered: list[dict[str, Any]] = []
-    for name in (stdout or "").splitlines():
-        name = name.strip()
-        if not name:
+    for project in sorted(projects):
+        code_names, names_out, _ = _run_capture(
+            ["docker", "ps", "-a", "--filter", f"label=com.docker.compose.project={project}", "--format", "{{.Names}}"]
+        )
+        if code_names != 0:
             continue
-        if not name.startswith("xyn-") or "-ui-" not in name:
-            continue
-        match = re.match(r"^(xyn-[a-z0-9-]+)-ui-\d+$", name)
-        if not match:
-            continue
-        project = match.group(1)
-        code, labels_json, _ = _run_capture(["docker", "inspect", "--format", "{{json .Config.Labels}}", name])
-        if code != 0:
-            continue
-        try:
-            labels = json.loads(labels_json.strip() or "{}")
-        except json.JSONDecodeError:
-            continue
-        ui_rule = next((str(v) for k, v in labels.items() if k.startswith("traefik.http.routers.") and k.endswith("-ui-http.rule")), "")
-        api_rule = ""
-        backend_name = f"{project}-backend-1"
-        code_b, labels_backend_json, _ = _run_capture(["docker", "inspect", "--format", "{{json .Config.Labels}}", backend_name])
-        if code_b == 0:
+        names = [name.strip() for name in names_out.splitlines() if name.strip()]
+        labels: dict[str, str] = {}
+        for name in names:
+            code_labels, labels_json, _ = _run_capture(["docker", "inspect", "--format", "{{json .Config.Labels}}", name])
+            if code_labels != 0:
+                continue
             try:
-                labels_backend = json.loads(labels_backend_json.strip() or "{}")
-                api_rule = next(
-                    (str(v) for k, v in labels_backend.items() if k.startswith("traefik.http.routers.") and k.endswith("-api-http.rule")),
-                    "",
-                )
+                raw_labels = json.loads(labels_json.strip() or "{}")
             except json.JSONDecodeError:
-                api_rule = ""
+                continue
+            for key, value in raw_labels.items():
+                labels[str(key)] = str(value)
+
+        ui_rule = next((str(v) for k, v in labels.items() if k.startswith("traefik.http.routers.") and k.endswith("-ui-http.rule")), "")
+        api_rule = next((str(v) for k, v in labels.items() if k.startswith("traefik.http.routers.") and k.endswith("-api-http.rule")), "")
         host_match = re.search(r"Host\(`([^`]+)`\)", ui_rule or api_rule)
         api_host_match = re.search(r"Host\(`([^`]+)`\)", api_rule)
         ui_url = f"http://{host_match.group(1)}" if host_match else ""
@@ -582,6 +600,81 @@ def _run_capture(cmd: list[str]) -> tuple[int, str, str]:
         return proc.returncode, proc.stdout, proc.stderr
     except Exception as exc:
         return 1, "", str(exc)
+
+
+def _cleanup_compose_project(project: str) -> tuple[bool, str]:
+    project_name = str(project or "").strip()
+    if not project_name:
+        return False, "missing project name"
+
+    ok = True
+    notes: list[str] = []
+
+    code, containers_out, containers_err = _run_capture(
+        ["docker", "ps", "-a", "--filter", f"label=com.docker.compose.project={project_name}", "-q"]
+    )
+    if code != 0:
+        return False, containers_err.strip() or f"failed to list containers for {project_name}"
+    container_ids = [line.strip() for line in containers_out.splitlines() if line.strip()]
+    if container_ids:
+        code, _, err = _run_capture(["docker", "rm", "-f", *container_ids])
+        if code != 0:
+            ok = False
+            notes.append(err.strip() or "failed to remove containers")
+
+    code, networks_out, networks_err = _run_capture(
+        ["docker", "network", "ls", "--filter", f"label=com.docker.compose.project={project_name}", "-q"]
+    )
+    if code != 0:
+        ok = False
+        notes.append(networks_err.strip() or "failed to list networks")
+    else:
+        network_ids = [line.strip() for line in networks_out.splitlines() if line.strip()]
+        if network_ids:
+            code, _, err = _run_capture(["docker", "network", "rm", *network_ids])
+            if code != 0:
+                ok = False
+                notes.append(err.strip() or "failed to remove networks")
+
+    code, volumes_out, volumes_err = _run_capture(
+        ["docker", "volume", "ls", "--filter", f"label=com.docker.compose.project={project_name}", "-q"]
+    )
+    if code != 0:
+        ok = False
+        notes.append(volumes_err.strip() or "failed to list volumes")
+    else:
+        volume_ids = [line.strip() for line in volumes_out.splitlines() if line.strip()]
+        if volume_ids:
+            code, _, err = _run_capture(["docker", "volume", "rm", *volume_ids])
+            if code != 0:
+                ok = False
+                notes.append(err.strip() or "failed to remove volumes")
+
+    if ok:
+        return True, ""
+    return False, "; ".join(note for note in notes if note)
+
+
+def _stop_provisioned_instances() -> tuple[list[str], list[str]]:
+    stopped: list[str] = []
+    failures: list[str] = []
+    seen_projects: set[str] = set()
+
+    state_rows = _deployment_states()
+    discovered_rows = _discover_provisioned_instances_from_docker()
+    candidates = [*state_rows, *discovered_rows]
+
+    for row in candidates:
+        project = str(row.get("compose_project") or "").strip()
+        if not project or not project.startswith("xyn-") or project in seen_projects:
+            continue
+        seen_projects.add(project)
+        ok, err = _cleanup_compose_project(project)
+        if ok:
+            stopped.append(project)
+        else:
+            failures.append(f"{project}: {err}")
+    return stopped, failures
 
 
 def status(seed_url: str) -> int:
@@ -663,6 +756,15 @@ def main() -> None:
     if cmd == "stop":
         print_info("Stopping Xyn Seed platform...")
         subprocess.run(["docker", "compose", "down"], check=False)
+        stopped_projects, failed_projects = _stop_provisioned_instances()
+        if stopped_projects:
+            print_info("Stopped provisioned sibling compose projects:")
+            for project in stopped_projects:
+                print_info(f"  - {project}")
+        if failed_projects:
+            print_warning("Some sibling projects could not be fully removed:")
+            for row in failed_projects:
+                print_warning(f"  - {row}")
         sys.exit(0)
     if cmd == "logs":
         subprocess.run(["docker", "compose", "logs", "-f"] + sys.argv[2:], check=False)

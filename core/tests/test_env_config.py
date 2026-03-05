@@ -9,7 +9,7 @@ class SeedEnvConfigTests(unittest.TestCase):
     def _base_env(self) -> dict[str, str]:
         return {
             "XYN_ENV": "local",
-            "XYN_AUTH_MODE": "simple",
+            "XYN_AUTH_MODE": "dev",
             "XYN_INTERNAL_TOKEN": "test-token",
             "DATABASE_URL": "postgresql://xyn:xyn_dev_password@postgres:5432/xyn",
             "REDIS_URL": "redis://redis:6379/0",

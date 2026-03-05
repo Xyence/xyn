@@ -20,7 +20,7 @@ This is the **v0.0 implementation** - a local-first proof of concept demonstrati
 
 ## What's NOT Included in v0.0
 
-❌ Authentication/authorization
+✅ Auth bootstrap split (`dev`, `token`, `oidc`)
 ⚠ DNS/ACME/TLS depends on host DNS + ACME env configuration
 ❌ AWS integrations
 ❌ Vault/secrets management
@@ -81,6 +81,20 @@ Local default:
 - Seed API: `http://seed.localhost`
 - Sibling UI: `http://localhost`
 - Sibling API: `http://localhost/xyn/api`
+- Auth mode: `dev` (no external IdP required)
+
+## Auth Modes (Quickstart)
+
+- `XYN_AUTH_MODE=dev` (default):
+  - local out-of-box flow
+  - `/auth/login` offers "Continue as Admin"
+  - no redirects to production domains
+- `XYN_AUTH_MODE=token`:
+  - xynctl prints bootstrap token on quickstart
+  - use token login flow in UI
+- `XYN_AUTH_MODE=oidc`:
+  - requires `XYN_OIDC_ISSUER`, `XYN_OIDC_CLIENT_ID`
+  - set `XYN_PUBLIC_BASE_URL` to the exact external origin (for local testing: `http://localhost`)
 
 ## Artifact Registry (Managed Artifact)
 
