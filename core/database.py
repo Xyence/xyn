@@ -80,8 +80,14 @@ def _apply_dev_schema_upgrades() -> None:
         """,
         "CREATE INDEX IF NOT EXISTS ix_workspaces_slug ON workspaces(slug)",
         """
-        INSERT INTO workspaces (slug, title)
-        VALUES ('default', 'Default Workspace')
+        INSERT INTO workspaces (id, slug, title, created_at, updated_at)
+        VALUES (
+          '00000000-0000-0000-0000-000000000001'::uuid,
+          'default',
+          'Default Workspace',
+          NOW(),
+          NOW()
+        )
         ON CONFLICT (slug) DO NOTHING
         """,
         "ALTER TABLE drafts ADD COLUMN IF NOT EXISTS workspace_id UUID",
@@ -89,24 +95,51 @@ def _apply_dev_schema_upgrades() -> None:
         "ALTER TABLE drafts ADD COLUMN IF NOT EXISTS title VARCHAR(255)",
         "ALTER TABLE drafts ADD COLUMN IF NOT EXISTS content_json JSON",
         "ALTER TABLE drafts ADD COLUMN IF NOT EXISTS created_by VARCHAR(255)",
+        "UPDATE drafts SET workspace_id = COALESCE(workspace_id, (SELECT id FROM workspaces WHERE slug = 'default' LIMIT 1))",
         """
-        UPDATE drafts
-        SET
-          workspace_id = COALESCE(workspace_id, (SELECT id FROM workspaces WHERE slug = 'default' LIMIT 1)),
-          type = COALESCE(type, kind, 'app_intent'),
-          title = COALESCE(title, name, 'Untitled Draft'),
-          content_json = COALESCE(content_json, definition, '{}'::json),
-          created_by = COALESCE(created_by, 'system')
+        DO $$
+        BEGIN
+          IF EXISTS (
+              SELECT 1 FROM information_schema.columns
+              WHERE table_name='drafts' AND column_name='kind'
+          ) THEN
+            UPDATE drafts SET type = COALESCE(type, kind);
+          END IF;
+        END $$;
         """,
+        "UPDATE drafts SET type = COALESCE(type, 'app_intent')",
+        """
+        DO $$
+        BEGIN
+          IF EXISTS (
+              SELECT 1 FROM information_schema.columns
+              WHERE table_name='drafts' AND column_name='name'
+          ) THEN
+            UPDATE drafts SET title = COALESCE(title, name);
+          END IF;
+        END $$;
+        """,
+        "UPDATE drafts SET title = COALESCE(title, 'Untitled Draft')",
+        """
+        DO $$
+        BEGIN
+          IF EXISTS (
+              SELECT 1 FROM information_schema.columns
+              WHERE table_name='drafts' AND column_name='definition'
+          ) THEN
+            UPDATE drafts SET content_json = COALESCE(content_json, definition);
+          END IF;
+        END $$;
+        """,
+        "UPDATE drafts SET content_json = COALESCE(content_json, '{}'::json)",
+        "UPDATE drafts SET created_by = COALESCE(created_by, 'system')",
         """
         DO $$
         BEGIN
           IF NOT EXISTS (
               SELECT 1
-              FROM information_schema.constraint_column_usage
-              WHERE table_name = 'drafts'
-                AND column_name = 'workspace_id'
-                AND constraint_name = 'fk_drafts_workspace_id'
+              FROM pg_constraint
+              WHERE conname = 'fk_drafts_workspace_id'
           ) THEN
             ALTER TABLE drafts
               ADD CONSTRAINT fk_drafts_workspace_id
@@ -121,17 +154,26 @@ def _apply_dev_schema_upgrades() -> None:
         "ALTER TABLE drafts ALTER COLUMN created_by SET NOT NULL",
         "ALTER TABLE drafts ADD COLUMN IF NOT EXISTS status_v2 VARCHAR(32)",
         """
-        UPDATE drafts
-        SET status_v2 = COALESCE(
-          status_v2,
-          CASE UPPER(COALESCE(status::text, 'DRAFT'))
-            WHEN 'DRAFT' THEN 'draft'
-            WHEN 'VALIDATED' THEN 'ready'
-            WHEN 'PROMOTED' THEN 'submitted'
-            ELSE 'draft'
-          END
-        )
+        DO $$
+        BEGIN
+          IF EXISTS (
+              SELECT 1 FROM information_schema.columns
+              WHERE table_name='drafts' AND column_name='status'
+          ) THEN
+            UPDATE drafts
+            SET status_v2 = COALESCE(
+              status_v2,
+              CASE UPPER(COALESCE(status::text, 'DRAFT'))
+                WHEN 'DRAFT' THEN 'draft'
+                WHEN 'VALIDATED' THEN 'ready'
+                WHEN 'PROMOTED' THEN 'submitted'
+                ELSE 'draft'
+              END
+            );
+          END IF;
+        END $$;
         """,
+        "UPDATE drafts SET status_v2 = COALESCE(status_v2, 'draft')",
         "ALTER TABLE drafts ALTER COLUMN status_v2 SET NOT NULL",
         """
         DO $$

@@ -56,6 +56,20 @@ def _as_bool(value: str) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _build_default_seed_url(runtime: dict[str, str]) -> str:
+    scheme = "https" if _as_bool(runtime.get("XYN_TRAEFIK_ENABLE_TLS", "false")) else "http"
+    host = str(runtime.get("XYN_SEED_HOST", "seed.localhost")).strip() or "seed.localhost"
+    if scheme == "https":
+        raw_port = str(runtime.get("XYN_TRAEFIK_WEBSECURE_PORT", "443")).strip() or "443"
+        default_port = "443"
+    else:
+        raw_port = str(runtime.get("XYN_TRAEFIK_WEB_PORT", "80")).strip() or "80"
+        default_port = "80"
+    if raw_port == default_port:
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{raw_port}"
+
+
 def _parse_args(argv: list[str]) -> dict[str, Any]:
     command = argv[1] if len(argv) > 1 and not argv[1].startswith("-") else ""
     values: dict[str, Any] = {
@@ -240,8 +254,7 @@ def build_runtime_env() -> dict[str, str]:
     runtime.setdefault("XYN_PUBLIC_BASE_URL", "http://localhost")
     runtime.setdefault("XYN_TRUST_PROXY", "true")
     if not str(runtime.get("XYN_SEED_URL", "")).strip():
-        seed_scheme = "https" if _as_bool(runtime.get("XYN_TRAEFIK_ENABLE_TLS", "false")) else "http"
-        runtime["XYN_SEED_URL"] = f"{seed_scheme}://{runtime['XYN_SEED_HOST']}"
+        runtime["XYN_SEED_URL"] = _build_default_seed_url(runtime)
     if str(runtime.get("XYN_AUTH_MODE", "")).strip().lower() == "token":
         if not str(runtime.get("XYN_UI_BEARER_TOKEN", "")).strip():
             runtime["XYN_UI_BEARER_TOKEN"] = "xyn-local-bootstrap-token"
@@ -499,6 +512,10 @@ def start(detached: bool, env: dict[str, str]) -> bool:
     print_info("Starting seed core stack...")
     if not _compose_up(detached=detached, env=env):
         return False
+    seed_url = str(env.get("XYN_SEED_URL", "")).strip() or _build_default_seed_url(env)
+    print_success("Seed core stack started")
+    print_info(f"Seed URL: {seed_url}")
+    print_info("Use this in browser (not plain http://localhost unless you mapped host rules that way).")
     return True
 
 
@@ -922,6 +939,14 @@ def main() -> None:
         )
     detached = bool(args["non_interactive"]) or not bool(args["attach"])
     ok = start(detached=detached, env=env)
+    if ok:
+        print_info("Waiting for seed API health...")
+        if _wait_for_seed_health(seed_url, timeout_seconds=180, show_progress=True):
+            print_success(f"Seed API is healthy at {seed_url}")
+        else:
+            print_error(f"Seed API did not become healthy at {seed_url}")
+            _print_seed_health_debug(seed_url)
+            ok = False
     sys.exit(0 if ok else 2)
 
 
