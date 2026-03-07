@@ -19,6 +19,16 @@ The demo must reliably show Xyn bootstrapping a fresh instance, landing in a usa
 13. Context packs and artifacts are visible through runtime APIs
 14. No critical legacy UI leaks appear on the demo path
 
+# Do Not Break List
+
+- Context packs must resolve through explicit artifact bindings
+- Palette execution must return context metadata (`context_pack_artifact_ids`, `context_pack_slugs`)
+- Runtime storage must remain under `.xyn/` and not use repo-root runtime directories
+- Artifact inventory must expose context-pack artifacts
+- Fresh instance startup must not inherit old repo-root generated artifacts
+- Workspace bootstrap must reliably produce an accessible workspace
+- The demo golden path defined in `DEMO_READINESS.md` must continue to work
+
 # Active Demo Blockers
 
 DEMO-01  
