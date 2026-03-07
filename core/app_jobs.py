@@ -24,6 +24,8 @@ from jsonschema import ValidationError, validate
 from sqlalchemy.orm import Session
 
 from core.database import SessionLocal
+from core.context_packs import default_instance_workspace_root
+from core.execution_notes import create_execution_note, update_execution_note
 from core.models import Artifact, Job, JobStatus, Workspace
 from core.palette_engine import execute_palette_prompt
 from core.primitives import get_primitive_catalog
@@ -54,7 +56,7 @@ def _safe_slug(value: str, *, default: str = "app") -> str:
 
 
 def _workspace_root() -> Path:
-    root = Path(os.getenv("XYN_LOCAL_WORKSPACE_ROOT", os.getenv("XYNSEED_WORKSPACE", "/app/workspace"))).resolve()
+    root = Path(os.getenv("XYN_LOCAL_WORKSPACE_ROOT", os.getenv("XYNSEED_WORKSPACE", default_instance_workspace_root()))).resolve()
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -176,8 +178,11 @@ def _persist_json_artifact(
     path.write_text(text, encoding="utf-8")
     row = Artifact(
         id=artifact_id,
+        workspace_id=workspace_id,
         name=name,
         kind=kind,
+        storage_scope="instance-local",
+        sync_state="local",
         content_type="application/json",
         byte_length=len(text.encode("utf-8")),
         created_by="app-job-worker",
@@ -316,6 +321,25 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
     primitive_catalog = get_primitive_catalog()
     _append_job_log(logs, f"Loaded primitive catalog ({len(primitive_catalog)} entries)")
     _append_job_log(logs, f"Generating AppSpec from prompt: {raw_prompt}")
+    note = create_execution_note(
+        db,
+        workspace_id=job.workspace_id,
+        prompt_or_request=raw_prompt,
+        findings=[
+            "App-intent draft submit reached the non-trivial generation path.",
+            "Primitive catalog inspection is required before finalizing AppSpec generation.",
+            "The prompt requests a workspace-scoped network inventory application.",
+        ],
+        root_cause="A durable AppSpec is required before deployment so runtime behavior remains auditable and artifact-linked.",
+        proposed_fix="Generate an AppSpec first, persist it as an artifact, then queue deployment and validation stages while carrying the execution note forward.",
+        implementation_summary="Started findings-first execution record for app generation.",
+        validation_summary=["AppSpec generation not yet validated at note creation time."],
+        debt_recorded=[],
+        related_artifact_ids=[],
+        status="in_progress",
+        extra_metadata={"job_id": str(job.id), "job_type": job.type},
+    )
+    _append_job_log(logs, f"Created execution-note artifact: {note.id}")
 
     app_spec = _build_app_spec(workspace_id=job.workspace_id, title=title, raw_prompt=raw_prompt)
     try:
@@ -332,6 +356,18 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
         metadata={"job_id": str(job.id)},
     )
     _append_job_log(logs, f"Persisted AppSpec artifact: {artifact_id}")
+    update_execution_note(
+        db,
+        artifact_id=note.id,
+        implementation_summary="Generated and validated AppSpec, then persisted it as an instance-local artifact for downstream deployment.",
+        validation_summary=[
+            "Primitive catalog loaded successfully.",
+            "AppSpec validated against xyn.appspec.v0 schema.",
+            f"AppSpec artifact persisted: {artifact_id}.",
+        ],
+        related_artifact_ids=[artifact_id],
+        extra_metadata_updates={"app_spec_artifact_id": artifact_id},
+    )
 
     selected_images = {svc.get("name"): svc.get("image") for svc in app_spec.get("services", []) if isinstance(svc, dict)}
     selected_ports = {
@@ -345,6 +381,7 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
             "input_json": {
                 "app_spec": app_spec,
                 "app_spec_artifact_id": artifact_id,
+                "execution_note_artifact_id": str(note.id),
                 "source_job_id": str(job.id),
             },
         }
@@ -358,6 +395,7 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
             "selected_images": selected_images,
             "selected_ports": selected_ports,
             "derived_urls": {"seed_ui": "http://localhost", "seed_api": "http://seed.localhost"},
+            "execution_note_artifact_id": str(note.id),
         },
         follow_up,
     )
@@ -365,6 +403,7 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
 
 def _handle_deploy_app_local(db: Session, job: Job, logs: list[str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     payload = job.input_json or {}
+    execution_note_artifact_id = str(payload.get("execution_note_artifact_id") or "").strip()
     app_spec = payload.get("app_spec") if isinstance(payload.get("app_spec"), dict) else {}
     app_slug = _safe_slug(str(app_spec.get("app_slug") or "net-inventory"), default="net-inventory")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
@@ -393,6 +432,20 @@ def _handle_deploy_app_local(db: Session, job: Job, logs: list[str]) -> tuple[di
         "app_url": f"http://localhost:{app_port}",
         "ports": {"app_tcp": app_port},
     }
+    if execution_note_artifact_id:
+        update_execution_note(
+            db,
+            artifact_id=uuid.UUID(execution_note_artifact_id),
+            implementation_summary="Materialized local docker-compose deployment for the generated app and resolved a running app URL.",
+            append_validation=[
+                f"Compose written: {compose_path}",
+                f"Local deployment started successfully at {app_output['app_url']}.",
+            ],
+            related_artifact_ids=[
+                *[str(item) for item in (payload.get('app_spec_artifact_id'), execution_note_artifact_id) if item],
+            ],
+            extra_metadata_updates={"app_url": app_output["app_url"], "compose_project": compose_project},
+        )
     _append_job_log(logs, f"Local app URL: {app_output['app_url']}")
     _append_job_log(logs, "Queued sibling provisioning stage")
     follow_up = [
@@ -401,6 +454,7 @@ def _handle_deploy_app_local(db: Session, job: Job, logs: list[str]) -> tuple[di
             "input_json": {
                 "deployment": app_output,
                 "app_spec": app_spec,
+                "execution_note_artifact_id": execution_note_artifact_id,
                 "source_job_id": str(job.id),
             },
         }
@@ -410,6 +464,7 @@ def _handle_deploy_app_local(db: Session, job: Job, logs: list[str]) -> tuple[di
 
 def _handle_provision_sibling_xyn(db: Session, job: Job, logs: list[str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     payload = job.input_json or {}
+    execution_note_artifact_id = str(payload.get("execution_note_artifact_id") or "").strip()
     deployment = payload.get("deployment") if isinstance(payload.get("deployment"), dict) else {}
     workspace = db.query(Workspace).filter(Workspace.id == job.workspace_id).first()
     workspace_slug = str(getattr(workspace, "slug", "default") or "default")
@@ -437,12 +492,27 @@ def _handle_provision_sibling_xyn(db: Session, job: Job, logs: list[str]) -> tup
         "ui_url": sibling.get("ui_url"),
         "api_url": sibling.get("api_url"),
     }
+    if execution_note_artifact_id:
+        update_execution_note(
+            db,
+            artifact_id=uuid.UUID(execution_note_artifact_id),
+            implementation_summary="Provisioned a sibling Xyn instance as the next validation environment for the generated application.",
+            append_validation=[
+                f"Sibling Xyn provisioned with ui_url={sibling_output.get('ui_url')}",
+                f"Sibling Xyn provisioned with api_url={sibling_output.get('api_url')}",
+            ],
+            extra_metadata_updates={
+                "sibling_ui_url": sibling_output.get("ui_url"),
+                "sibling_api_url": sibling_output.get("api_url"),
+            },
+        )
     follow_up = [
         {
             "type": "smoke_test",
             "input_json": {
                 "deployment": deployment,
                 "sibling": sibling_output,
+                "execution_note_artifact_id": execution_note_artifact_id,
                 "source_job_id": str(job.id),
             },
         }
@@ -452,6 +522,7 @@ def _handle_provision_sibling_xyn(db: Session, job: Job, logs: list[str]) -> tup
 
 def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     payload = job.input_json or {}
+    execution_note_artifact_id = str(payload.get("execution_note_artifact_id") or "").strip()
     deployment = payload.get("deployment") if isinstance(payload.get("deployment"), dict) else {}
     sibling = payload.get("sibling") if isinstance(payload.get("sibling"), dict) else {}
     app_container_name = str(deployment.get("app_container_name") or "").strip()
@@ -532,6 +603,19 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
     if not isinstance(palette_result.get("rows"), list) or not palette_result.get("rows"):
         raise RuntimeError("Palette show devices returned no rows")
     _append_job_log(logs, f"Palette check returned {len(palette_result.get('rows') or [])} rows")
+    if execution_note_artifact_id:
+        update_execution_note(
+            db,
+            artifact_id=uuid.UUID(execution_note_artifact_id),
+            implementation_summary="Completed deployment smoke tests, sibling reachability checks, and palette verification for the generated application.",
+            append_validation=[
+                "App health endpoint returned 200.",
+                "Device CRUD smoke checks succeeded.",
+                "Sibling Xyn health check succeeded.",
+                f"Palette returned {len(palette_result.get('rows') or [])} rows for show devices.",
+            ],
+            status="completed",
+        )
 
     return (
         {
@@ -641,6 +725,18 @@ def _execute_job(job_id: uuid.UUID) -> None:
             output_json = output_json or {}
             output_json["error"] = str(exc)
             job.output_json = output_json
+            execution_note_artifact_id = str((job.input_json or {}).get("execution_note_artifact_id") or (output_json or {}).get("execution_note_artifact_id") or "").strip()
+            if execution_note_artifact_id:
+                try:
+                    update_execution_note(
+                        db,
+                        artifact_id=uuid.UUID(execution_note_artifact_id),
+                        implementation_summary=f"Execution stopped during job type={job.type}.",
+                        append_validation=[f"Failure during {job.type}: {exc}"],
+                        status="failed",
+                    )
+                except Exception:
+                    pass
             _append_job_log(logs, f"Job failed: {exc}")
         existing = job.logs_text.rstrip() + "\n" if job.logs_text else ""
         job.logs_text = existing + "\n".join(logs)

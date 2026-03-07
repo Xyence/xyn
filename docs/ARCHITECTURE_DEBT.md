@@ -46,6 +46,13 @@ Why It Exists: Automatic destructive cleanup would be risky during active develo
 Risk: Mistaken assumptions about canonical storage or accidental manual reuse of stale files.  
 Planned Resolution: Add a clearer cleanup command or migration helper once the runtime storage transition is fully stable.
 
+DEBT-PROTO-01  
+Title: Execution-note protocol minimal implementation  
+Description: The current execution-note mechanism captures findings, root cause, proposed fix, implementation summary, and validation for non-trivial generation work, but it is not yet a full planning subsystem or universal governance layer.  
+Why It Exists: This is the smallest safe change before the demo that adds durable reasoning records without redesigning the artifact system.  
+Risk: Coverage is partial and currently focused on the app-builder generation pipeline.  
+Planned Resolution: Expand execution-note coverage into a fuller autonomous planning/governance artifact system after the demo.
+
 # Temporary Workarounds Protocol
 
 Whenever a temporary workaround is introduced, record:

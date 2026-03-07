@@ -50,6 +50,7 @@ DEFAULT_ARTIFACT_REGISTRY = "public.ecr.aws/i0h0h0n4/xyn/artifacts"
 DEFAULT_UI_IMAGE_NAME = "xyn-ui"
 DEFAULT_API_IMAGE_NAME = "xyn-api"
 DEFAULT_IMAGE_TAG = "dev"
+DEFAULT_CONTEXT_PACK_MANIFEST = ".xyn/sync/context-packs.manifest.json"
 
 
 def _as_bool(value: str) -> bool:
@@ -235,10 +236,71 @@ def check_docker_compose() -> bool:
 
 
 def create_artifacts_dir() -> bool:
-    path = Path("artifacts")
-    if not path.exists():
-        path.mkdir(parents=True)
-        print_success("Created artifacts directory")
+    roots = [
+        Path(".xyn/artifacts"),
+        Path(".xyn/workspace"),
+        Path(".xyn/deployments"),
+        Path(".xyn/sync"),
+    ]
+    legacy_roots = [Path("artifacts"), Path("workspace")]
+    created = False
+    for path in roots:
+        if not path.exists():
+            path.mkdir(parents=True)
+            created = True
+    legacy_present = [str(path) for path in legacy_roots if path.exists()]
+    if created:
+        print_success("Created local Xyn runtime directories under .xyn/")
+    if legacy_present:
+        print_warning(
+            "Legacy repo-root runtime directories detected: "
+            + ", ".join(legacy_present)
+            + ". They are no longer used as canonical runtime storage."
+        )
+    return True
+
+
+def _find_xyn_platform_root() -> Optional[Path]:
+    override = str(os.getenv("XYN_PLATFORM_ROOT", "")).strip()
+    if override:
+        path = Path(override).expanduser().resolve()
+        if path.exists():
+            return path
+    sibling = Path.cwd().resolve().parent / "xyn-platform"
+    if sibling.exists():
+        return sibling
+    return None
+
+
+def sync_context_pack_manifest() -> bool:
+    output_path = Path(DEFAULT_CONTEXT_PACK_MANIFEST)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    platform_root = _find_xyn_platform_root()
+    if platform_root is None:
+        if output_path.exists():
+            print_warning("xyn-platform repo not found; using existing synced context-pack manifest")
+        else:
+            print_warning("xyn-platform repo not found; xyn-core will fall back to builtin context-pack definitions")
+        return True
+    script_path = platform_root / "services" / "xyn-api" / "backend" / "scripts" / "export_core_context_packs.py"
+    if not script_path.exists():
+        if output_path.exists():
+            print_warning("Context-pack export script not found in xyn-platform; using existing synced manifest")
+        else:
+            print_warning("Context-pack export script not found in xyn-platform; xyn-core will fall back to builtin context-pack definitions")
+        return True
+    result = subprocess.run(
+        [sys.executable, str(script_path), "--output", str(output_path.resolve())],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print_warning("Context-pack manifest sync failed; xyn-core may use fallback definitions")
+        if result.stderr.strip():
+            print_warning(result.stderr.strip())
+        return True
+    print_success(f"Synchronized context-pack manifest from xyn-platform to {output_path}")
     return True
 
 
@@ -253,6 +315,7 @@ def build_runtime_env() -> dict[str, str]:
     runtime.setdefault("XYN_AUTH_MODE", "dev")
     runtime.setdefault("XYN_PUBLIC_BASE_URL", "http://localhost")
     runtime.setdefault("XYN_TRUST_PROXY", "true")
+    runtime.setdefault("XYN_CONTEXT_PACK_MANIFEST_PATH", "/app/.xyn/sync/context-packs.manifest.json")
     if not str(runtime.get("XYN_SEED_URL", "")).strip():
         runtime["XYN_SEED_URL"] = _build_default_seed_url(runtime)
     if str(runtime.get("XYN_AUTH_MODE", "")).strip().lower() == "token":
@@ -276,6 +339,7 @@ def preflight(skip_ai_keys: bool) -> bool:
         ("Docker", check_docker),
         ("Docker Compose", check_docker_compose),
         ("Artifacts directory", create_artifacts_dir),
+        ("Context-pack manifest sync", sync_context_pack_manifest),
     ]
     all_passed = True
     for _, fn in checks:

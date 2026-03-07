@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 
 from sqlalchemy.orm import Session
 
+from core.context_packs import resolve_bound_context_pack_artifacts
 from core.net_inventory_client import deployment_request_json, http_request_json, latest_deployment_for_workspace
 from core.palette_commands import build_palette_result_from_items, resolve_palette_command
 from core.workspaces import resolve_workspace_by_context
@@ -42,6 +43,7 @@ def execute_palette_prompt(
         workspace_id=workspace_id,
         workspace_slug=workspace_slug,
     )
+    context_packs, context_warnings = resolve_bound_context_pack_artifacts(db, workspace=workspace)
     command = resolve_palette_command(db, workspace_id=workspace.id, prompt=prompt)
     if not command:
         return {
@@ -49,7 +51,12 @@ def execute_palette_prompt(
             "columns": [],
             "rows": [],
             "text": "No matching palette command found.",
-            "meta": {"workspace_id": str(workspace.id)},
+            "meta": {
+                "workspace_id": str(workspace.id),
+                "context_pack_artifact_ids": [str(pack.id) for pack in context_packs],
+                "context_pack_slugs": [str((pack.extra_metadata or {}).get("pack_slug") or pack.name) for pack in context_packs],
+                "context_warnings": context_warnings,
+            },
         }
 
     config = command.handler_config_json if isinstance(command.handler_config_json, dict) else {}
@@ -60,7 +67,13 @@ def execute_palette_prompt(
             "columns": [],
             "rows": [],
             "text": f"Unsupported handler_type: {handler_type or '<empty>'}",
-            "meta": {"workspace_id": str(workspace.id), "command_id": str(command.id)},
+            "meta": {
+                "workspace_id": str(workspace.id),
+                "command_id": str(command.id),
+                "context_pack_artifact_ids": [str(pack.id) for pack in context_packs],
+                "context_pack_slugs": [str((pack.extra_metadata or {}).get("pack_slug") or pack.name) for pack in context_packs],
+                "context_warnings": context_warnings,
+            },
         }
 
     method = str(config.get("method") or "GET").upper()
@@ -105,7 +118,13 @@ def execute_palette_prompt(
             "columns": [],
             "rows": [],
             "text": f"Command failed ({code}): {raw}",
-            "meta": {"workspace_id": str(workspace.id), "command_id": str(command.id)},
+            "meta": {
+                "workspace_id": str(workspace.id),
+                "command_id": str(command.id),
+                "context_pack_artifact_ids": [str(pack.id) for pack in context_packs],
+                "context_pack_slugs": [str((pack.extra_metadata or {}).get("pack_slug") or pack.name) for pack in context_packs],
+                "context_warnings": context_warnings,
+            },
         }
 
     items = body.get("items") if isinstance(body.get("items"), list) else []
@@ -123,5 +142,8 @@ def execute_palette_prompt(
         "command_id": str(command.id),
         "command_key": command.command_key,
         "base_url": base_url,
+        "context_pack_artifact_ids": [str(pack.id) for pack in context_packs],
+        "context_pack_slugs": [str((pack.extra_metadata or {}).get("pack_slug") or pack.name) for pack in context_packs],
+        "context_warnings": context_warnings,
     }
     return result

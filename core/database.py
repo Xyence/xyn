@@ -284,6 +284,30 @@ def _apply_dev_schema_upgrades() -> None:
         "CREATE INDEX IF NOT EXISTS ix_locations_workspace_id ON locations(workspace_id)",
         "CREATE INDEX IF NOT EXISTS ix_locations_workspace_kind ON locations(workspace_id, kind)",
         "CREATE INDEX IF NOT EXISTS ix_locations_workspace_parent ON locations(workspace_id, parent_location_id)",
+        "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS workspace_id UUID",
+        """
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+              SELECT 1
+              FROM pg_constraint
+              WHERE conname = 'fk_artifacts_workspace_id'
+          ) THEN
+            ALTER TABLE artifacts
+              ADD CONSTRAINT fk_artifacts_workspace_id
+              FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE SET NULL;
+          END IF;
+        END $$;
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_artifacts_workspace_id ON artifacts(workspace_id)",
+        "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS storage_scope VARCHAR(32)",
+        "UPDATE artifacts SET storage_scope = COALESCE(NULLIF(storage_scope, ''), 'instance-local')",
+        "ALTER TABLE artifacts ALTER COLUMN storage_scope SET NOT NULL",
+        "CREATE INDEX IF NOT EXISTS ix_artifacts_storage_scope ON artifacts(storage_scope)",
+        "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS sync_state VARCHAR(32)",
+        "UPDATE artifacts SET sync_state = COALESCE(NULLIF(sync_state, ''), 'local')",
+        "ALTER TABLE artifacts ALTER COLUMN sync_state SET NOT NULL",
+        "CREATE INDEX IF NOT EXISTS ix_artifacts_sync_state ON artifacts(sync_state)",
         """
         CREATE TABLE IF NOT EXISTS palette_commands (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -299,6 +323,8 @@ def _apply_dev_schema_upgrades() -> None:
         "CREATE INDEX IF NOT EXISTS ix_palette_commands_workspace_command ON palette_commands(workspace_id, command_key)",
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_palette_commands_global_command ON palette_commands(command_key) WHERE workspace_id IS NULL",
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_palette_commands_workspace_command ON palette_commands(workspace_id, command_key) WHERE workspace_id IS NOT NULL",
+        "ALTER TABLE workspace_settings ADD COLUMN IF NOT EXISTS default_context_pack_artifact_ids_json JSON NOT NULL DEFAULT '[]'::json",
+        "ALTER TABLE workspace_settings ADD COLUMN IF NOT EXISTS artifact_sync_target VARCHAR(512)",
     ]
     with engine.begin() as conn:
         for statement in statements:

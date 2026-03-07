@@ -17,6 +17,8 @@ This is the **v0.0 implementation** - a local-first proof of concept demonstrati
 ✅ REST API (versioned `/api/v1`)
 ✅ `xynctl` bootstrap tool with preflight checks
 ✅ Kernel boot mode that dynamically loads workspace-bound artifacts
+✅ Instance-local runtime storage under `.xyn/`
+✅ Context-pack bridge from `xyn-platform` authority into `xyn-core` runtime
 
 ## What's NOT Included in v0.0
 
@@ -228,6 +230,8 @@ XYN_KERNEL_MANIFEST_ROOTS=/home/ubuntu/src
 - `GET /api/v1/artifacts` - List artifacts
 - `GET /api/v1/artifacts/{id}` - Get artifact metadata
 - `GET /api/v1/artifacts/{id}/download` - Download artifact
+- `GET /api/v1/context-packs` - List governed context-pack artifacts
+- `GET|PATCH /api/v1/context-packs/bindings` - Inspect/update explicit workspace context-pack bindings
 
 ### Drafts (workspace scoped)
 
@@ -348,10 +352,20 @@ xyn-seed/
 │       ├── events.html
 │       ├── runs.html
 │       └── ...
-├── artifacts/              # LocalFS artifact storage
+├── .xyn/artifacts/         # Instance-local artifact storage
+├── .xyn/workspace/         # Instance-local generated specs / bundles
+├── .xyn/deployments/       # Instance-local local deployment manifests
+├── .xyn/sync/              # Synced runtime manifests (for example context packs)
 ├── SMOKE.md                # Smoke test guide
 └── README.md               # This file
 ```
+
+### Context Packs
+
+- `xyn-platform` remains authoritative for context-pack governance.
+- `xynctl` synchronizes runtime context-pack definitions into `.xyn/sync/context-packs.manifest.json`.
+- `xyn-core` consumes that manifest and exposes synchronized context-pack artifacts via `/api/v1/context-packs`.
+- See [docs/context-pack-bridge.md](/home/jrestivo/src/xyn/docs/context-pack-bridge.md).
 
 ### Viewing Logs
 

@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from core.artifact_registry import resolve_registry_images
+from core.context_packs import default_instance_deployments_root, default_instance_workspace_root
 from core.database import SessionLocal
 from core.models import Artifact
 
@@ -32,13 +33,13 @@ def _utc_now() -> datetime:
 
 
 def _deployments_root() -> Path:
-    root = Path(os.getenv("XYN_LOCAL_DEPLOYMENTS_ROOT", ".xyn/deployments")).resolve()
+    root = Path(os.getenv("XYN_LOCAL_DEPLOYMENTS_ROOT", default_instance_deployments_root())).resolve()
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
 def _workspace_root() -> Path:
-    return Path(os.getenv("XYN_LOCAL_WORKSPACE_ROOT", ".xyn/workspace")).resolve()
+    return Path(os.getenv("XYN_LOCAL_WORKSPACE_ROOT", default_instance_workspace_root())).resolve()
 
 
 def _state_path(deploy_dir: Path) -> Path:
@@ -284,6 +285,8 @@ def _write_text_artifact(db: Session, *, name: str, kind: str, content: str, met
         id=uuid.UUID(artifact_id),
         name=name,
         kind=kind,
+        storage_scope="instance-local",
+        sync_state="local",
         content_type="text/plain",
         byte_length=len(content.encode("utf-8")),
         created_by="xyn-seed",
@@ -308,6 +311,8 @@ def _write_json_artifact(db: Session, *, name: str, kind: str, payload: Dict[str
         id=uuid.UUID(artifact_id),
         name=name,
         kind=kind,
+        storage_scope="instance-local",
+        sync_state="local",
         content_type="application/json",
         byte_length=len(text.encode("utf-8")),
         created_by="xyn-seed",

@@ -289,8 +289,11 @@ class Artifact(Base):
     __tablename__ = "artifacts"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id = Column(UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=True, index=True)
     name = Column(String(255), nullable=False)
     kind = Column(String(50), nullable=False)  # log, report, bundle, file
+    storage_scope = Column(String(32), nullable=False, default="instance-local", index=True)
+    sync_state = Column(String(32), nullable=False, default="local", index=True)
     content_type = Column(String(255), nullable=False)
     byte_length = Column(BigInteger, nullable=True)
     sha256 = Column(String(64), nullable=True)
@@ -302,6 +305,7 @@ class Artifact(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
 
     # Relationships
+    workspace = relationship("Workspace", foreign_keys=[workspace_id])
     run = relationship("Run", back_populates="artifacts", foreign_keys=[run_id])
     step = relationship("Step", back_populates="artifacts", foreign_keys=[step_id])
 
@@ -313,6 +317,8 @@ class WorkspaceSetting(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     workspace_slug = Column(String(255), nullable=False, unique=True, index=True)
     default_artifact_registry_slug = Column(String(255), nullable=False, default="default-registry")
+    default_context_pack_artifact_ids_json = Column(JSON, nullable=False, default=list)
+    artifact_sync_target = Column(String(512), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 

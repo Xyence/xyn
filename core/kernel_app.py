@@ -16,9 +16,11 @@ from core import __version__
 from core.ai_bootstrap import ensure_default_agent_via_api
 from core.app_jobs import AppJobWorkerHandle, start_app_job_worker, stop_app_job_worker
 from core.artifact_registry import ensure_seed_default_registry
+from core.api.artifacts import router as artifacts_router
 from core.api.drafts import router as drafts_router
 from core.api.jobs import router as jobs_router
 from core.api.locations import router as locations_router
+from core.api.context_packs import router as context_packs_router
 from core.api.palette import router as palette_router
 from core.api.primitives import router as primitives_router
 from core.api.workspaces import router as workspaces_router
@@ -29,6 +31,7 @@ from core.database import init_db
 from core.database import SessionLocal
 from core.env_config import export_runtime_env, load_seed_config
 from core.kernel_loader import load_workspace_artifacts_into_app
+from core.context_packs import ensure_runtime_context_pack_artifacts
 from core.api.artifact_registries import router as artifact_registry_router
 from core.workspaces import ensure_default_workspace
 
@@ -78,6 +81,7 @@ async def _lifespan(app: FastAPI):
     try:
         ensure_default_workspace(db)
         ensure_seed_default_registry(db)
+        ensure_runtime_context_pack_artifacts(db)
         ensure_default_palette_commands(db)
     finally:
         db.close()
@@ -147,9 +151,11 @@ def create_app() -> FastAPI:
 
     app.include_router(provisioning_router)
     app.include_router(artifact_registry_router)
+    app.include_router(artifacts_router, prefix="/api/v1", tags=["Artifacts"])
     app.include_router(drafts_router, prefix="/api/v1", tags=["Drafts"])
     app.include_router(jobs_router, prefix="/api/v1", tags=["Jobs"])
     app.include_router(locations_router, prefix="/api/v1", tags=["Locations"])
+    app.include_router(context_packs_router, prefix="/api/v1", tags=["Context Packs"])
     app.include_router(workspaces_router, prefix="/api/v1", tags=["Workspaces"])
     app.include_router(primitives_router, prefix="/api/v1", tags=["Primitives"])
     app.include_router(palette_router, prefix="/api/v1", tags=["Palette"])

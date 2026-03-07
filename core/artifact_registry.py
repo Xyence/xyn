@@ -164,6 +164,8 @@ def upsert_registry_spec(db: Session, spec: Dict[str, Any], *, created_by: str =
         target = Artifact(
             name=slug,
             kind="artifact-registry",
+            storage_scope="instance-local",
+            sync_state="local",
             content_type="application/json",
             byte_length=len(payload_json.encode("utf-8")),
             sha256=None,
@@ -174,6 +176,8 @@ def upsert_registry_spec(db: Session, spec: Dict[str, Any], *, created_by: str =
         db.add(target)
     else:
         target.name = slug
+        target.storage_scope = "instance-local"
+        target.sync_state = "local"
         target.content_type = "application/json"
         target.byte_length = len(payload_json.encode("utf-8"))
         target.extra_metadata = metadata

@@ -4,17 +4,19 @@ import os
 from typing import Optional
 from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
+from pathlib import Path
 from sqlalchemy.orm import Session
 
 from core.database import get_db
 from core import models, schemas
 from core.artifact_store import LocalFSArtifactStore
+from core.context_packs import default_instance_artifact_root
 
 router = APIRouter()
 
 # Initialize artifact store
 artifact_store = LocalFSArtifactStore(
-    base_path=os.getenv("ARTIFACT_STORE_PATH", "./artifacts")
+    base_path=os.getenv("ARTIFACT_STORE_PATH", default_instance_artifact_root())
 )
 
 
@@ -24,8 +26,11 @@ async def create_artifact(
     kind: str,
     content_type: str,
     file: UploadFile = File(...),
+    workspace_id: Optional[uuid.UUID] = None,
     run_id: Optional[uuid.UUID] = None,
     step_id: Optional[uuid.UUID] = None,
+    storage_scope: str = "instance-local",
+    sync_state: str = "local",
     db: Session = Depends(get_db)
 ):
     """Create and upload an artifact.
@@ -58,8 +63,11 @@ async def create_artifact(
     # Create artifact record
     artifact = models.Artifact(
         id=artifact_id,
+        workspace_id=workspace_id,
         name=name,
         kind=kind,
+        storage_scope=str(storage_scope or "instance-local").strip() or "instance-local",
+        sync_state=str(sync_state or "local").strip() or "local",
         content_type=content_type,
         byte_length=len(content),
         sha256=sha256_hash,
@@ -97,8 +105,11 @@ async def create_artifact(
 async def list_artifacts(
     limit: int = Query(50, ge=1, le=500),
     cursor: Optional[str] = None,
+    workspace_id: Optional[uuid.UUID] = None,
     run_id: Optional[uuid.UUID] = None,
     kind: Optional[str] = None,
+    storage_scope: Optional[str] = None,
+    sync_state: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     """List artifacts with optional filtering and pagination.
@@ -116,10 +127,16 @@ async def list_artifacts(
     query = db.query(models.Artifact)
 
     # Apply filters
+    if workspace_id:
+        query = query.filter(models.Artifact.workspace_id == workspace_id)
     if run_id:
         query = query.filter(models.Artifact.run_id == run_id)
     if kind:
         query = query.filter(models.Artifact.kind == kind)
+    if storage_scope:
+        query = query.filter(models.Artifact.storage_scope == storage_scope.strip())
+    if sync_state:
+        query = query.filter(models.Artifact.sync_state == sync_state.strip())
 
     # Order by created_at descending, then id descending for stable ordering
     query = query.order_by(models.Artifact.created_at.desc(), models.Artifact.id.desc())
@@ -199,8 +216,11 @@ async def download_artifact(
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
-    # Get artifact path from store
+    # Prefer the artifact store path, but allow explicitly persisted storage_path
+    # for artifact kinds that are written outside the generic artifact store.
     artifact_path = artifact_store.get_path(artifact_id)
+    if (not artifact_path or not artifact_path.exists()) and artifact.storage_path:
+        artifact_path = Path(str(artifact.storage_path))
 
     if not artifact_path or not artifact_path.exists():
         raise HTTPException(status_code=404, detail="Artifact content not found")

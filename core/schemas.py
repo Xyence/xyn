@@ -175,8 +175,11 @@ class ArtifactCreateRequest(BaseModel):
 class Artifact(BaseModel):
     """Artifact response model."""
     artifact_id: UUID = Field(alias="id")
+    workspace_id: Optional[UUID] = None
     name: str
     kind: str
+    storage_scope: str
+    sync_state: str
     content_type: str
     byte_length: Optional[int] = None
     created_at: datetime
@@ -195,8 +198,11 @@ class Artifact(BaseModel):
         """Convert ORM model to schema."""
         return cls(
             id=artifact.id,
+            workspace_id=artifact.workspace_id,
             name=artifact.name,
             kind=artifact.kind,
+            storage_scope=getattr(artifact, "storage_scope", "instance-local"),
+            sync_state=getattr(artifact, "sync_state", "local"),
             content_type=artifact.content_type,
             byte_length=artifact.byte_length,
             created_at=artifact.created_at,

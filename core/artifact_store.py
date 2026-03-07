@@ -6,11 +6,13 @@ from pathlib import Path
 from typing import BinaryIO, Optional
 from uuid import UUID
 
+DEFAULT_ARTIFACT_ROOT = ".xyn/artifacts"
+
 
 class LocalFSArtifactStore:
     """Local filesystem-based artifact storage."""
 
-    def __init__(self, base_path: str = "./artifacts"):
+    def __init__(self, base_path: str = DEFAULT_ARTIFACT_ROOT):
         """Initialize the artifact store.
 
         Args:

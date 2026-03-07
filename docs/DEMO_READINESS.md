@@ -114,8 +114,23 @@ TASK-07
 Task Name: Prepare repeatable golden-path validation script/checklist  
 Why It Matters for Demo: Fast regression detection is required during the demo-prep window.  
 Owner: Codex  
-Status: pending  
-Notes: Prefer a lightweight scripted checklist tied directly to the golden path.
+Status: complete  
+Notes: Added a browser-driven Playwright smoke test in `xyn-platform/apps/xyn-ui/e2e/demo-golden-path.spec.ts` and validated it locally on 2026-03-07 against the visible UI path. The smoke covers login, build prompt submission, draft creation, build tracking, execution trace visibility, deployed app open action, palette command submission, and artifact visibility for generated `app_spec` artifacts.
+
+TASK-08  
+Task Name: Expose execution-trace proof point on build tracking surface  
+Why It Matters for Demo: The demo needs a visible proof that non-trivial generation work records findings, proposed fixes, validation, and transitional notes durably.  
+Owner: Codex  
+Status: complete  
+Notes: Implemented as a compact Execution Trace card on Draft Detail backed by same-origin `xyn-api` execution-note proxy endpoints. The card only renders notes that are explicitly linked to the current build chain and otherwise shows an empty linked-state message instead of guessing. Validated on 2026-03-07 with an authenticated draft submission against the `default` workspace: the proxy returned execution-note `54b31828-00fd-4311-97d7-c7d86ed0c4db` matched by `related_artifact_ids` for generated AppSpec `68995707-552b-4f5b-bb4a-ffa3bbe34eb4`.
+
+DEMO-PROTO-01  
+Title: Findings-First Implementation Protocol  
+Description: Xyn now records execution/design notes for non-trivial generation and artifact modification tasks.  
+Why It Matters: reduces architectural drift and provides shared reasoning context between automated development steps.  
+Owner: Codex  
+Status: implemented  
+Notes: Initial implementation is runtime-only and currently hooks into the app-builder generation pipeline through `execution-note` artifacts. Validated on 2026-03-07: migrations no-op cleanly, `xynctl quickstart --force` booted successfully, context-pack APIs and artifact inventory responded, palette metadata remained intact, app generation succeeded, and execution-note artifact `c105190a-92f4-49fc-b81d-43723004e18b` completed with validation details. The Draft Detail surface now renders a minimal Execution Trace card from stored execution-note records through a same-origin proxy when an explicit build-chain match exists.
 
 # Validation Checklist
 
@@ -136,3 +151,4 @@ Notes: Prefer a lightweight scripted checklist tied directly to the golden path.
 - sibling install story is coherent for the demo path
 - `show devices` returns structured results
 - no critical legacy UI leaks on the golden path
+- browser-driven golden-path smoke passes against the visible UI, not just API calls

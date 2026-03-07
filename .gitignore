@@ -47,6 +47,7 @@ Thumbs.db
 # Xyn Seed specific
 artifacts/
 workspace/
+.xyn/
 *.db
 *.log
 
