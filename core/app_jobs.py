@@ -914,6 +914,11 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
     )
     _append_job_log(logs, f"Created execution-note artifact: {note.id}")
 
+    # TODO(artifact-first, DEBT-07):
+    # The generated artifact now acts as the canonical runtime identity.
+    # AppSpec remains primarily a build intermediate. Future work may
+    # consolidate AppSpec into an ArtifactSpec so prompts generate artifacts
+    # directly while preserving the current packaging and install semantics.
     app_spec = _build_app_spec(workspace_id=job.workspace_id, title=title, raw_prompt=raw_prompt)
     try:
         validate(instance=app_spec, schema=_load_appspec_schema())
@@ -1115,94 +1120,80 @@ def _handle_provision_sibling_xyn(db: Session, job: Job, logs: list[str]) -> tup
         preferred_artifact_slug = str(generated_artifact.get("artifact_slug") or "").strip()
         preferred_artifact_version = str(generated_artifact.get("artifact_version") or "").strip()
         preferred_artifact_package_path = Path(str(generated_artifact.get("artifact_package_path") or "")).expanduser()
-        installed_from_generated = False
-        if preferred_artifact_slug and preferred_artifact_package_path.exists():
-            try:
-                sibling_registry_import = _import_generated_artifact_package_into_registry(
-                    container_name=sibling_api_container,
-                    artifact_slug=preferred_artifact_slug,
-                    package_path=preferred_artifact_package_path,
-                    port=8000,
-                )
-                _append_job_log(
-                    logs,
-                    f"Imported generated artifact {preferred_artifact_slug}@{preferred_artifact_version or GENERATED_ARTIFACT_VERSION} into sibling registry",
-                )
-                installed_artifact = _install_generated_artifact_in_sibling(
-                    sibling_api_container=sibling_api_container,
-                    workspace_slug=workspace_slug,
-                    artifact_slug=preferred_artifact_slug,
-                    artifact_version=preferred_artifact_version,
-                )
-                installed_from_generated = True
-                _append_job_log(
-                    logs,
-                    f"Installed generated artifact {preferred_artifact_slug}@{preferred_artifact_version or 'latest'} into sibling workspace",
-                )
-            except Exception as exc:
-                _append_job_log(
-                    logs,
-                    f"Generated artifact install failed for {preferred_artifact_slug}@{preferred_artifact_version or 'latest'}; falling back to bridge artifact: {exc}",
-                )
-        if not installed_artifact:
-            # Temporary bridge fallback: the sibling installs the packaged Django-side
-            # net-inventory artifact for capability counting and UI visibility.
-            # This remains only until generated artifacts are promoted/imported/installed natively.
-            installed_artifact = _install_generated_artifact_in_sibling(
-                sibling_api_container=sibling_api_container,
-                workspace_slug=workspace_slug,
-                artifact_slug="net-inventory",
+        if not preferred_artifact_slug or not preferred_artifact_package_path.exists():
+            raise RuntimeError(
+                f"Generated artifact package is missing for sibling install: "
+                f"slug={preferred_artifact_slug or '<empty>'} path={preferred_artifact_package_path}"
             )
-        sibling_output["installed_artifact"] = installed_artifact
-        sibling_output["installed_artifact_source"] = "generated" if installed_from_generated else "bridge_fallback"
-        if sibling_registry_import:
-            sibling_output["generated_artifact_registry_import"] = sibling_registry_import
+        sibling_registry_import = _import_generated_artifact_package_into_registry(
+            container_name=sibling_api_container,
+            artifact_slug=preferred_artifact_slug,
+            package_path=preferred_artifact_package_path,
+            port=8000,
+        )
         _append_job_log(
             logs,
-            "Installed sibling artifact "
-            f"workspace={installed_artifact.get('workspace_slug')} artifact={installed_artifact.get('artifact_slug')} "
-            f"source={'generated' if installed_from_generated else 'bridge_fallback'}",
+            f"Imported generated artifact {preferred_artifact_slug}@{preferred_artifact_version or GENERATED_ARTIFACT_VERSION} into sibling registry",
         )
-        app_spec = payload.get("app_spec") if isinstance(payload.get("app_spec"), dict) else {}
-        app_slug = _safe_slug(str(app_spec.get("app_slug") or "net-inventory"), default="net-inventory")
-        if not sibling_network or not _docker_network_exists(sibling_network):
-            raise RuntimeError(f"Sibling network not available for runtime target registration: {sibling_network or '<empty>'}")
-        sibling_stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-        sibling_runtime_project = _safe_slug(f"xyn-sibling-{app_slug}-{str(job.id)[:6]}", default="xyn-sibling-app")
-        sibling_runtime_dir = _deployments_root() / app_slug / f"sibling-{sibling_stamp}-{str(job.id)[:6]}"
-        sibling_runtime_dir.mkdir(parents=True, exist_ok=True)
-        sibling_runtime = _deploy_generated_runtime(
-            app_spec=app_spec,
-            deployment_dir=sibling_runtime_dir,
-            compose_project=sibling_runtime_project,
-            logs=logs,
-            external_network_name=sibling_network,
-            external_network_alias=f"{sibling_runtime_project}-api",
-        )
-        sibling_runtime.update(
-            {
-                "app_slug": app_slug,
-                "runtime_owner": "sibling",
-                "source_build_job_id": str(payload.get("source_job_id") or ""),
-                "source_workspace_id": str(job.workspace_id),
-                "bridge_artifact_slug": installed_artifact.get("artifact_slug"),
-            }
-        )
-        registration = _register_sibling_runtime_target(
+        installed_artifact = _install_generated_artifact_in_sibling(
             sibling_api_container=sibling_api_container,
-            workspace_id=str(installed_artifact.get("workspace_id") or ""),
-            app_slug=app_slug,
-            artifact_slug=str(installed_artifact.get("artifact_slug") or "net-inventory"),
-            title=str(app_spec.get("title") or app_slug),
-            runtime_target=sibling_runtime,
+            workspace_slug=workspace_slug,
+            artifact_slug=preferred_artifact_slug,
+            artifact_version=preferred_artifact_version,
         )
-        sibling_output["runtime_target"] = sibling_runtime
-        sibling_output["runtime_registration"] = registration
         _append_job_log(
             logs,
-            "Registered sibling-owned runtime target "
-            f"base_url={sibling_runtime.get('runtime_base_url')} workspace={installed_artifact.get('workspace_slug')}",
+            f"Installed generated artifact {preferred_artifact_slug}@{preferred_artifact_version or 'latest'} into sibling workspace",
         )
+    sibling_output["installed_artifact"] = installed_artifact
+    sibling_output["installed_artifact_source"] = "generated"
+    if sibling_registry_import:
+        sibling_output["generated_artifact_registry_import"] = sibling_registry_import
+    _append_job_log(
+        logs,
+        "Installed sibling artifact "
+        f"workspace={installed_artifact.get('workspace_slug')} artifact={installed_artifact.get('artifact_slug')} "
+        "source=generated",
+    )
+    app_spec = payload.get("app_spec") if isinstance(payload.get("app_spec"), dict) else {}
+    app_slug = _safe_slug(str(app_spec.get("app_slug") or "net-inventory"), default="net-inventory")
+    if not sibling_network or not _docker_network_exists(sibling_network):
+        raise RuntimeError(f"Sibling network not available for runtime target registration: {sibling_network or '<empty>'}")
+    sibling_stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    sibling_runtime_project = _safe_slug(f"xyn-sibling-{app_slug}-{str(job.id)[:6]}", default="xyn-sibling-app")
+    sibling_runtime_dir = _deployments_root() / app_slug / f"sibling-{sibling_stamp}-{str(job.id)[:6]}"
+    sibling_runtime_dir.mkdir(parents=True, exist_ok=True)
+    sibling_runtime = _deploy_generated_runtime(
+        app_spec=app_spec,
+        deployment_dir=sibling_runtime_dir,
+        compose_project=sibling_runtime_project,
+        logs=logs,
+        external_network_name=sibling_network,
+        external_network_alias=f"{sibling_runtime_project}-api",
+    )
+    sibling_runtime.update(
+        {
+            "app_slug": app_slug,
+            "runtime_owner": "sibling",
+            "source_build_job_id": str(payload.get("source_job_id") or ""),
+            "source_workspace_id": str(job.workspace_id),
+        }
+    )
+    registration = _register_sibling_runtime_target(
+        sibling_api_container=sibling_api_container,
+        workspace_id=str(installed_artifact.get("workspace_id") or ""),
+        app_slug=app_slug,
+        artifact_slug=str(installed_artifact.get("artifact_slug") or generated_artifact.get("artifact_slug") or f"app.{app_slug}"),
+        title=str(app_spec.get("title") or app_slug),
+        runtime_target=sibling_runtime,
+    )
+    sibling_output["runtime_target"] = sibling_runtime
+    sibling_output["runtime_registration"] = registration
+    _append_job_log(
+        logs,
+        "Registered sibling-owned runtime target "
+        f"base_url={sibling_runtime.get('runtime_base_url')} workspace={installed_artifact.get('workspace_slug')}",
+    )
     if execution_note_artifact_id:
         update_execution_note(
             db,
@@ -1335,7 +1326,7 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
                 },
                 {
                     "method": "GET",
-                    "path": "/xyn/api/artifacts/catalog?include_bridge=1",
+                    "path": "/xyn/api/artifacts/catalog",
                 },
             ],
         )

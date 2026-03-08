@@ -12,11 +12,11 @@ Risk: Runtime consumption and governance remain connected by a sync contract rat
 Planned Resolution: Replace the synced manifest bridge with published/synced context-pack artifacts that `xyn-core` imports explicitly.
 
 DEBT-02  
-Title: Sibling generated-artifact install is partial  
-Description: Sibling Xyn instances now import and install a generated artifact (`app.net-inventory`) before runtime registration, but the generated artifact does not yet carry the capability metadata, suggestions, and surfaces needed for the sibling UI/capability model to rely on it as the primary source of truth. The seeded `net-inventory` bridge artifact remains as fallback-only compatibility.  
-Why It Exists: This is the smallest safe step toward generated artifact install without implementing the full publish/import/install lifecycle or redesigning package metadata ingestion.  
-Risk: Installed-artifact identity, capability UX, and bridge compatibility can still drift because the generated artifact is not yet capability-native.  
-Planned Resolution: Make generated artifact imports preserve capability/suggestion/surface metadata and then remove the seeded bridge fallback once sibling UI/capability behavior is fully driven by `app.<slug>`.
+Title: Generated artifact lifecycle is still partial  
+Description: Sibling Xyn instances now import and install a generated artifact (`app.net-inventory`) before runtime registration, and the generated artifact carries the capability metadata, suggestions, and surfaces needed for sibling UI/capability behavior. The bridge artifact has been retired from normal install/catalog flows, but generated artifact promotion/versioning is still ad hoc and not yet a full publish/promote/install lifecycle.  
+Why It Exists: This remains the smallest safe path while the full generated publish/import/install lifecycle is still incomplete.  
+Risk: Generated artifact identity and runtime realization are now aligned for the demo path, but versioning, promotion semantics, and broader lifecycle management remain incomplete.  
+Planned Resolution: Build the next lifecycle step around explicit generated artifact promotion/distribution semantics, then simplify the remaining generated-app import/install code paths.
 
 DEBT-03  
 Title: Clean-baseline migrations are stronger than dirty-dev migration recovery  
@@ -52,6 +52,14 @@ Description: The current execution-note mechanism captures findings, root cause,
 Why It Exists: This is the smallest safe change before the demo that adds durable reasoning records without redesigning the artifact system.  
 Risk: Coverage is partial and currently focused on the app-builder generation pipeline.  
 Planned Resolution: Expand execution-note coverage into a fuller autonomous planning/governance artifact system after the demo.
+
+DEBT-07  
+Title: AppSpec -> ArtifactSpec Consolidation  
+Description: The current generated-app path is `Prompt -> AppSpec -> Generated Artifact -> Artifact Registry -> WorkspaceArtifactBinding -> WorkspaceAppInstance -> runtime_target`. The generated artifact now carries the canonical identity, capability metadata, suggestions, surfaces, and install semantics, which means AppSpec largely functions as a build intermediate rather than the final system-of-record.  
+Why It Exists: The current demo-safe pipeline evolved incrementally. AppSpec remains useful as a durable build-stage representation, but the runtime-facing semantics now live primarily on the generated artifact.  
+Risk: Identity and orchestration logic remain split across AppSpec and generated-artifact layers, which keeps `app_jobs.py` more complex than necessary and maintains extra coupling between `xyn-core` generation and Django-side registry import paths.  
+Planned Resolution: Evaluate a future artifact-first build model of `Prompt -> ArtifactSpec -> Artifact -> WorkspaceArtifactBinding -> WorkspaceAppInstance -> runtime_target` that preserves the current artifact packaging model, registry install semantics, WorkspaceAppInstance runtime targeting, and compatibility with existing artifacts.  
+Status: Future simplification opportunity. Not required for demo readiness.
 
 # Temporary Workarounds Protocol
 

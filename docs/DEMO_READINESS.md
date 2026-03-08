@@ -46,11 +46,11 @@ Current Status: partially addressed
 Next Action: keep the Draft Detail surface and browser rehearsal centered on installed capability visibility, palette operation, and artifacts/reports inside Xyn.
 
 DEMO-03  
-Title: Sibling generated artifact is installed, but not yet capability-native  
-Description: The sibling instance now installs the generated artifact `app.net-inventory`, but that imported artifact does not yet carry the capability metadata, suggestions, and surface definitions needed for the sibling UI/capability model to treat it as the primary installed capability.  
-Impact on Demo: The install identity is now correct, but the platform story is still weakened because the sibling UI and capability model are not yet fully driven by the generated artifact itself.  
-Current Status: partially addressed  
-Next Action: preserve the current generated-artifact install path, but make the imported generated artifact carry the capability metadata, palette suggestions, and surfaces needed for sibling UI/capability behavior before bridge cleanup.
+Title: Generated sibling artifact must remain the primary capability model  
+Description: The sibling instance now installs the generated artifact `app.net-inventory`, and that imported artifact carries the capability metadata, suggestions, and surface definitions needed for the sibling UI/capability model to treat it as the primary installed capability.  
+Impact on Demo: If this regresses, the platform story falls back to bridge-era semantics and weakens the artifact-native narrative.  
+Current Status: addressed, monitor for regression  
+Next Action: keep validating that sibling install, capability visibility, and sibling-owned runtime execution remain aligned on the generated artifact path.
 
 DEMO-04  
 Title: Legacy UI leakage remains possible on parts of the demo path  
@@ -80,21 +80,21 @@ Task Name: Keep deployment semantics honest inside Xyn shell
 Why It Matters for Demo: The demo should show that deployment installs new capability into Xyn rather than sending the user to a disconnected frontend.  
 Owner: Codex  
 Status: in-progress  
-Notes: Build tracking should show the generated AppSpec, local runtime deployment, sibling bridge-artifact install state, available palette actions, and visible report/query outcomes inside Xyn. Fresh validation on 2026-03-08 confirmed that Draft Detail no longer claims a true root-local registry install; it now distinguishes local runtime deployment from the temporary sibling bridge artifact install.
+Notes: Build tracking should show the generated AppSpec, local runtime deployment, sibling generated-artifact install state, available palette actions, and visible report/query outcomes inside Xyn. Fresh validation on 2026-03-08 confirmed that Draft Detail no longer claims a true root-local registry install; it now distinguishes local runtime deployment from generated-artifact installation in the sibling instance.
 
 TASK-03  
 Task Name: Bridge generated app into sibling Xyn install story  
 Why It Matters for Demo: The sibling instance must demonstrate artifact-aware installation rather than disconnected provisioning.  
 Owner: Codex  
 Status: in-progress  
-Notes: Keep scope minimal; do not overreach into the full publish/import system unless required. Fresh validation on 2026-03-08 confirmed that the generated package `app.net-inventory@0.0.1-dev` is now imported into the root Django registry, re-imported into the sibling Django registry, and installed in the sibling workspace before runtime registration. The sibling workspace artifact list now includes `app.net-inventory` instead of relying solely on the seeded `net-inventory` bridge for install identity. Generic catalog/detail flows still hide the seeded `net-inventory` bridge artifact unless it is workspace-installed or explicitly requested with `include_bridge=1`. The broader generated-app publish/import lifecycle is still incomplete, and the imported generated artifact currently lands as `capability.visibility=hidden` with no suggestions or surfaces, so sibling capability count and capability UI are still not driven by the generated artifact itself.
+Notes: Keep scope minimal; do not overreach into the full publish/import system unless required. Fresh validation on 2026-03-08 confirmed that the generated package `app.net-inventory@0.0.1-dev` is imported into the root Django registry, re-imported into the sibling Django registry, installed in the sibling workspace, and now surfaces capability-native metadata from the generated package itself. Observed sibling installed artifact metadata for `app.net-inventory` includes `capability.visibility=capabilities`, four palette suggestions (`show devices`, `show locations`, `create device`, `show devices by status`), and workbench manage/docs surfaces. Sibling command execution still works after the root-local generated runtime containers are stopped, using sibling-owned runtime base URL `http://xyn-sibling-net-inventory-1953eb-api:8080`. The seeded `net-inventory` artifact no longer appears in normal catalog or install flows.
 
 TASK-04  
 Task Name: Stabilize prompt-driven build tracking UX  
 Why It Matters for Demo: The operator must be able to understand whether the build succeeded and where to go next.  
 Owner: Codex  
 Status: in-progress  
-Notes: Track build should surface status, local runtime deployment, sibling target, and failures clearly without overstating registry-backed installation. The current Draft Detail view now exposes generated-app state, execution trace, sibling CTA, palette-oriented usage guidance for the generated network inventory capability, and a direct in-shell "View generated artifacts" path for demo step 8. Local reprovisioning now explicitly pulls and recreates remote `:dev` images so browser-facing UI changes are not silently masked by stale containers, and repeated demo builds now reuse a stable `xyn-app-net-inventory` compose project to avoid Docker network exhaustion during rehearsals. Fresh validation on 2026-03-08 confirmed visible success for `show devices`, `show locations`, `create device`, and `show devices by status`, plus truthful Draft Detail wording for local runtime vs sibling bridge install state.
+Notes: Track build should surface status, local runtime deployment, sibling target, and failures clearly without overstating registry-backed installation. The current Draft Detail view now exposes generated-app state, execution trace, sibling CTA, palette-oriented usage guidance for the generated network inventory capability, and a direct in-shell "View generated artifacts" path for demo step 8. Local reprovisioning now explicitly pulls and recreates remote `:dev` images so browser-facing UI changes are not silently masked by stale containers, and repeated demo builds now reuse a stable `xyn-app-net-inventory` compose project to avoid Docker network exhaustion during rehearsals. Fresh validation on 2026-03-08 confirmed visible success for `show devices`, `show locations`, `create device`, and `show devices by status`, plus truthful Draft Detail wording for local runtime vs sibling generated-artifact install state.
 
 TASK-05  
 Task Name: Validate context-pack authority bridge live  
@@ -152,3 +152,7 @@ Notes: Initial implementation is runtime-only and currently hooks into the app-b
 - `show devices` returns structured results
 - no critical legacy UI leaks on the golden path
 - browser-driven golden-path smoke passes against the visible UI, not just API calls
+
+# Architecture Notes
+
+After bridge cleanup the system now operates artifact-first in practice. AppSpec remains as a build-stage intermediate, but may be consolidated into an ArtifactSpec in a future refactor once that simplification can be undertaken without risking demo readiness.
