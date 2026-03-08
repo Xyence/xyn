@@ -1,6 +1,7 @@
 """Palette prompt execution via command registry."""
 from __future__ import annotations
 
+import uuid as uuidlib
 import uuid
 from typing import Any
 from urllib.parse import urlencode
@@ -50,6 +51,8 @@ def _resolve_value(
             return workspace_slug
         if token == "$deployment.app_url":
             return str((deployment or {}).get("app_url") or "")
+        if token == "$generated.device_name":
+            return f"demo-device-{uuidlib.uuid4().hex[:8]}"
     return value
 
 
@@ -101,6 +104,7 @@ def execute_palette_prompt(
     method = str(config.get("method") or "GET").upper()
     path = str(config.get("path") or "/").strip() or "/"
     query_map = config.get("query_map") if isinstance(config.get("query_map"), dict) else {}
+    body_map = config.get("body_map") if isinstance(config.get("body_map"), dict) else {}
     adapter = config.get("response_adapter") if isinstance(config.get("response_adapter"), dict) else {}
 
     deployment: dict[str, Any] | None = None
@@ -120,6 +124,10 @@ def execute_palette_prompt(
         key: _resolve_value(value, workspace_id=workspace.id, workspace_slug=workspace.slug, deployment=deployment)
         for key, value in query_map.items()
     }
+    resolved_body = {
+        key: _resolve_value(value, workspace_id=workspace.id, workspace_slug=workspace.slug, deployment=deployment)
+        for key, value in body_map.items()
+    }
 
     if deployment is not None and str(base_url).rstrip("/") == str(deployment.get("app_url") or "").rstrip("/"):
         code, body, raw = deployment_request_json(
@@ -127,14 +135,15 @@ def execute_palette_prompt(
             method=method,
             path=path,
             query=resolved_query,
+            payload=resolved_body or None,
         )
     else:
         url = f"{base_url}{path}"
         if resolved_query:
             url = f"{url}?{urlencode({k: str(v) for k, v in resolved_query.items() if v is not None})}"
-        code, body, raw = http_request_json(url, method=method)
+        code, body, raw = http_request_json(url, method=method, payload=resolved_body or None)
 
-    if code != 200:
+    if code < 200 or code >= 300:
         return {
             "kind": "text",
             "columns": [],
@@ -172,7 +181,11 @@ def execute_palette_prompt(
             value_field=str(adapter.get("value_field") or "value"),
         )
     else:
-        items = body.get("items") if isinstance(body.get("items"), list) else []
+        items = body.get("items") if isinstance(body.get("items"), list) else None
+        if items is None and isinstance(body, dict) and body:
+            items = [body]
+        if items is None:
+            items = []
         columns = adapter.get("columns") if isinstance(adapter.get("columns"), list) else ["id", "name"]
         result = build_palette_result_from_items(
             items=[row for row in items if isinstance(row, dict)],

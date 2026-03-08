@@ -39,6 +39,39 @@ def ensure_default_palette_commands(db: Session) -> None:
             },
         ),
         (
+            "show locations",
+            {
+                "base_url": "$deployment.app_url",
+                "method": "GET",
+                "path": "/locations",
+                "query_map": {"workspace_id": "$workspace_id"},
+                "response_adapter": {
+                    "kind": "table",
+                    "columns": ["id", "name", "kind", "city", "region", "country", "workspace_id"],
+                    "text_template": "{{count}} locations found",
+                },
+            },
+        ),
+        (
+            "create device",
+            {
+                "base_url": "$deployment.app_url",
+                "method": "POST",
+                "path": "/devices",
+                "body_map": {
+                    "workspace_id": "$workspace_id",
+                    "name": "$generated.device_name",
+                    "kind": "device",
+                    "status": "online",
+                },
+                "response_adapter": {
+                    "kind": "table",
+                    "columns": ["id", "name", "kind", "status", "workspace_id", "location_id"],
+                    "text_template": "Created {{count}} device",
+                },
+            },
+        ),
+        (
             "show devices by status",
             {
                 "base_url": "$deployment.app_url",
@@ -63,6 +96,12 @@ def ensure_default_palette_commands(db: Session) -> None:
             .first()
         )
         if existing:
+            current = existing.handler_config_json if isinstance(existing.handler_config_json, dict) else {}
+            if current != config:
+                existing.handler_config_json = config
+                existing.updated_at = utc_now()
+                db.add(existing)
+                changed = True
             continue
         row = PaletteCommand(
             workspace_id=None,
@@ -141,6 +180,9 @@ def build_palette_result_from_items(
             row[column] = "" if value is None else value
         rows.append(row)
     text = str(text_template or "{{count}} rows").replace("{{count}}", str(len(rows)))
+    first = rows[0] if rows else {}
+    for key, value in first.items():
+        text = text.replace(f"{{{{{key}}}}}", str(value))
     return {
         "kind": "table",
         "columns": columns,

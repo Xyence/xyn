@@ -554,6 +554,21 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
     )
     if list_code != 200:
         raise RuntimeError(f"GET /devices failed ({list_code}): {list_text}")
+    location_code, location_body, location_text = _container_http_json(
+        app_container_name,
+        "POST",
+        "/locations",
+        port=8080,
+        payload={
+            "workspace_id": str(job.workspace_id),
+            "name": "seeded-location-1",
+            "kind": "site",
+            "city": "Austin",
+        },
+    )
+    if location_code not in {200, 201}:
+        raise RuntimeError(f"POST /locations failed ({location_code}): {location_text}")
+    location_id = str(location_body.get("id") or "").strip() if isinstance(location_body, dict) else ""
     create_code, create_body, create_text = _container_http_json(
         app_container_name,
         "POST",
@@ -564,11 +579,19 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
             "name": "seeded-device-1",
             "kind": "router",
             "status": "online",
-            "location_id": None,
+            "location_id": location_id or None,
         },
     )
     if create_code not in {200, 201}:
         raise RuntimeError(f"POST /devices failed ({create_code}): {create_text}")
+    list_locations_code, list_locations_body, list_locations_text = _container_http_json(
+        app_container_name,
+        "GET",
+        f"/locations?workspace_id={job.workspace_id}",
+        port=8080,
+    )
+    if list_locations_code != 200:
+        raise RuntimeError(f"GET /locations failed ({list_locations_code}): {list_locations_text}")
     report_code, report_body, report_text = _container_http_json(
         app_container_name,
         "GET",
@@ -617,6 +640,7 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
             implementation_summary="Completed deployment smoke tests, sibling reachability checks, and palette verification for the generated application.",
             append_validation=[
                 "App health endpoint returned 200.",
+                "Location CRUD smoke checks succeeded.",
                 "Device CRUD smoke checks succeeded.",
                 "Sibling Xyn health check succeeded.",
                 f"Palette returned {len(palette_result.get('rows') or [])} rows for show devices.",
@@ -629,6 +653,8 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
             "app_health": {"code": health_code, "body": health_body or health_text},
             "app_checks": {
                 "list_devices": {"code": list_code, "body": list_body or list_text},
+                "create_location": {"code": location_code, "body": location_body or location_text},
+                "list_locations": {"code": list_locations_code, "body": list_locations_body or list_locations_text},
                 "create_device": {"code": create_code, "body": create_body or create_text},
                 "report_devices_by_status": {"code": report_code, "body": report_body or report_text},
             },

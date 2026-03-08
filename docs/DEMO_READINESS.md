@@ -73,7 +73,7 @@ Task Name: Lock down fresh-instance bootstrap path
 Why It Matters for Demo: The demo cannot proceed if login lands in an inaccessible or stale workspace.  
 Owner: Codex  
 Status: in-progress  
-Notes: Must include clean-start validation after teardown.
+Notes: Must include clean-start validation after teardown. Fresh browser validation on 2026-03-08 against a clean `xynctl quickstart` path confirmed that the active workspace loads successfully, the visible capabilities count resolves to `2`, and the artifact list no longer shows the legacy demo artifacts `ems`, `hello-app`, `articles-tour`, `platform-build-tour`, `deploy-subscriber-notes`, or `subscriber-notes-walkthrough`.
 
 TASK-02  
 Task Name: Keep deployment semantics honest inside Xyn shell  
@@ -94,7 +94,7 @@ Task Name: Stabilize prompt-driven build tracking UX
 Why It Matters for Demo: The operator must be able to understand whether the build succeeded and where to go next.  
 Owner: Codex  
 Status: in-progress  
-Notes: Track build should surface status, installed capability visibility inside Xyn, sibling target, and failures clearly. The current Draft Detail view now exposes an installed-capability card, execution trace, sibling CTA, palette-oriented usage guidance for the generated network inventory capability, and a direct in-shell "View generated artifacts" path for demo step 8. Local reprovisioning now explicitly pulls and recreates remote `:dev` images so browser-facing UI changes are not silently masked by stale containers, and repeated demo builds now reuse a stable `xyn-app-net-inventory` compose project to avoid Docker network exhaustion during rehearsals.
+Notes: Track build should surface status, installed capability visibility inside Xyn, sibling target, and failures clearly. The current Draft Detail view now exposes an installed-capability card, execution trace, sibling CTA, palette-oriented usage guidance for the generated network inventory capability, and a direct in-shell "View generated artifacts" path for demo step 8. Local reprovisioning now explicitly pulls and recreates remote `:dev` images so browser-facing UI changes are not silently masked by stale containers, and repeated demo builds now reuse a stable `xyn-app-net-inventory` compose project to avoid Docker network exhaustion during rehearsals. Fresh browser validation on 2026-03-08 confirmed visible success for `show devices`, `show locations`, `create device`, and `show devices by status`, and the sibling Xyn capability indicator also resolved to `2` instead of `0`.
 
 TASK-05  
 Task Name: Validate context-pack authority bridge live  
