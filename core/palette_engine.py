@@ -223,7 +223,7 @@ def execute_palette_prompt(
                 command_id=command.id,
                 command_key=command.command_key,
                 missing_fields=missing_fields,
-                example="create location named office in St. Louis MO USA",
+                example="create location named sibling-location-2 in Austin TX USA",
                 context_pack_artifact_ids=[str(pack.id) for pack in context_packs],
                 context_pack_slugs=[str((pack.extra_metadata or {}).get("pack_slug") or pack.name) for pack in context_packs],
                 context_warnings=context_warnings,

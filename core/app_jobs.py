@@ -1819,7 +1819,7 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
     palette_create_location_filled_status, palette_create_location_filled_result, palette_create_location_filled_text = _execute_sibling_palette_prompt(
         sibling_api_container=sibling_api_container,
         workspace_slug=sibling_workspace_slug,
-        prompt="create location named office in St. Louis MO USA",
+        prompt="create location named sibling-location-2 in Austin TX USA",
     )
     if palette_create_location_filled_status != 200:
         raise RuntimeError(
