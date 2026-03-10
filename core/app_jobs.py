@@ -1606,6 +1606,9 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
     sibling_runtime = sibling.get("runtime_target") if isinstance(sibling.get("runtime_target"), dict) else {}
     sibling_runtime_container = str(sibling_runtime.get("app_container_name") or "").strip()
     sibling_runtime_base_url = str(sibling_runtime.get("runtime_base_url") or "").strip()
+    sibling_runtime_public_url = str(
+        sibling_runtime.get("public_app_url") or sibling_runtime.get("app_url") or sibling.get("ui_url") or ""
+    ).strip()
     sibling_workspace_id = str((sibling.get("installed_artifact") or {}).get("workspace_id") or "").strip()
     sibling_workspace_slug = str((sibling.get("installed_artifact") or {}).get("workspace_slug") or workspace_slug).strip() or workspace_slug
     if not sibling_runtime_container or not _docker_container_running(sibling_runtime_container):
@@ -1747,9 +1750,12 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
     if not isinstance(palette_result.get("rows"), list) or not palette_result.get("rows"):
         raise RuntimeError("Palette show devices returned no rows")
     palette_meta = palette_result.get("meta") if isinstance(palette_result.get("meta"), dict) else {}
-    if sibling_runtime_base_url and str(palette_meta.get("base_url") or "").strip() != sibling_runtime_base_url:
+    palette_base_url = str(palette_meta.get("base_url") or "").strip()
+    allowed_runtime_urls = {value for value in (sibling_runtime_base_url, sibling_runtime_public_url) if value}
+    if allowed_runtime_urls and palette_base_url not in allowed_runtime_urls:
         raise RuntimeError(
-            f"Sibling palette targeted unexpected runtime base URL: {palette_meta.get('base_url')} != {sibling_runtime_base_url}"
+            "Sibling palette targeted unexpected runtime base URL: "
+            f"{palette_meta.get('base_url')} not in {sorted(allowed_runtime_urls)}"
         )
     _append_job_log(logs, f"Palette check returned {len(palette_result.get('rows') or [])} rows")
     palette_create_location_status, palette_create_location_result, palette_create_location_text = _execute_sibling_palette_prompt(
@@ -1844,10 +1850,11 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
             if not isinstance(palette_after_stop_result.get("rows"), list) or not palette_after_stop_result.get("rows"):
                 raise RuntimeError("Sibling palette after root stop returned no rows")
             after_stop_meta = palette_after_stop_result.get("meta") if isinstance(palette_after_stop_result.get("meta"), dict) else {}
-            if sibling_runtime_base_url and str(after_stop_meta.get("base_url") or "").strip() != sibling_runtime_base_url:
+            after_stop_base_url = str(after_stop_meta.get("base_url") or "").strip()
+            if allowed_runtime_urls and after_stop_base_url not in allowed_runtime_urls:
                 raise RuntimeError(
                     "Sibling palette after root stop targeted unexpected runtime base URL: "
-                    f"{after_stop_meta.get('base_url')} != {sibling_runtime_base_url}"
+                    f"{after_stop_meta.get('base_url')} not in {sorted(allowed_runtime_urls)}"
                 )
             palette_after_root_stop = palette_after_stop_result
         finally:
