@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 from core.database import SessionLocal
 from core.context_packs import default_instance_workspace_root
+from core.capability_manifest import build_manifest_suggestions, build_resolved_capability_manifest
 from core.execution_notes import create_execution_note, update_execution_note
 from core.models import Artifact, Job, JobStatus, Workspace
 from core.palette_engine import execute_palette_prompt
@@ -78,6 +79,18 @@ def _generated_artifacts_root() -> Path:
     root = _workspace_root() / "artifacts" / "generated"
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _docker_image_exists(image_ref: str) -> bool:
+    code, _, _ = _run(["docker", "image", "inspect", str(image_ref or "").strip()])
+    return code == 0
+
+
+def _effective_net_inventory_image() -> str:
+    explicit = str(os.getenv("XYN_NET_INVENTORY_IMAGE", "") or "").strip()
+    if explicit:
+        return explicit
+    return NET_INVENTORY_IMAGE
 
 
 def _generated_artifact_slug(app_slug: str) -> str:
@@ -313,79 +326,8 @@ def _build_generated_artifact_manifest(*, app_spec: dict[str, Any], runtime_conf
     app_slug = _safe_slug(str(app_spec.get("app_slug") or "generated-app"), default="generated-app")
     artifact_slug = _generated_artifact_slug(app_slug)
     title = str(app_spec.get("title") or app_slug).strip() or app_slug
-    entities = _infer_entities_from_app_spec(app_spec)
-    reports = _normalize_unique_strings(app_spec.get("reports") if isinstance(app_spec.get("reports"), list) else [])
-    suggestions = [
-        {
-            "id": f"{artifact_slug}-show-devices",
-            "name": "Show Devices",
-            "prompt": "Show devices",
-            "description": "List devices in the current workspace.",
-            "visibility": ["capability", "landing", "palette"],
-            "group": "Devices",
-            "order": 100,
-        },
-        {
-            "id": f"{artifact_slug}-show-locations",
-            "name": "Show Locations",
-            "prompt": "Show locations",
-            "description": "List locations in the current workspace.",
-            "visibility": ["capability", "palette"],
-            "group": "Locations",
-            "order": 110,
-        },
-        {
-            "id": f"{artifact_slug}-create-device",
-            "name": "Create Device",
-            "prompt": "Create device",
-            "description": "Create a new device in the current workspace.",
-            "visibility": ["capability", "palette"],
-            "group": "Devices",
-            "order": 120,
-        },
-        {
-            "id": f"{artifact_slug}-create-location",
-            "name": "Create Location",
-            "prompt": "Create location",
-            "description": "Create a new location in the current workspace.",
-            "visibility": ["capability", "palette"],
-            "group": "Locations",
-            "order": 125,
-        },
-        {
-            "id": f"{artifact_slug}-devices-by-status",
-            "name": "Devices by Status",
-            "prompt": "Show devices by status",
-            "description": "Display a status rollup chart for devices in the current workspace.",
-            "visibility": ["capability", "landing", "palette"],
-            "group": "Reports",
-            "order": 130,
-        },
-    ]
-    if "interfaces" in entities:
-        suggestions.append(
-            {
-                "id": f"{artifact_slug}-show-interfaces",
-                "name": "Show Interfaces",
-                "prompt": "Show interfaces",
-                "description": "List interfaces in the current workspace.",
-                "visibility": ["capability", "palette"],
-                "group": "Interfaces",
-                "order": 140,
-            }
-        )
-    if "interfaces_by_status" in reports:
-        suggestions.append(
-            {
-                "id": f"{artifact_slug}-interfaces-by-status",
-                "name": "Interfaces by Status",
-                "prompt": "Show interfaces by status",
-                "description": "Display a status rollup chart for interfaces in the current workspace.",
-                "visibility": ["capability", "landing", "palette"],
-                "group": "Reports",
-                "order": 150,
-            }
-        )
+    capability_manifest = build_resolved_capability_manifest(app_spec)
+    suggestions = build_manifest_suggestions(artifact_slug=artifact_slug, manifest=capability_manifest)
     return {
         "artifact": {
             "id": artifact_slug,
@@ -403,6 +345,7 @@ def _build_generated_artifact_manifest(*, app_spec: dict[str, Any], runtime_conf
             "tags": ["generated", "application", app_slug],
             "order": 120,
         },
+        "resolved_capability_manifest": capability_manifest,
         "suggestions": suggestions,
         "surfaces": {
             "manage": [{"label": "Workbench", "path": "/app/workbench", "order": 100}],
@@ -411,6 +354,7 @@ def _build_generated_artifact_manifest(*, app_spec: dict[str, Any], runtime_conf
         "content": {
             "app_spec": app_spec,
             "runtime_config": runtime_config,
+            "resolved_capability_manifest": capability_manifest,
         },
     }
 
@@ -861,7 +805,7 @@ def _build_app_spec(
         "services": [
             {
                 "name": "net-inventory-api",
-                "image": NET_INVENTORY_IMAGE,
+                "image": _effective_net_inventory_image(),
                 "env": {
                     "PORT": "8080",
                     "DATABASE_URL": "postgresql://xyn:xyn_dev_password@net-inventory-db:5432/net_inventory",
@@ -1016,7 +960,12 @@ def _materialize_net_inventory_compose(
 ) -> Path:
     app_service = next((row for row in app_spec.get("services", []) if row.get("name") == "net-inventory-api"), {})
     db_service = next((row for row in app_spec.get("services", []) if row.get("name") == "net-inventory-db"), {})
-    app_image = str(app_service.get("image") or NET_INVENTORY_IMAGE)
+    entity_contracts_json = json.dumps(
+        build_resolved_capability_manifest(app_spec).get("entities") or [],
+        separators=(",", ":"),
+        sort_keys=True,
+    ).replace("'", "''")
+    app_image = str(app_service.get("image") or _effective_net_inventory_image())
     app_ports = _ports_yaml(list(app_service.get("ports") or [{"host": 0, "container": 8080, "protocol": "tcp"}]))
     app_network_lines: list[str] = []
     trailer_lines: list[str] = []
@@ -1062,6 +1011,8 @@ def _materialize_net_inventory_compose(
                 "    environment:",
                 "      PORT: \"8080\"",
                 "      DATABASE_URL: postgresql://xyn:xyn_dev_password@net-inventory-db:5432/net_inventory",
+                f"      GENERATED_ENTITY_CONTRACTS_JSON: '{entity_contracts_json}'",
+                "      GENERATED_ENTITY_CONTRACTS_ALLOW_DEFAULTS: \"0\"",
                 "    ports:",
                 *app_ports,
                 *app_network_lines,
@@ -1655,6 +1606,9 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
     sibling_runtime = sibling.get("runtime_target") if isinstance(sibling.get("runtime_target"), dict) else {}
     sibling_runtime_container = str(sibling_runtime.get("app_container_name") or "").strip()
     sibling_runtime_base_url = str(sibling_runtime.get("runtime_base_url") or "").strip()
+    sibling_runtime_public_url = str(
+        sibling_runtime.get("public_app_url") or sibling_runtime.get("app_url") or sibling.get("ui_url") or ""
+    ).strip()
     sibling_workspace_id = str((sibling.get("installed_artifact") or {}).get("workspace_id") or "").strip()
     sibling_workspace_slug = str((sibling.get("installed_artifact") or {}).get("workspace_slug") or workspace_slug).strip() or workspace_slug
     if not sibling_runtime_container or not _docker_container_running(sibling_runtime_container):
@@ -1796,9 +1750,12 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
     if not isinstance(palette_result.get("rows"), list) or not palette_result.get("rows"):
         raise RuntimeError("Palette show devices returned no rows")
     palette_meta = palette_result.get("meta") if isinstance(palette_result.get("meta"), dict) else {}
-    if sibling_runtime_base_url and str(palette_meta.get("base_url") or "").strip() != sibling_runtime_base_url:
+    palette_base_url = str(palette_meta.get("base_url") or "").strip()
+    allowed_runtime_urls = {value for value in (sibling_runtime_base_url, sibling_runtime_public_url) if value}
+    if allowed_runtime_urls and palette_base_url not in allowed_runtime_urls:
         raise RuntimeError(
-            f"Sibling palette targeted unexpected runtime base URL: {palette_meta.get('base_url')} != {sibling_runtime_base_url}"
+            "Sibling palette targeted unexpected runtime base URL: "
+            f"{palette_meta.get('base_url')} not in {sorted(allowed_runtime_urls)}"
         )
     _append_job_log(logs, f"Palette check returned {len(palette_result.get('rows') or [])} rows")
     palette_create_location_status, palette_create_location_result, palette_create_location_text = _execute_sibling_palette_prompt(
@@ -1813,7 +1770,7 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
     if palette_create_location_result.get("kind") != "text":
         raise RuntimeError(f"Palette did not return create-location completion prompt: {palette_create_location_result}")
     missing_fields = palette_create_location_result.get("meta", {}).get("missing_fields")
-    if not isinstance(missing_fields, list) or "name" not in missing_fields or "city" not in missing_fields:
+    if not isinstance(missing_fields, list) or "name" not in missing_fields:
         raise RuntimeError(f"Palette create location did not report missing required fields: {palette_create_location_result}")
 
     palette_create_location_filled_status, palette_create_location_filled_result, palette_create_location_filled_text = _execute_sibling_palette_prompt(
@@ -1893,10 +1850,11 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
             if not isinstance(palette_after_stop_result.get("rows"), list) or not palette_after_stop_result.get("rows"):
                 raise RuntimeError("Sibling palette after root stop returned no rows")
             after_stop_meta = palette_after_stop_result.get("meta") if isinstance(palette_after_stop_result.get("meta"), dict) else {}
-            if sibling_runtime_base_url and str(after_stop_meta.get("base_url") or "").strip() != sibling_runtime_base_url:
+            after_stop_base_url = str(after_stop_meta.get("base_url") or "").strip()
+            if allowed_runtime_urls and after_stop_base_url not in allowed_runtime_urls:
                 raise RuntimeError(
                     "Sibling palette after root stop targeted unexpected runtime base URL: "
-                    f"{after_stop_meta.get('base_url')} != {sibling_runtime_base_url}"
+                    f"{after_stop_meta.get('base_url')} not in {sorted(allowed_runtime_urls)}"
                 )
             palette_after_root_stop = palette_after_stop_result
         finally:

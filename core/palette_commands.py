@@ -1,7 +1,6 @@
 """Palette command registry helpers."""
 from __future__ import annotations
 
-import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -9,6 +8,12 @@ from typing import Any
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from core.capability_manifest import (
+    load_workspace_capability_manifest,
+    manifest_enabled_command_keys,
+    manifest_latent_command_keys,
+    normalize_palette_prompt,
+)
 from core.models import PaletteCommand
 
 
@@ -17,8 +22,7 @@ def utc_now() -> datetime:
 
 
 def normalize_command_key(value: str) -> str:
-    text = str(value or "").strip().lower()
-    return re.sub(r"\s+", " ", text)
+    return normalize_palette_prompt(value)
 
 
 def ensure_default_palette_commands(db: Session) -> None:
@@ -192,7 +196,10 @@ def resolve_palette_command(
         .first()
     )
     if workspace_match:
-        return workspace_match
+        manifest = load_workspace_capability_manifest(db, workspace_id=workspace_id)
+        if manifest is None or normalize_command_key(workspace_match.command_key) in manifest_enabled_command_keys(manifest):
+            return workspace_match
+        return None
 
     global_match = (
         db.query(PaletteCommand)
@@ -203,7 +210,12 @@ def resolve_palette_command(
         .order_by(PaletteCommand.updated_at.desc())
         .first()
     )
-    return global_match
+    if not global_match:
+        return None
+    manifest = load_workspace_capability_manifest(db, workspace_id=workspace_id)
+    if manifest is None or normalize_command_key(global_match.command_key) in manifest_enabled_command_keys(manifest):
+        return global_match
+    return None
 
 
 def list_palette_commands(
@@ -211,12 +223,39 @@ def list_palette_commands(
     *,
     workspace_id: uuid.UUID,
 ) -> list[PaletteCommand]:
-    return (
+    rows = (
         db.query(PaletteCommand)
         .filter((PaletteCommand.workspace_id == workspace_id) | (PaletteCommand.workspace_id.is_(None)))
         .order_by(PaletteCommand.workspace_id.is_(None), PaletteCommand.command_key.asc())
         .all()
     )
+    manifest = load_workspace_capability_manifest(db, workspace_id=workspace_id)
+    if manifest is None:
+        return rows
+    enabled = manifest_enabled_command_keys(manifest)
+    return [row for row in rows if normalize_command_key(row.command_key) in enabled]
+
+
+def workspace_palette_capability_diagnostics(
+    db: Session,
+    *,
+    workspace_id: uuid.UUID,
+) -> dict[str, Any]:
+    manifest = load_workspace_capability_manifest(db, workspace_id=workspace_id)
+    if manifest is None:
+        return {
+            "source": "legacy-global-defaults",
+            "enabled_command_keys": [],
+            "latent_command_keys": [],
+        }
+    enabled = sorted(manifest_enabled_command_keys(manifest))
+    latent = sorted(manifest_latent_command_keys(manifest))
+    return {
+        "source": "resolved-capability-manifest",
+        "manifest": manifest,
+        "enabled_command_keys": enabled,
+        "latent_command_keys": latent,
+    }
 
 
 def build_palette_result_from_items(

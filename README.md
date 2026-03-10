@@ -403,7 +403,19 @@ See `xyn_seed_implementation_plan.md` for the complete roadmap.
 
 ## License
 
-Copyright © 2026 Xyence. All rights reserved.
+This repository is part of the core Xyn platform and is licensed under the GNU Affero General Public License v3.0.
+
+In plain language, if you modify Xyn and let users interact with that modified version over a network, you must also make the corresponding source code for those modifications available under AGPLv3.
+
+Commercial use, including paid hosting, support, and consulting, is allowed so long as AGPL obligations are honored. Separate commercial licensing may also be available.
+
+See [LICENSE](/home/jrestivo/src/xyn/LICENSE) and [NOTICE](/home/jrestivo/src/xyn/NOTICE).
+
+## Trademark and branding
+
+The software license does not grant rights to use project names, logos, or branding except as required for reasonable nominative use.
+
+Any formal trademark policy will be published separately.
 
 ## Support
 

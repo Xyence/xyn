@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from core.context_packs import resolve_bound_context_pack_artifacts
 from core.net_inventory_client import deployment_request_json, http_request_json, latest_deployment_for_workspace
-from core.palette_commands import build_palette_result_from_items, resolve_palette_command
+from core.palette_commands import build_palette_result_from_items, resolve_palette_command, workspace_palette_capability_diagnostics
 from core.workspaces import resolve_workspace_by_context
 
 
@@ -157,6 +157,7 @@ def execute_palette_prompt(
     context_packs, context_warnings = resolve_bound_context_pack_artifacts(db, workspace=workspace)
     command = resolve_palette_command(db, workspace_id=workspace.id, prompt=prompt)
     if not command:
+        diagnostics = workspace_palette_capability_diagnostics(db, workspace_id=workspace.id)
         return {
             "kind": "text",
             "columns": [],
@@ -167,6 +168,7 @@ def execute_palette_prompt(
                 "context_pack_artifact_ids": [str(pack.id) for pack in context_packs],
                 "context_pack_slugs": [str((pack.extra_metadata or {}).get("pack_slug") or pack.name) for pack in context_packs],
                 "context_warnings": context_warnings,
+                "capability_diagnostics": diagnostics,
             },
         }
 
