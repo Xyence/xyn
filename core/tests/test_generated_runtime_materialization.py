@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 from core.app_jobs import _materialize_net_inventory_compose
-from core.provisioning_local import _ensure_remote_workspace
+from core.provisioning_local import ProvisionLocalRequest, _ensure_remote_workspace, _resolve_images_for_provision
 
 
 class GeneratedRuntimeMaterializationTests(unittest.TestCase):
@@ -68,6 +68,37 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         self.assertEqual(result["status"], "created")
         self.assertEqual(result["workspace_slug"], "epicb-lab")
         self.assertEqual(opener.open.call_count, 3)
+
+    @mock.patch("core.provisioning_local.SessionLocal")
+    @mock.patch("core.provisioning_local.resolve_registry_images")
+    def test_provision_prefers_artifact_registry_by_default(self, resolve_registry_images, session_local):
+        session_local.return_value = mock.Mock()
+        resolve_registry_images.return_value = {
+            "registry": {"endpoint": "public.ecr.aws/i0h0h0n4/xyn/artifacts"},
+            "images": {
+                "ui_image": "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:dev",
+                "api_image": "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:dev",
+                "channel": "dev",
+            },
+            "registry_slug": "default-registry",
+            "registry_source": "default-registry",
+            "operations": ["Using ArtifactRegistry: default-registry"],
+        }
+        with mock.patch("core.provisioning_local._docker_image_exists", return_value=True):
+            result = _resolve_images_for_provision(ProvisionLocalRequest(name="smoke"))
+
+        self.assertEqual(result["mode"], "artifact_registry")
+        self.assertEqual(result["api_image"], "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:dev")
+        self.assertEqual(result["ui_image"], "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:dev")
+        resolve_registry_images.assert_called_once()
+
+    def test_provision_can_opt_into_local_images(self):
+        with mock.patch("core.provisioning_local._docker_image_exists", return_value=True):
+            result = _resolve_images_for_provision(ProvisionLocalRequest(name="smoke", prefer_local_images=True))
+
+        self.assertEqual(result["mode"], "prebuilt_local_images")
+        self.assertEqual(result["api_image"], "xyn-api")
+        self.assertEqual(result["ui_image"], "xyn-ui")
 
 
 if __name__ == "__main__":
