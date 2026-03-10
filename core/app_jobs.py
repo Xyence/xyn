@@ -90,8 +90,6 @@ def _effective_net_inventory_image() -> str:
     explicit = str(os.getenv("XYN_NET_INVENTORY_IMAGE", "") or "").strip()
     if explicit:
         return explicit
-    if _docker_image_exists("net-inventory-api:local"):
-        return "net-inventory-api:local"
     return NET_INVENTORY_IMAGE
 
 
