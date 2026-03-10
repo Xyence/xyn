@@ -3,9 +3,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import shutil
 import subprocess
 import uuid
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -75,6 +79,11 @@ def _should_refresh_remote_image(value: str, *, force: bool) -> bool:
     return force or _image_tag(ref) == DEFAULT_IMAGE_TAG
 
 
+def _docker_image_exists(image_ref: str) -> bool:
+    code, _, _ = _run(["docker", "image", "inspect", str(image_ref or "").strip()])
+    return code == 0
+
+
 def _tls_enabled() -> bool:
     if _as_bool(os.getenv("XYN_TRAEFIK_ENABLE_TLS", "false")):
         return True
@@ -96,6 +105,150 @@ def _resolved_hosts(project: str, *, ui_host_override: Optional[str] = None, api
     ui_host = ui_override or "localhost"
     api_host = api_override or "localhost"
     return ui_host, api_host
+
+
+def _ensure_remote_workspace_via_container(*, api_container_name: str, workspace_slug: str, workspace_title: str) -> Optional[Dict[str, Any]]:
+    container = str(api_container_name or "").strip()
+    slug = str(workspace_slug or "").strip().lower()
+    title = str(workspace_title or workspace_slug or "Workspace").strip() or "Workspace"
+    if not container or not slug:
+        return None
+    script = (
+        "import json\n"
+        "from xyn_orchestrator.models import RoleBinding, Workspace, WorkspaceMembership\n"
+        "from xyn_orchestrator.xyn_api import _ensure_default_workspace_artifact_bindings, _ensure_local_identity\n"
+        f"slug = {json.dumps(slug)}\n"
+        f"title = {json.dumps(title)}\n"
+        "workspace = Workspace.objects.filter(slug=slug).first()\n"
+        "created = False\n"
+        "if workspace is None:\n"
+        "    workspace = Workspace.objects.create(slug=slug, name=title, org_name=title)\n"
+        "    _ensure_default_workspace_artifact_bindings(workspace)\n"
+        "    created = True\n"
+        "identity = _ensure_local_identity('admin@local')\n"
+        "WorkspaceMembership.objects.get_or_create(\n"
+        "    workspace=workspace,\n"
+        "    user_identity=identity,\n"
+        "    defaults={'role': 'admin', 'termination_authority': True},\n"
+        ")\n"
+        "RoleBinding.objects.get_or_create(\n"
+        "    user_identity=identity,\n"
+        "    scope_kind='platform',\n"
+        "    scope_id=None,\n"
+        "    role='platform_admin',\n"
+        ")\n"
+        "print(json.dumps({'status': 'created' if created else 'existing', 'workspace_id': str(workspace.id), 'workspace_slug': slug}))\n"
+    )
+    code, stdout, stderr = _run(["docker", "exec", container, "python", "manage.py", "shell", "-c", script])
+    if code != 0:
+        raise RuntimeError(f"Failed to ensure workspace '{slug}' in provisioned instance via container: {stderr or stdout}")
+    lines = [line.strip() for line in str(stdout or "").splitlines() if line.strip()]
+    if not lines:
+        return None
+    try:
+        payload = json.loads(lines[-1])
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _ensure_remote_workspace(*, api_url: str, workspace_slug: str, workspace_title: str, api_container_name: str = "") -> Dict[str, Any]:
+    base_url = str(api_url or "").strip().rstrip("/")
+    slug = str(workspace_slug or "").strip().lower()
+    title = str(workspace_title or workspace_slug or "Workspace").strip() or "Workspace"
+    if not base_url or not slug:
+        return {"status": "skipped", "reason": "missing_workspace_context"}
+    container_result = _ensure_remote_workspace_via_container(
+        api_container_name=api_container_name,
+        workspace_slug=slug,
+        workspace_title=title,
+    )
+    if container_result:
+        return container_result
+
+    cookie_header = ""
+    opener = urllib.request.build_opener()
+
+    def _request(*, method: str, path: str, data: Optional[bytes] = None, content_type: str = "") -> tuple[int, Dict[str, Any], Dict[str, str], str]:
+        nonlocal cookie_header
+        request = urllib.request.Request(f"{base_url}{path}", data=data, method=method.upper())
+        if cookie_header:
+            request.add_header("Cookie", cookie_header)
+        if content_type:
+            request.add_header("Content-Type", content_type)
+        try:
+            with opener.open(request, timeout=10) as response:
+                status = getattr(response, "status", 200)
+                body_bytes = response.read()
+                headers = {key.lower(): value for key, value in response.headers.items()}
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            body_bytes = exc.read()
+            headers = {key.lower(): value for key, value in exc.headers.items()}
+        set_cookie = headers.get("set-cookie") or ""
+        if set_cookie:
+            cookie_header = set_cookie.split(";", 1)[0]
+        text = body_bytes.decode("utf-8", errors="replace") if body_bytes else ""
+        payload: Dict[str, Any] = {}
+        if text:
+            try:
+                decoded = json.loads(text)
+                if isinstance(decoded, dict):
+                    payload = decoded
+            except json.JSONDecodeError:
+                payload = {}
+        return status, payload, headers, text
+
+    deadline = time.time() + 90
+    last_error = ""
+    while time.time() < deadline:
+        try:
+            login_body = urllib.parse.urlencode({"appId": "xyn-ui", "returnTo": "/app"}).encode("utf-8")
+            login_status, _, _, _ = _request(
+                method="POST",
+                path="/auth/dev-login",
+                data=login_body,
+                content_type="application/x-www-form-urlencoded",
+            )
+            if login_status not in {200, 302, 303}:
+                last_error = f"dev-login failed ({login_status})"
+                time.sleep(2)
+                continue
+            list_status, listing_payload, _, _ = _request(method="GET", path="/xyn/api/workspaces")
+            if list_status != 200:
+                last_error = f"workspace list failed ({list_status})"
+                time.sleep(2)
+                continue
+            rows = listing_payload.get("workspaces") if isinstance(listing_payload, dict) else listing_payload
+            for row in rows if isinstance(rows, list) else []:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("slug") or "").strip().lower() == slug:
+                    return {
+                        "status": "existing",
+                        "workspace_id": str(row.get("id") or ""),
+                        "workspace_slug": slug,
+                    }
+            create_status, create_payload, _, create_text = _request(
+                method="POST",
+                path="/xyn/api/workspaces",
+                data=json.dumps({"name": title, "slug": slug, "org_name": title}).encode("utf-8"),
+                content_type="application/json",
+            )
+            if create_status in {200, 201}:
+                workspace = create_payload.get("workspace") if isinstance(create_payload, dict) else {}
+                return {
+                    "status": "created",
+                    "workspace_id": str(workspace.get("id") or ""),
+                    "workspace_slug": slug,
+                }
+            if create_status == 400 and "already exists" in str(create_text or "").lower():
+                continue
+            last_error = f"workspace create failed ({create_status})"
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+            last_error = exc.__class__.__name__
+        time.sleep(2)
+    raise RuntimeError(f"Failed to ensure workspace '{slug}' in provisioned instance: {last_error or 'timeout'}")
 
 
 def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, api_host: str) -> str:
@@ -547,6 +700,19 @@ def _resolve_images_for_provision(request: ProvisionLocalRequest) -> dict[str, A
     local_ui_context = str(os.getenv("XYN_LOCAL_UI_CONTEXT", "")).strip() or str((Path(src_root) / "xyn-ui").resolve())
     local_api_context = str(os.getenv("XYN_LOCAL_API_CONTEXT", "")).strip() or str((Path(src_root) / "xyn-api").resolve())
     local_contexts_ready = bool(local_ui_context and local_api_context)
+    if _docker_image_exists(DEFAULT_UI_IMAGE_NAME) and _docker_image_exists(DEFAULT_API_IMAGE_NAME):
+        operations.append(f"Using prebuilt local image {DEFAULT_API_IMAGE_NAME}")
+        operations.append(f"Using prebuilt local image {DEFAULT_UI_IMAGE_NAME}")
+        return {
+            "mode": "prebuilt_local_images",
+            "registry": defaults["registry"],
+            "ui_image": DEFAULT_UI_IMAGE_NAME,
+            "api_image": DEFAULT_API_IMAGE_NAME,
+            "registry_slug": None,
+            "registry_source": "prebuilt_local_images",
+            "channel": str(request.channel or DEFAULT_IMAGE_TAG).strip() or DEFAULT_IMAGE_TAG,
+            "operations": operations,
+        }
     if local_contexts_ready and _context_has_dockerfile(local_ui_context) and _context_has_dockerfile(local_api_context):
         code, _, stderr = _run(["docker", "build", "-t", DEFAULT_API_IMAGE_NAME, local_api_context])
         if code != 0:
@@ -755,6 +921,14 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
             "deployment": {"label": "Deployment", "path": ui_url},
         },
     }
+    workspace_slug = str(request.workspace_slug or "").strip().lower()
+    if workspace_slug:
+        response["workspace"] = _ensure_remote_workspace(
+            api_url=api_url,
+            workspace_slug=workspace_slug,
+            workspace_title=workspace_slug.replace("-", " ").title(),
+            api_container_name=f"{project}-api",
+        )
     if request.job:
         response["job"] = {
             "status": job_result.status if job_result else deployment_payload.get("job_status", "failed"),

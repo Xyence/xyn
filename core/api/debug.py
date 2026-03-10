@@ -1,10 +1,13 @@
 """Debug API endpoints for development"""
+import uuid
 from typing import List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
+from core.capability_manifest import load_workspace_capability_manifest
 from core.database import get_db
+from core.palette_commands import workspace_palette_capability_diagnostics
 
 router = APIRouter()
 
@@ -98,3 +101,12 @@ async def list_tables_in_schema(schema_name: str, db: Session = Depends(get_db))
         })
 
     return tables
+
+
+@router.get("/debug/capabilities", response_model=Dict[str, Any])
+async def debug_capabilities(workspace_id: uuid.UUID, db: Session = Depends(get_db)):
+    return {
+        "workspace_id": str(workspace_id),
+        "manifest": load_workspace_capability_manifest(db, workspace_id=workspace_id),
+        "diagnostics": workspace_palette_capability_diagnostics(db, workspace_id=workspace_id),
+    }
