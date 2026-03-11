@@ -44,3 +44,17 @@ Epic C is complete enough to close. The items below are explicit follow-on work,
 - Clarify authoritative execution reference semantics in docs and code comments. Document that `runtime_run_id` and `runtime_workspace_id` are authoritative for bridged Epic C-backed `DevTask`s, while legacy `result_run` is compatibility-only for non-bridged paths.
 - Preserve and document `DevTask` idempotency and retry semantics. Active bridged runs should continue returning the existing Epic C run on repeated submission attempts, while retry after a terminal state should create a new Epic C run and update the authoritative runtime reference.
 - Review the broader `DevTask` UX after runtime migration settles. Once more task types are Epic C-backed, revisit task list/detail/operator affordances so queued, running, blocked, retry, artifact, and runtime-reference states are clearer without changing them in the current Epic C close-out.
+
+## Epic E Follow-ons
+
+Epic E is complete enough to close. The items below are explicit follow-on work, not blockers for Epic E completion.
+
+- Clean up the broader console test harness so the remaining React `act(...)` warning noise is reduced without changing Epic E behavior.
+- Add and maintain a small acceptance matrix note mapping the three supported Epic E prompt families to their affordance coverage and backend enforcement points.
+- Watch for resolve/apply semantic drift over time by keeping `PromptInterpretation`, `execution_mode`, and clarification semantics centralized.
+
+Broader post-Epic-E UX work:
+- Consider a future rich-input architecture if true inline token highlighting becomes worth the complexity.
+- Migrate additional preserved legacy non-Epic-D prompt paths onto the `PromptInterpretation` contract when those paths are modernized.
+- Revisit broader console affordances later for predictive help, suggestions, or advanced editing only after later epic priorities justify it.
+- Improve full-stack DB-backed and broader console-suite stability so future UX epics can rely on wider regression coverage.
