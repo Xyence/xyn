@@ -142,6 +142,25 @@ class RuntimeApiTests(unittest.TestCase):
         self.assertEqual(artifacts.json()[0]["artifact_type"], "summary")
         self.assertTrue(artifacts.json()[0]["uri"].endswith("/final_summary.md"))
 
+    def test_runtime_artifact_content_endpoint_returns_registered_artifact(self):
+        run = self._run_payload(status=models.RunStatus.COMPLETED)
+        artifact = capture_run_artifact(
+            self.db,
+            run_id=run.id,
+            artifact_type="summary",
+            label="Final summary",
+            content="done",
+            file_name="final_summary.md",
+        )
+        self.db.commit()
+
+        response = self.client.get(f"/api/v1/runs/{run.id}/artifacts/{artifact.id}")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["artifact_id"], str(artifact.id))
+        self.assertEqual(payload["run_id"], str(run.id))
+        self.assertEqual(payload["content"], "done")
+
     def test_terminal_states_surface_failure_and_escalation_fields(self):
         failed = self._run_payload(status=models.RunStatus.FAILED)
         failed.failure_reason = "worker_unresponsive"

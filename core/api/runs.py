@@ -8,7 +8,7 @@ from core.database import get_db
 from core import models, schemas
 from core.executor import SimpleExecutor
 from core.runtime_contract import RunPayloadV1
-from core.runtime_execution import continue_blocked_run, request_pause_run, retry_runtime_run, submit_runtime_run
+from core.runtime_execution import continue_blocked_run, read_run_artifact_content, request_pause_run, retry_runtime_run, submit_runtime_run
 
 router = APIRouter()
 
@@ -286,3 +286,19 @@ async def list_run_artifacts(
     ).order_by(models.Artifact.created_at.asc(), models.Artifact.id.asc()).all()
 
     return [schemas.Artifact.from_orm_model(artifact) for artifact in artifacts]
+
+
+@router.get("/runs/{run_id}/artifacts/{artifact_id}")
+async def get_run_artifact_content(
+    run_id: uuid.UUID,
+    artifact_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    run = db.query(models.Run).filter(models.Run.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        payload = read_run_artifact_content(db, run_id, artifact_id)
+        return {**payload, "run_id": str(run_id)}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Artifact content not found")
