@@ -79,3 +79,12 @@ Epic G follow-on workspace behavior is complete enough to ship its current polic
 
 - Clean up the remaining `xynConsoleStore.test.tsx` Vitest process-lifecycle issue so workspace and panel policy changes can be covered at the store seam without hanging worker processes.
 - Consider an admin-managed preset configuration path for application view/layout presets once the code-defined default preset seam has proven stable in daily use.
+
+## Epic H Follow-ons
+
+Epic H is complete enough to close. The items below are explicit follow-on work, not blockers for the current durable coordination artifact seam.
+
+- Resolve the unrelated migration drift around `0113_alter_videorender_status.py` so targeted Django validation no longer reports unrelated model/migration mismatch noise during coordination-artifact work.
+- Tighten activity drawer click-through into work-item panels so conversation/activity references can open the corresponding durable coordination objects more directly.
+- Evaluate later whether `DevTask` should remain the long-term durable `WorkItem` substrate or be renamed/reified more explicitly once XCO-level coordination expands.
+- Evaluate later whether `RunStep` exposure in the UI should become richer, but only after there is a demonstrated supervisory need.
