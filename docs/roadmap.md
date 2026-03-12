@@ -72,3 +72,10 @@ Broader post-Epic-F work:
 - Migrate more preserved legacy prompt paths onto the conversation action seam when those paths are modernized, rather than leaving long-term mixed conversational execution semantics.
 - Revisit broader conversation ergonomics only after later execution/review epics define stronger operator workflows.
 - Improve wider DB-backed and console integration stability so future conversational supervision work can rely on broader end-to-end regression coverage.
+
+## Epic G Follow-ons
+
+Epic G follow-on workspace behavior is complete enough to ship its current policy seam. The items below are explicit follow-on work, not blockers for the current panel architecture.
+
+- Clean up the remaining `xynConsoleStore.test.tsx` Vitest process-lifecycle issue so workspace and panel policy changes can be covered at the store seam without hanging worker processes.
+- Consider an admin-managed preset configuration path for application view/layout presets once the code-defined default preset seam has proven stable in daily use.
