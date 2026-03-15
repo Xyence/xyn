@@ -313,8 +313,8 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       OIDC_ISSUER: ${{XYN_OIDC_ISSUER:-}}
       OIDC_CLIENT_ID: ${{XYN_OIDC_CLIENT_ID:-}}
       XYN_UI_BEARER_TOKEN: ${{XYN_UI_BEARER_TOKEN:-}}
-      XYN_AI_PROVIDER: ${{XYN_AI_PROVIDER:-openai}}
-      XYN_AI_MODEL: ${{XYN_AI_MODEL:-gpt-5-mini}}
+      XYN_AI_PROVIDER: ${{XYN_AI_PROVIDER:-}}
+      XYN_AI_MODEL: ${{XYN_AI_MODEL:-}}
       XYN_AI_PLANNING_PROVIDER: ${{XYN_AI_PLANNING_PROVIDER:-}}
       XYN_AI_PLANNING_MODEL: ${{XYN_AI_PLANNING_MODEL:-}}
       XYN_AI_PLANNING_API_KEY: ${{XYN_AI_PLANNING_API_KEY:-}}
@@ -324,6 +324,7 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       XYN_OPENAI_API_KEY: ${{XYN_OPENAI_API_KEY:-}}
       XYN_GEMINI_API_KEY: ${{XYN_GEMINI_API_KEY:-}}
       XYN_ANTHROPIC_API_KEY: ${{XYN_ANTHROPIC_API_KEY:-}}
+      XYN_CREDENTIALS_ENCRYPTION_KEY: ${{XYN_CREDENTIALS_ENCRYPTION_KEY:-}}
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network={traefik_network}"
@@ -372,8 +373,8 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       OIDC_ISSUER: ${{XYN_OIDC_ISSUER:-}}
       OIDC_CLIENT_ID: ${{XYN_OIDC_CLIENT_ID:-}}
       XYN_UI_BEARER_TOKEN: ${{XYN_UI_BEARER_TOKEN:-}}
-      XYN_AI_PROVIDER: ${{XYN_AI_PROVIDER:-openai}}
-      XYN_AI_MODEL: ${{XYN_AI_MODEL:-gpt-5-mini}}
+      XYN_AI_PROVIDER: ${{XYN_AI_PROVIDER:-}}
+      XYN_AI_MODEL: ${{XYN_AI_MODEL:-}}
       XYN_AI_PLANNING_PROVIDER: ${{XYN_AI_PLANNING_PROVIDER:-}}
       XYN_AI_PLANNING_MODEL: ${{XYN_AI_PLANNING_MODEL:-}}
       XYN_AI_PLANNING_API_KEY: ${{XYN_AI_PLANNING_API_KEY:-}}
@@ -383,6 +384,7 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       XYN_OPENAI_API_KEY: ${{XYN_OPENAI_API_KEY:-}}
       XYN_GEMINI_API_KEY: ${{XYN_GEMINI_API_KEY:-}}
       XYN_ANTHROPIC_API_KEY: ${{XYN_ANTHROPIC_API_KEY:-}}
+      XYN_CREDENTIALS_ENCRYPTION_KEY: ${{XYN_CREDENTIALS_ENCRYPTION_KEY:-}}
     command:
       - /bin/sh
       - -lc
