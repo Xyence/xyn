@@ -4,8 +4,14 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
-from core.app_jobs import _build_app_spec, _build_policy_bundle, _materialize_net_inventory_compose
+from core.app_jobs import (
+    _build_app_spec,
+    _build_policy_bundle,
+    _ensure_parent_status_gate_prerequisites,
+    _materialize_net_inventory_compose,
+)
 
 
 TEAM_LUNCH_POLL_PROMPT = (
@@ -98,6 +104,62 @@ class GenericAppBuilderTests(unittest.TestCase):
         self.assertIn("render_policy_bundle", bundle["explanation"]["future_capabilities"])
         documented = sum(len(bundle["policies"][key]) for key in bundle["policies"])
         self.assertGreater(documented, 0)
+        compiled = [
+            entry
+            for family in bundle["policies"].values()
+            for entry in family
+            if isinstance(entry, dict) and entry.get("enforcement_stage") == "runtime_enforced"
+        ]
+        self.assertGreaterEqual(len(compiled), 3)
+        runtime_rules = {
+            str((entry.get("parameters") or {}).get("runtime_rule") or "")
+            for entry in compiled
+            if isinstance(entry.get("parameters"), dict)
+        }
+        self.assertIn("parent_status_gate", runtime_rules)
+        self.assertIn("match_related_field", runtime_rules)
+        self.assertIn("field_transition_guard", runtime_rules)
+
+    def test_policy_aware_smoke_primes_parent_status_before_child_create(self):
+        workspace_id = str(uuid.uuid4())
+        spec = _build_app_spec(
+            workspace_id=uuid.uuid4(),
+            title="Team Lunch Poll",
+            raw_prompt=TEAM_LUNCH_POLL_PROMPT,
+        )
+        policy_bundle = _build_policy_bundle(
+            workspace_id=uuid.uuid4(),
+            app_spec=spec,
+            raw_prompt=TEAM_LUNCH_POLL_PROMPT,
+        )
+        contracts = {row["key"]: row for row in spec["entity_contracts"]}
+        poll_id = str(uuid.uuid4())
+        created_records = {
+            "polls": {
+                "id": poll_id,
+                "workspace_id": workspace_id,
+                "status": "draft",
+            }
+        }
+        with mock.patch(
+            "core.app_jobs._container_http_json",
+            return_value=(200, {"id": poll_id, "workspace_id": workspace_id, "status": "open"}, ""),
+        ) as container_http_json:
+            _ensure_parent_status_gate_prerequisites(
+                container_name="xyn-app-team-lunch-poll-api",
+                port=8080,
+                workspace_id=workspace_id,
+                contract=contracts["votes"],
+                entity_contracts=spec["entity_contracts"],
+                created_records=created_records,
+                policy_bundle=policy_bundle,
+            )
+
+        self.assertEqual(created_records["polls"]["status"], "open")
+        container_http_json.assert_called_once()
+        args, kwargs = container_http_json.call_args
+        self.assertEqual(kwargs["payload"], {"status": "open"})
+        self.assertIn("/polls/", args[2])
 
 
 if __name__ == "__main__":

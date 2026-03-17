@@ -75,6 +75,35 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         self.assertIn('"key":"devices"', text)
         self.assertIn('"key":"locations"', text)
 
+    def test_compose_injects_policy_bundle_for_generated_runtime_enforcement(self):
+        app_spec = _build_app_spec(
+            workspace_id=uuid.uuid4(),
+            title="Team Lunch Poll",
+            raw_prompt=(
+                'Build a simple internal web app called "Team Lunch Poll". Purpose: Let a small team propose lunch options. '
+                "Requirements: Core entities: 1. Poll - title - poll_date - status (draft, open, closed, selected) "
+                "2. Lunch Option - poll - name - restaurant - notes - active (yes/no) "
+                "3. Vote - poll - lunch option - voter_name - created_at "
+                "Validation / rules: - Prevent voting on polls that are not open."
+            ),
+        )
+        policy_bundle = _build_policy_bundle(
+            workspace_id=uuid.uuid4(),
+            app_spec=app_spec,
+            raw_prompt="Validation / rules: - Prevent voting on polls that are not open.",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            compose_path = _materialize_net_inventory_compose(
+                app_spec=app_spec,
+                policy_bundle=policy_bundle,
+                deployment_dir=Path(tmpdir),
+                compose_project="xyn-app-team-lunch-poll",
+            )
+            text = compose_path.read_text(encoding="utf-8")
+
+        self.assertIn("GENERATED_POLICY_BUNDLE_JSON", text)
+        self.assertIn("parent_status_gate", text)
+
     def test_workspace_seed_creates_missing_workspace(self):
         class _FakeResponse:
             def __init__(self, status: int, body: str = "", headers: dict[str, str] | None = None):

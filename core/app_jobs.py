@@ -20,6 +20,7 @@ import base64
 import hashlib
 import io
 import zipfile
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -892,6 +893,290 @@ def _policy_targets_from_statement(statement: str, *, entity_contracts: list[dic
     }
 
 
+def _policy_entity_token_matches(contract: dict[str, Any], token: str) -> bool:
+    normalized = str(token or "").strip().lower()
+    if not normalized:
+        return False
+    singular = str(contract.get("singular_label") or str(contract.get("key") or "").rstrip("s")).strip().lower()
+    plural = str(contract.get("plural_label") or contract.get("key") or "").strip().lower()
+    candidates = {singular, plural}
+    if singular.endswith("e"):
+        candidates.add(f"{singular[:-1]}ing")
+    if singular:
+        candidates.add(f"{singular}ing")
+    return normalized in {item for item in candidates if item}
+
+
+def _policy_statement_entity_mentions(statement: str, *, entity_contracts: list[dict[str, Any]]) -> list[str]:
+    lowered = str(statement or "").strip().lower()
+    mentions: list[str] = []
+    for contract in entity_contracts:
+        if not isinstance(contract, dict):
+            continue
+        if any(_policy_entity_token_matches(contract, token) for token in re.findall(r"[a-z_]+", lowered)):
+            mentions.append(str(contract.get("key") or "").strip())
+    return _normalize_unique_strings(mentions)
+
+
+def _policy_status_field(contract: dict[str, Any]) -> tuple[str | None, list[str]]:
+    for field in contract.get("fields") if isinstance(contract.get("fields"), list) else []:
+        if not isinstance(field, dict):
+            continue
+        field_name = str(field.get("name") or "").strip()
+        options = [str(option).strip() for option in field.get("options") if str(option).strip()] if isinstance(field.get("options"), list) else []
+        if field_name == "status" and options:
+            return field_name, options
+    return None, []
+
+
+def _compile_relation_constraint_policies(
+    *,
+    app_slug: str,
+    entity_contracts: list[dict[str, Any]],
+    start_sequence: int,
+) -> tuple[list[dict[str, Any]], int]:
+    contracts = {
+        str(contract.get("key") or "").strip(): contract
+        for contract in entity_contracts
+        if isinstance(contract, dict) and str(contract.get("key") or "").strip()
+    }
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    sequence = start_sequence
+    for entity_key, contract in contracts.items():
+        relationships = contract.get("relationships") if isinstance(contract.get("relationships"), list) else []
+        relation_rows = [row for row in relationships if isinstance(row, dict) and str(row.get("field") or "").strip()]
+        if len(relation_rows) < 2:
+            continue
+        for relation in relation_rows:
+            source_field = str(relation.get("field") or "").strip()
+            related_entity = str(relation.get("target_entity") or "").strip()
+            if not source_field or not related_entity:
+                continue
+            related_contract = contracts.get(related_entity)
+            if not related_contract:
+                continue
+            related_relationships = related_contract.get("relationships") if isinstance(related_contract.get("relationships"), list) else []
+            for sibling_relation in relation_rows:
+                comparison_field = str(sibling_relation.get("field") or "").strip()
+                comparison_entity = str(sibling_relation.get("target_entity") or "").strip()
+                if not comparison_field or not comparison_entity or comparison_field == source_field:
+                    continue
+                backlink = next(
+                    (
+                        row
+                        for row in related_relationships
+                        if isinstance(row, dict)
+                        and str(row.get("target_entity") or "").strip() == comparison_entity
+                        and str(row.get("field") or "").strip()
+                    ),
+                    None,
+                )
+                if not backlink:
+                    continue
+                key = (entity_key, source_field, comparison_field, str(backlink.get("field") or "").strip())
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(
+                    {
+                        "id": f"{app_slug}-{sequence:03d}",
+                        "name": f"{entity_key}.{source_field} must align with {comparison_field}",
+                        "description": (
+                            f"Ensure the related {related_entity.rstrip('s')} referenced by {source_field} belongs to the same "
+                            f"{comparison_entity.rstrip('s')} referenced by {comparison_field}."
+                        ),
+                        "family": "relation_constraints",
+                        "status": "compiled",
+                        "enforcement_stage": "runtime_enforced",
+                        "targets": {
+                            "entity_keys": [entity_key, related_entity, comparison_entity],
+                            "field_names": [source_field, comparison_field, str(backlink.get("field") or "").strip()],
+                        },
+                        "parameters": {
+                            "runtime_rule": "match_related_field",
+                            "entity_key": entity_key,
+                            "source_field": source_field,
+                            "related_entity": related_entity,
+                            "related_lookup_field": str(relation.get("target_field") or "id").strip() or "id",
+                            "related_match_field": str(backlink.get("field") or "").strip(),
+                            "comparison_field": comparison_field,
+                            "comparison_entity": comparison_entity,
+                        },
+                        "source": {
+                            "kind": "derived_from_entity_contracts",
+                            "reason": "multiple_relationship_consistency",
+                        },
+                        "explanation": {
+                            "user_summary": (
+                                f"{entity_key.rstrip('s').replace('_', ' ')} references must stay aligned across related records."
+                            ),
+                            "why_it_exists": "Derived from generated relationship structure so cross-parent mismatches are rejected generically.",
+                        },
+                    }
+                )
+                sequence += 1
+    return rows, sequence
+
+
+def _compile_parent_status_gate_policies(
+    *,
+    app_slug: str,
+    entity_contracts: list[dict[str, Any]],
+    sections: dict[str, list[str]],
+    start_sequence: int,
+) -> tuple[list[dict[str, Any]], int]:
+    contracts = {
+        str(contract.get("key") or "").strip(): contract
+        for contract in entity_contracts
+        if isinstance(contract, dict) and str(contract.get("key") or "").strip()
+    }
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = set()
+    sequence = start_sequence
+    statements = [str(item or "").strip() for section in ("behavior", "validation") for item in sections.get(section, []) if str(item or "").strip()]
+    for statement in statements:
+        lowered = statement.lower()
+        mentions = _policy_statement_entity_mentions(statement, entity_contracts=entity_contracts)
+        if not mentions:
+            continue
+        child_contract = next(
+            (
+                contract
+                for contract in entity_contracts
+                if isinstance(contract, dict)
+                and any(_policy_entity_token_matches(contract, token) for token in re.findall(r"[a-z_]+", lowered))
+                and len(contract.get("relationships") or []) > 0
+            ),
+            None,
+        )
+        if not child_contract:
+            continue
+        child_entity = str(child_contract.get("key") or "").strip()
+        for relation in child_contract.get("relationships") if isinstance(child_contract.get("relationships"), list) else []:
+            if not isinstance(relation, dict):
+                continue
+            parent_entity = str(relation.get("target_entity") or "").strip()
+            if parent_entity not in mentions:
+                continue
+            parent_contract = contracts.get(parent_entity)
+            if not parent_contract:
+                continue
+            status_field, status_options = _policy_status_field(parent_contract)
+            if not status_field or not status_options:
+                continue
+            mentioned_statuses = [option for option in status_options if re.search(rf"\b{re.escape(option.lower())}\b", lowered)]
+            allowed_statuses: list[str] = []
+            blocked_statuses: list[str] = []
+            if re.search(r"\bnot\s+\w+\b", lowered) and "prevent" in lowered and mentioned_statuses:
+                allowed_statuses = mentioned_statuses
+            elif "does not allow" in lowered or "not allow" in lowered or "blocked" in lowered:
+                blocked_statuses = mentioned_statuses
+            elif "allow" in lowered and mentioned_statuses:
+                allowed_statuses = mentioned_statuses
+            if not allowed_statuses and not blocked_statuses:
+                continue
+            key = (child_entity, str(relation.get("field") or "").strip(), tuple(sorted(allowed_statuses)), tuple(sorted(blocked_statuses)))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                {
+                    "id": f"{app_slug}-{sequence:03d}",
+                    "name": f"{child_entity} writes must respect {parent_entity} status",
+                    "description": statement,
+                    "family": "validation_policies",
+                    "status": "compiled",
+                    "enforcement_stage": "runtime_enforced",
+                    "targets": {
+                        "entity_keys": [child_entity, parent_entity],
+                        "field_names": [str(relation.get("field") or "").strip(), status_field],
+                    },
+                    "parameters": {
+                        "runtime_rule": "parent_status_gate",
+                        "entity_key": child_entity,
+                        "parent_entity": parent_entity,
+                        "parent_relation_field": str(relation.get("field") or "").strip(),
+                        "parent_status_field": status_field,
+                        "allowed_parent_statuses": allowed_statuses,
+                        "blocked_parent_statuses": blocked_statuses,
+                        "on_operations": ["create", "update"],
+                    },
+                    "source": {
+                        "kind": "prompt_section",
+                        "text": statement,
+                    },
+                    "explanation": {
+                        "user_summary": statement,
+                        "why_it_exists": "Derived from prompt-described status-gated write behavior.",
+                    },
+                }
+            )
+            sequence += 1
+    return rows, sequence
+
+
+def _compile_transition_policies(
+    *,
+    app_slug: str,
+    entity_contracts: list[dict[str, Any]],
+    sections: dict[str, list[str]],
+    start_sequence: int,
+) -> tuple[list[dict[str, Any]], int]:
+    statements = " ".join(str(item or "").strip().lower() for section in ("behavior", "validation") for item in sections.get(section, []))
+    sequence = start_sequence
+    rows: list[dict[str, Any]] = []
+    for contract in entity_contracts:
+        if not isinstance(contract, dict):
+            continue
+        entity_key = str(contract.get("key") or "").strip()
+        if not entity_key:
+            continue
+        singular = str(contract.get("singular_label") or entity_key.rstrip("s")).strip().lower()
+        status_field, status_options = _policy_status_field(contract)
+        if not status_field or len(status_options) < 2:
+            continue
+        if singular not in statements and entity_key not in statements and "status" not in statements:
+            continue
+        allowed_transitions = {
+            option: _normalize_unique_strings(
+                [option]
+                + ([status_options[index + 1]] if index + 1 < len(status_options) else [])
+            )
+            for index, option in enumerate(status_options)
+        }
+        rows.append(
+            {
+                "id": f"{app_slug}-{sequence:03d}",
+                "name": f"{entity_key}.{status_field} transition guard",
+                "description": f"Restrict {entity_key} {status_field} changes to the declared ordered states.",
+                "family": "transition_policies",
+                "status": "compiled",
+                "enforcement_stage": "runtime_enforced",
+                "targets": {
+                    "entity_keys": [entity_key],
+                    "field_names": [status_field],
+                },
+                "parameters": {
+                    "runtime_rule": "field_transition_guard",
+                    "entity_key": entity_key,
+                    "field_name": status_field,
+                    "allowed_transitions": allowed_transitions,
+                },
+                "source": {
+                    "kind": "derived_from_entity_contracts",
+                    "reason": "ordered_status_enum",
+                },
+                "explanation": {
+                    "user_summary": f"{entity_key.replace('_', ' ')} status changes follow the declared status order.",
+                    "why_it_exists": "Derived from ordered status options in the generated entity contract.",
+                },
+            }
+        )
+        sequence += 1
+    return rows, sequence
+
+
 def _build_policy_bundle(
     *,
     workspace_id: uuid.UUID,
@@ -938,6 +1223,27 @@ def _build_policy_bundle(
             families[family].append(entry)
             sequence += 1
 
+    compiled_relation_constraints, sequence = _compile_relation_constraint_policies(
+        app_slug=app_slug,
+        entity_contracts=[row for row in entity_contracts if isinstance(row, dict)],
+        start_sequence=sequence,
+    )
+    families["relation_constraints"].extend(compiled_relation_constraints)
+    compiled_parent_status_gates, sequence = _compile_parent_status_gate_policies(
+        app_slug=app_slug,
+        entity_contracts=[row for row in entity_contracts if isinstance(row, dict)],
+        sections=sections,
+        start_sequence=sequence,
+    )
+    families["validation_policies"].extend(compiled_parent_status_gates)
+    compiled_transition_policies, sequence = _compile_transition_policies(
+        app_slug=app_slug,
+        entity_contracts=[row for row in entity_contracts if isinstance(row, dict)],
+        sections=sections,
+        start_sequence=sequence,
+    )
+    families["transition_policies"].extend(compiled_transition_policies)
+
     future_capabilities = [
         "render_policy_bundle",
         "validate_policy_bundle",
@@ -951,7 +1257,7 @@ def _build_policy_bundle(
         "app_slug": app_slug,
         "workspace_id": str(workspace_id),
         "title": f"{app_title} Policy Bundle",
-        "description": "Prompt-derived business policy bundle for the generated application. This artifact is durable and inspectable, but not yet fully compiled into runtime enforcement.",
+        "description": "Prompt-derived business policy bundle for the generated application. This artifact is durable and inspectable. A narrow generic subset is compiled into runtime enforcement, while unsupported families remain documented-only.",
         "scope": {
             "artifact_slug": _generated_artifact_slug(app_slug),
             "applies_to": ["generated_runtime", "palette", "future_editor", "future_validator"],
@@ -965,10 +1271,15 @@ def _build_policy_bundle(
         "policies": families,
         "configurable_parameters": [],
         "explanation": {
-            "summary": "Policy bundle scaffolds business-rule intent separately from entity contracts so future rendering, editing, validation, and enforcement can target the same durable artifact.",
+            "summary": "Policy bundle scaffolds business-rule intent separately from entity contracts so rendering, editing, validation, and runtime enforcement can target the same durable artifact. This first slice compiles relation constraints, status-based write gates, and simple transition guards.",
             "coverage": {
                 "documented_policy_count": sum(len(rows) for rows in families.values()),
-                "compiled_policy_count": 0,
+                "compiled_policy_count": sum(
+                    1
+                    for rows in families.values()
+                    for item in rows
+                    if isinstance(item, dict) and str(item.get("enforcement_stage") or "").strip() == "runtime_enforced"
+                ),
                 "entity_contract_count": len(entity_contracts),
             },
             "future_capabilities": future_capabilities,
@@ -1487,6 +1798,7 @@ def _docker_network_exists(network_name: str) -> bool:
 def _materialize_net_inventory_compose(
     *,
     app_spec: dict[str, Any],
+    policy_bundle: dict[str, Any] | None = None,
     deployment_dir: Path,
     compose_project: str,
     external_network_name: str | None = None,
@@ -1507,6 +1819,7 @@ def _materialize_net_inventory_compose(
         separators=(",", ":"),
         sort_keys=True,
     ).replace("'", "''")
+    policy_bundle_json = json.dumps(policy_bundle or {}, separators=(",", ":"), sort_keys=True).replace("'", "''")
     app_image = str(app_service.get("image") or _effective_net_inventory_image())
     app_ports = _ports_yaml(list(app_service.get("ports") or [{"host": 0, "container": 8080, "protocol": "tcp"}]))
     app_network_lines: list[str] = []
@@ -1556,6 +1869,7 @@ def _materialize_net_inventory_compose(
                 f"      APP_TITLE: \"{str(app_env.get('APP_TITLE') or app_spec.get('title') or app_service_name)}\"",
                 f"      DATABASE_URL: \"{str(app_env.get('DATABASE_URL') or f'postgresql://{db_user}:{db_password}@{db_service_name}:5432/{db_name}')}\"",
                 f"      GENERATED_ENTITY_CONTRACTS_JSON: '{entity_contracts_json}'",
+                f"      GENERATED_POLICY_BUNDLE_JSON: '{policy_bundle_json}'",
                 "      GENERATED_ENTITY_CONTRACTS_ALLOW_DEFAULTS: \"0\"",
                 "    ports:",
                 *app_ports,
@@ -1576,6 +1890,7 @@ def _materialize_net_inventory_compose(
 def _deploy_generated_runtime(
     *,
     app_spec: dict[str, Any],
+    policy_bundle: dict[str, Any] | None,
     deployment_dir: Path,
     compose_project: str,
     logs: list[str],
@@ -1584,6 +1899,7 @@ def _deploy_generated_runtime(
 ) -> dict[str, Any]:
     compose_path = _materialize_net_inventory_compose(
         app_spec=app_spec,
+        policy_bundle=policy_bundle,
         deployment_dir=deployment_dir,
         compose_project=compose_project,
         external_network_name=external_network_name,
@@ -1813,6 +2129,7 @@ def _handle_deploy_app_local(db: Session, job: Job, logs: list[str]) -> tuple[di
     execution_note_artifact_id = str(payload.get("execution_note_artifact_id") or "").strip()
     generated_artifact = payload.get("generated_artifact") if isinstance(payload.get("generated_artifact"), dict) else {}
     app_spec = payload.get("app_spec") if isinstance(payload.get("app_spec"), dict) else {}
+    policy_bundle = payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {}
     app_slug = _safe_slug(str(app_spec.get("app_slug") or "net-inventory"), default="net-inventory")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     deployment_dir = _deployments_root() / app_slug / stamp
@@ -1822,6 +2139,7 @@ def _handle_deploy_app_local(db: Session, job: Job, logs: list[str]) -> tuple[di
         "app_slug": app_slug,
         **_deploy_generated_runtime(
             app_spec=app_spec,
+            policy_bundle=policy_bundle,
             deployment_dir=deployment_dir,
             compose_project=compose_project,
             logs=logs,
@@ -1849,6 +2167,7 @@ def _handle_deploy_app_local(db: Session, job: Job, logs: list[str]) -> tuple[di
             "input_json": {
                 "deployment": app_output,
                 "app_spec": app_spec,
+                "policy_bundle": policy_bundle,
                 "generated_artifact": generated_artifact,
                 "execution_note_artifact_id": execution_note_artifact_id,
                 "source_job_id": str(job.id),
@@ -1970,6 +2289,7 @@ def _handle_provision_sibling_xyn(db: Session, job: Job, logs: list[str]) -> tup
     sibling_runtime_dir.mkdir(parents=True, exist_ok=True)
     sibling_runtime = _deploy_generated_runtime(
         app_spec=app_spec,
+        policy_bundle=payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {},
         deployment_dir=sibling_runtime_dir,
         compose_project=sibling_runtime_project,
         logs=logs,
@@ -2033,6 +2353,7 @@ def _handle_provision_sibling_xyn(db: Session, job: Job, logs: list[str]) -> tup
                 "deployment": deployment,
                 "sibling": sibling_output,
                 "app_spec": app_spec,
+                "policy_bundle": payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {},
                 "generated_artifact": generated_artifact,
                 "execution_note_artifact_id": execution_note_artifact_id,
                 "source_job_id": str(job.id),
@@ -2149,12 +2470,144 @@ def _build_contract_update_payload(contract: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _policy_bundle_entries(policy_bundle: dict[str, Any], family: str) -> list[dict[str, Any]]:
+    policies = policy_bundle.get("policies") if isinstance(policy_bundle.get("policies"), dict) else {}
+    rows = policies.get(family) if isinstance(policies.get(family), list) else []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _compiled_runtime_policies(
+    *,
+    policy_bundle: dict[str, Any],
+    family: str,
+    runtime_rule: str,
+    entity_key: str,
+) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for policy in _policy_bundle_entries(policy_bundle, family):
+        params = policy.get("parameters") if isinstance(policy.get("parameters"), dict) else {}
+        if str(params.get("runtime_rule") or "").strip() != runtime_rule:
+            continue
+        if str(params.get("entity_key") or "").strip() != entity_key:
+            continue
+        matches.append(policy)
+    return matches
+
+
+def _allowed_transition_path(
+    *,
+    current_status: str,
+    allowed_statuses: list[str],
+    allowed_transitions: dict[str, list[str]],
+) -> list[str] | None:
+    current = str(current_status or "").strip()
+    targets = {str(value).strip() for value in allowed_statuses if str(value).strip()}
+    if not current or not targets:
+        return None
+    if current in targets:
+        return []
+    queue: deque[tuple[str, list[str]]] = deque([(current, [])])
+    seen = {current}
+    while queue:
+        state, path = queue.popleft()
+        for candidate in allowed_transitions.get(state, []):
+            next_state = str(candidate or "").strip()
+            if not next_state or next_state in seen:
+                continue
+            next_path = path + [next_state]
+            if next_state in targets:
+                return next_path
+            seen.add(next_state)
+            queue.append((next_state, next_path))
+    return None
+
+
+def _ensure_parent_status_gate_prerequisites(
+    *,
+    container_name: str,
+    port: int,
+    workspace_id: str,
+    contract: dict[str, Any],
+    entity_contracts: list[dict[str, Any]],
+    created_records: dict[str, dict[str, Any]],
+    policy_bundle: dict[str, Any],
+) -> None:
+    entity_key = str(contract.get("key") or "").strip()
+    if not entity_key or not policy_bundle:
+        return
+    contracts = {
+        str(item.get("key") or "").strip(): item
+        for item in entity_contracts
+        if isinstance(item, dict) and str(item.get("key") or "").strip()
+    }
+    gates = _compiled_runtime_policies(
+        policy_bundle=policy_bundle,
+        family="validation_policies",
+        runtime_rule="parent_status_gate",
+        entity_key=entity_key,
+    )
+    for gate in gates:
+        params = gate.get("parameters") if isinstance(gate.get("parameters"), dict) else {}
+        if "create" not in {str(value).strip() for value in params.get("on_operations") or [] if str(value).strip()}:
+            continue
+        parent_entity = str(params.get("parent_entity") or "").strip()
+        parent_status_field = str(params.get("parent_status_field") or "").strip()
+        allowed_statuses = [str(value).strip() for value in params.get("allowed_parent_statuses") or [] if str(value).strip()]
+        if not parent_entity or not parent_status_field or not allowed_statuses:
+            continue
+        parent_contract = contracts.get(parent_entity)
+        parent_record = created_records.get(parent_entity)
+        if not isinstance(parent_contract, dict) or not isinstance(parent_record, dict):
+            continue
+        current_status = str(parent_record.get(parent_status_field) or "").strip()
+        if current_status in set(allowed_statuses):
+            continue
+        transition_policy = next(
+            (
+                policy
+                for policy in _compiled_runtime_policies(
+                    policy_bundle=policy_bundle,
+                    family="transition_policies",
+                    runtime_rule="field_transition_guard",
+                    entity_key=parent_entity,
+                )
+                if str(((policy.get("parameters") or {}).get("field_name")) or "").strip() == parent_status_field
+            ),
+            None,
+        )
+        transition_params = transition_policy.get("parameters") if isinstance((transition_policy or {}).get("parameters"), dict) else {}
+        transition_path = _allowed_transition_path(
+            current_status=current_status,
+            allowed_statuses=allowed_statuses,
+            allowed_transitions=transition_params.get("allowed_transitions") if isinstance(transition_params.get("allowed_transitions"), dict) else {},
+        )
+        if transition_path is None:
+            transition_path = [allowed_statuses[0]]
+        item_ref = str(parent_record.get("id") or "").strip()
+        item_template = str(parent_contract.get("item_path_template") or f"/{parent_entity}" + "/{id}").strip()
+        item_path = item_template.replace("{id}", item_ref)
+        for next_status in transition_path:
+            patch_code, patch_body, patch_text = _container_http_json(
+                container_name,
+                "PATCH",
+                f"{item_path}?workspace_id={workspace_id}",
+                port=port,
+                payload={parent_status_field: next_status},
+            )
+            if patch_code != 200:
+                raise RuntimeError(f"PATCH {item_path} failed ({patch_code}): {patch_text}")
+            if isinstance(patch_body, dict):
+                parent_record = patch_body
+                created_records[parent_entity] = patch_body
+
+
 def _exercise_runtime_contracts(
     *,
     container_name: str,
     port: int,
     workspace_id: str,
     entity_contracts: list[dict[str, Any]],
+    policy_bundle: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     results: dict[str, Any] = {}
     created_records: dict[str, dict[str, Any]] = {}
@@ -2172,6 +2625,15 @@ def _exercise_runtime_contracts(
                 continue
             entity_key = str(contract.get("key") or "").strip()
             collection_path = str(contract.get("collection_path") or f"/{entity_key}").strip()
+            _ensure_parent_status_gate_prerequisites(
+                container_name=container_name,
+                port=port,
+                workspace_id=workspace_id,
+                contract=contract,
+                entity_contracts=entity_contracts,
+                created_records=created_records,
+                policy_bundle=policy_bundle or {},
+            )
             seed_payload = _build_contract_seed_payload(
                 contract=contract,
                 workspace_id=workspace_id,
@@ -2244,6 +2706,7 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
     deployment = payload.get("deployment") if isinstance(payload.get("deployment"), dict) else {}
     sibling = payload.get("sibling") if isinstance(payload.get("sibling"), dict) else {}
     app_spec = payload.get("app_spec") if isinstance(payload.get("app_spec"), dict) else {}
+    policy_bundle = payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {}
     generated_artifact = payload.get("generated_artifact") if isinstance(payload.get("generated_artifact"), dict) else {}
     app_container_name = str(deployment.get("app_container_name") or "").strip()
     if not app_container_name:
@@ -2266,6 +2729,7 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
         port=8080,
         workspace_id=str(job.workspace_id),
         entity_contracts=entity_contracts,
+        policy_bundle=policy_bundle,
     )
 
     generated_artifact_slug = str(generated_artifact.get("artifact_slug") or "").strip()
@@ -2386,6 +2850,7 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
         port=8080,
         workspace_id=sibling_workspace_id,
         entity_contracts=entity_contracts,
+        policy_bundle=policy_bundle,
     )
 
     manifest = build_resolved_capability_manifest(app_spec)
