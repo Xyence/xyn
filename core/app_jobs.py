@@ -43,6 +43,7 @@ HTTP_TIMEOUT_SECONDS = int(os.getenv("XYN_APP_JOB_HTTP_TIMEOUT", "10"))
 APP_DEPLOY_HEALTH_TIMEOUT_SECONDS = int(os.getenv("XYN_APP_DEPLOY_HEALTH_TIMEOUT_SECONDS", "180"))
 COMMAND_TIMEOUT_SECONDS = int(os.getenv("XYN_APP_JOB_COMMAND_TIMEOUT_SECONDS", "240"))
 APPSPEC_SCHEMA_PATH = Path(__file__).resolve().parent / "contracts" / "appspec_v0.schema.json"
+POLICY_BUNDLE_SCHEMA_PATH = Path(__file__).resolve().parent / "contracts" / "policy_bundle_v0.schema.json"
 NET_INVENTORY_IMAGE = str(
     os.getenv("XYN_NET_INVENTORY_IMAGE", "public.ecr.aws/i0h0h0n4/xyn/artifacts/net-inventory-api:dev")
 ).strip()
@@ -111,6 +112,10 @@ def _effective_net_inventory_image() -> str:
 
 def _generated_artifact_slug(app_slug: str) -> str:
     return f"app.{_safe_slug(app_slug, default='generated-app')}"
+
+
+def _policy_bundle_slug(app_slug: str) -> str:
+    return f"policy.{_safe_slug(app_slug, default='generated-app')}"
 
 
 def _run(cmd: list[str], *, cwd: Optional[Path] = None) -> tuple[int, str, str]:
@@ -375,25 +380,80 @@ def _build_generated_artifact_manifest(*, app_spec: dict[str, Any], runtime_conf
     }
 
 
+def _build_generated_policy_artifact_manifest(*, app_spec: dict[str, Any], policy_bundle: dict[str, Any]) -> dict[str, Any]:
+    app_slug = _safe_slug(str(app_spec.get("app_slug") or "generated-app"), default="generated-app")
+    artifact_slug = _policy_bundle_slug(app_slug)
+    title = str(policy_bundle.get("title") or f"{str(app_spec.get('title') or app_slug).strip() or app_slug} Policy Bundle").strip()
+    families = list(policy_bundle.get("policy_families") or [])
+    return {
+        "artifact": {
+            "id": artifact_slug,
+            "type": "policy_bundle",
+            "slug": artifact_slug,
+            "version": GENERATED_ARTIFACT_VERSION,
+            "name": title,
+            "generated": True,
+        },
+        "capability": {
+            "visibility": "contextual",
+            "category": "policy",
+            "label": title,
+            "description": "Generated application policy bundle for future validation, rendering, explanation, and enforcement flows.",
+            "tags": ["generated", "policy_bundle", app_slug],
+            "order": 140,
+        },
+        "summary": {
+            "app_slug": app_slug,
+            "policy_families": families,
+            "policy_count": sum(
+                len(policy_bundle.get("policies", {}).get(key) or [])
+                for key in (
+                    "validation_policies",
+                    "relation_constraints",
+                    "transition_policies",
+                    "derived_policies",
+                    "trigger_policies",
+                )
+            ),
+            "future_capabilities": list((policy_bundle.get("explanation") or {}).get("future_capabilities") or []),
+        },
+        "content": {
+            "policy_bundle": policy_bundle,
+            "app_slug": app_slug,
+            "generated_artifact_slug": _generated_artifact_slug(app_slug),
+        },
+    }
+
+
 def _package_generated_app(
     *,
     workspace_id: uuid.UUID,
     source_job_id: str,
     app_spec: dict[str, Any],
+    policy_bundle: dict[str, Any],
     runtime_config: dict[str, Any],
 ) -> dict[str, Any]:
     app_slug = _safe_slug(str(app_spec.get("app_slug") or "generated-app"), default="generated-app")
     artifact_slug = _generated_artifact_slug(app_slug)
+    policy_artifact_slug = _policy_bundle_slug(app_slug)
     package_root = _generated_artifacts_root() / app_slug
     payload_root = package_root / "payload"
     payload_root.mkdir(parents=True, exist_ok=True)
 
     artifact_manifest = _build_generated_artifact_manifest(app_spec=app_spec, runtime_config=runtime_config)
+    artifact_manifest["content"]["policy_bundle_summary"] = {
+        "artifact_slug": policy_artifact_slug,
+        "title": str(policy_bundle.get("title") or "").strip(),
+        "policy_families": list(policy_bundle.get("policy_families") or []),
+    }
+    policy_artifact_manifest = _build_generated_policy_artifact_manifest(app_spec=app_spec, policy_bundle=policy_bundle)
     artifact_manifest_path = package_root / "artifact.json"
     app_spec_path = payload_root / "app_spec.json"
+    policy_bundle_path = payload_root / "policy_bundle.json"
     runtime_config_path = payload_root / "runtime_config.json"
     artifact_manifest_path.write_text(json.dumps(artifact_manifest, indent=2, sort_keys=True), encoding="utf-8")
     app_spec_path.write_text(json.dumps(app_spec, indent=2, sort_keys=True), encoding="utf-8")
+    policy_bundle_path.write_text(json.dumps(policy_bundle, indent=2, sort_keys=True), encoding="utf-8")
     runtime_config_path.write_text(json.dumps(runtime_config, indent=2, sort_keys=True), encoding="utf-8")
 
     artifact_entry = {
@@ -406,23 +466,50 @@ def _package_generated_app(
         "dependencies": [],
         "bindings": [],
     }
+    policy_artifact_entry = {
+        "type": "policy_bundle",
+        "slug": policy_artifact_slug,
+        "version": GENERATED_ARTIFACT_VERSION,
+        "artifact_id": policy_artifact_slug,
+        "title": str(policy_bundle.get("title") or f"{str(app_spec.get('title') or app_slug).strip() or app_slug} Policy Bundle"),
+        "description": "Generated application policy bundle",
+        "dependencies": [],
+        "bindings": [],
+    }
     files: dict[str, bytes] = {}
     base = f"artifacts/application/{artifact_slug}/{GENERATED_ARTIFACT_VERSION}"
+    policy_base = f"artifacts/policy_bundle/{policy_artifact_slug}/{GENERATED_ARTIFACT_VERSION}"
     artifact_zip_path = f"{base}/artifact.json"
     payload_zip_path = f"{base}/payload/payload.json"
     surfaces_zip_path = f"{base}/surfaces.json"
     runtime_roles_zip_path = f"{base}/runtime_roles.json"
+    policy_artifact_zip_path = f"{policy_base}/artifact.json"
+    policy_payload_zip_path = f"{policy_base}/payload/payload.json"
+    policy_surfaces_zip_path = f"{policy_base}/surfaces.json"
+    policy_runtime_roles_zip_path = f"{policy_base}/runtime_roles.json"
     combined_payload = {
         "app_spec": app_spec,
+        "policy_bundle": policy_bundle,
         "runtime_config": runtime_config,
         "generated": True,
         "source_job_id": source_job_id,
         "source_workspace_id": str(workspace_id),
     }
+    policy_payload = {
+        "policy_bundle": policy_bundle,
+        "generated": True,
+        "source_job_id": source_job_id,
+        "source_workspace_id": str(workspace_id),
+        "app_slug": app_slug,
+    }
     files[artifact_zip_path] = json.dumps(artifact_manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     files[payload_zip_path] = json.dumps(combined_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     files[surfaces_zip_path] = b"[]"
     files[runtime_roles_zip_path] = b"[]"
+    files[policy_artifact_zip_path] = json.dumps(policy_artifact_manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    files[policy_payload_zip_path] = json.dumps(policy_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    files[policy_surfaces_zip_path] = b"[]"
+    files[policy_runtime_roles_zip_path] = b"[]"
     manifest = {
         "format_version": 1,
         "package_name": artifact_slug,
@@ -433,7 +520,11 @@ def _package_generated_app(
             {
                 **artifact_entry,
                 "artifact_hash": hashlib.sha256(files[artifact_zip_path]).hexdigest(),
-            }
+            },
+            {
+                **policy_artifact_entry,
+                "artifact_hash": hashlib.sha256(files[policy_artifact_zip_path]).hexdigest(),
+            },
         ],
         "checksums": {path: hashlib.sha256(content).hexdigest() for path, content in files.items()},
     }
@@ -447,11 +538,13 @@ def _package_generated_app(
     return {
         "artifact_slug": artifact_slug,
         "artifact_version": GENERATED_ARTIFACT_VERSION,
+        "policy_bundle_slug": policy_artifact_slug,
         "artifact_manifest_path": str(artifact_manifest_path),
         "artifact_package_path": str(package_zip_path),
         "artifact_dir": str(package_root),
         "runtime_config_path": str(runtime_config_path),
         "app_spec_path": str(app_spec_path),
+        "policy_bundle_path": str(policy_bundle_path),
         "package_size_bytes": package_zip_path.stat().st_size,
     }
 
@@ -707,6 +800,10 @@ def _load_appspec_schema() -> dict[str, Any]:
     return json.loads(APPSPEC_SCHEMA_PATH.read_text(encoding="utf-8"))
 
 
+def _load_policy_bundle_schema() -> dict[str, Any]:
+    return json.loads(POLICY_BUNDLE_SCHEMA_PATH.read_text(encoding="utf-8"))
+
+
 def _persist_json_artifact(
     db: Session,
     *,
@@ -754,6 +851,129 @@ def _normalize_unique_strings(values: list[Any] | tuple[Any, ...] | set[Any] | N
         seen.add(key)
         result.append(text)
     return result
+
+
+def _policy_family_from_statement(statement: str) -> str:
+    lowered = str(statement or "").strip().lower()
+    if any(token in lowered for token in ("vote counts", "counts per", "count per", "rollup", "aggregate", "total")):
+        return "derived_policies"
+    if any(token in lowered for token in ("does not belong", "belong to", "exactly one", "more than one", "only one")):
+        return "relation_constraints"
+    if any(token in lowered for token in ("automatically", "when ", "upon ", "after ")) and any(
+        token in lowered for token in ("become", "set ", "mark ", "selected")
+    ):
+        return "trigger_policies"
+    if any(token in lowered for token in ("status", "state", "transition", "allows", "does not allow", "must have")):
+        return "transition_policies"
+    return "validation_policies"
+
+
+def _policy_targets_from_statement(statement: str, *, entity_contracts: list[dict[str, Any]]) -> dict[str, Any]:
+    lowered = str(statement or "").strip().lower()
+    entity_keys: list[str] = []
+    field_names: list[str] = []
+    for contract in entity_contracts:
+        if not isinstance(contract, dict):
+            continue
+        entity_key = str(contract.get("key") or "").strip()
+        singular = str(contract.get("singular_label") or entity_key.rstrip("s")).strip().lower()
+        plural = str(contract.get("plural_label") or entity_key).strip().lower()
+        if singular and singular in lowered or plural and plural in lowered:
+            entity_keys.append(entity_key)
+        for field in contract.get("fields") if isinstance(contract.get("fields"), list) else []:
+            if not isinstance(field, dict):
+                continue
+            field_name = str(field.get("name") or "").strip()
+            if field_name and field_name.replace("_", " ") in lowered:
+                field_names.append(field_name)
+    return {
+        "entity_keys": _normalize_unique_strings(entity_keys),
+        "field_names": _normalize_unique_strings(field_names),
+    }
+
+
+def _build_policy_bundle(
+    *,
+    workspace_id: uuid.UUID,
+    app_spec: dict[str, Any],
+    raw_prompt: str,
+) -> dict[str, Any]:
+    app_slug = str(app_spec.get("app_slug") or "generated-app").strip() or "generated-app"
+    app_title = str(app_spec.get("title") or app_slug).strip() or app_slug
+    entity_contracts = app_spec.get("entity_contracts") if isinstance(app_spec.get("entity_contracts"), list) else []
+    sections = _extract_objective_sections(raw_prompt)
+    families = {
+        "validation_policies": [],
+        "relation_constraints": [],
+        "transition_policies": [],
+        "derived_policies": [],
+        "trigger_policies": [],
+    }
+    sequence = 1
+    for section_name in ("behavior", "validation"):
+        for statement in sections.get(section_name, []):
+            text = str(statement or "").strip()
+            if not text:
+                continue
+            family = _policy_family_from_statement(text)
+            entry = {
+                "id": f"{app_slug}-{sequence:03d}",
+                "name": text[:96],
+                "description": text,
+                "family": family,
+                "status": "documented",
+                "enforcement_stage": "not_compiled",
+                "targets": _policy_targets_from_statement(text, entity_contracts=[row for row in entity_contracts if isinstance(row, dict)]),
+                "parameters": {},
+                "source": {
+                    "kind": "prompt_section",
+                    "section": section_name,
+                    "text": text,
+                },
+                "explanation": {
+                    "user_summary": text,
+                    "why_it_exists": f"Derived from the generated app request {section_name} section.",
+                },
+            }
+            families[family].append(entry)
+            sequence += 1
+
+    future_capabilities = [
+        "render_policy_bundle",
+        "validate_policy_bundle",
+        "compile_policy_bundle",
+        "simulate_policy_bundle",
+        "explain_policy_bundle",
+    ]
+    return {
+        "schema_version": "xyn.policy_bundle.v0",
+        "bundle_id": _policy_bundle_slug(app_slug),
+        "app_slug": app_slug,
+        "workspace_id": str(workspace_id),
+        "title": f"{app_title} Policy Bundle",
+        "description": "Prompt-derived business policy bundle for the generated application. This artifact is durable and inspectable, but not yet fully compiled into runtime enforcement.",
+        "scope": {
+            "artifact_slug": _generated_artifact_slug(app_slug),
+            "applies_to": ["generated_runtime", "palette", "future_editor", "future_validator"],
+        },
+        "ownership": {
+            "owner_kind": "generated_application",
+            "editable": True,
+            "source": "generated_from_prompt",
+        },
+        "policy_families": [key for key, rows in families.items() if rows] or list(families.keys()),
+        "policies": families,
+        "configurable_parameters": [],
+        "explanation": {
+            "summary": "Policy bundle scaffolds business-rule intent separately from entity contracts so future rendering, editing, validation, and enforcement can target the same durable artifact.",
+            "coverage": {
+                "documented_policy_count": sum(len(rows) for rows in families.values()),
+                "compiled_policy_count": 0,
+                "entity_contract_count": len(entity_contracts),
+            },
+            "future_capabilities": future_capabilities,
+        },
+    }
 
 
 def _title_case_words(value: str) -> str:
@@ -1455,6 +1675,16 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
     except ValidationError as exc:
         raise RuntimeError(f"AppSpec validation failed: {exc.message}") from exc
 
+    policy_bundle = _build_policy_bundle(
+        workspace_id=job.workspace_id,
+        app_spec=app_spec,
+        raw_prompt=raw_prompt,
+    )
+    try:
+        validate(instance=policy_bundle, schema=_load_policy_bundle_schema())
+    except ValidationError as exc:
+        raise RuntimeError(f"Policy bundle validation failed: {exc.message}") from exc
+
     artifact_id = _persist_json_artifact(
         db,
         workspace_id=job.workspace_id,
@@ -1464,6 +1694,15 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
         metadata={"job_id": str(job.id)},
     )
     _append_job_log(logs, f"Persisted AppSpec artifact: {artifact_id}")
+    policy_bundle_artifact_id = _persist_json_artifact(
+        db,
+        workspace_id=job.workspace_id,
+        name=_policy_bundle_slug(str(app_spec.get("app_slug") or "generated-app")),
+        kind="policy_bundle",
+        payload=policy_bundle,
+        metadata={"job_id": str(job.id), "app_spec_artifact_id": artifact_id},
+    )
+    _append_job_log(logs, f"Persisted policy bundle artifact: {policy_bundle_artifact_id}")
 
     selected_images = {svc.get("name"): svc.get("image") for svc in app_spec.get("services", []) if isinstance(svc, dict)}
     selected_ports = {
@@ -1476,6 +1715,7 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
         "artifact_slug": _generated_artifact_slug(str(app_spec.get("app_slug") or "generated-app")),
         "artifact_version": GENERATED_ARTIFACT_VERSION,
         "app_spec_artifact_id": artifact_id,
+        "policy_bundle_artifact_id": policy_bundle_artifact_id,
         "images": selected_images,
         "ports": selected_ports,
         "services": app_spec.get("services") if isinstance(app_spec.get("services"), list) else [],
@@ -1486,6 +1726,7 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
         workspace_id=job.workspace_id,
         source_job_id=str(job.id),
         app_spec=app_spec,
+        policy_bundle=policy_bundle,
         runtime_config=generated_artifact_runtime_config,
     )
     _append_job_log(
@@ -1513,7 +1754,9 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
         validation_summary=[
             "Primitive catalog loaded successfully.",
             "AppSpec validated against xyn.appspec.v0 schema.",
+            "Policy bundle validated against xyn.policy_bundle.v0 schema.",
             f"AppSpec artifact persisted: {artifact_id}.",
+            f"Policy bundle artifact persisted: {policy_bundle_artifact_id}.",
             f"Generated artifact package created: {packaged_artifact['artifact_slug']}@{packaged_artifact['artifact_version']}.",
             (
                 f"Generated artifact imported into registry: {packaged_artifact['artifact_slug']}"
@@ -1521,15 +1764,17 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
                 else f"Generated artifact registry import deferred: {registry_import_error or 'unknown error'}."
             ),
         ],
-        related_artifact_ids=[artifact_id],
-        extra_metadata_updates={"app_spec_artifact_id": artifact_id},
+        related_artifact_ids=[artifact_id, policy_bundle_artifact_id],
+        extra_metadata_updates={"app_spec_artifact_id": artifact_id, "policy_bundle_artifact_id": policy_bundle_artifact_id},
     )
     follow_up = [
         {
             "type": "deploy_app_local",
             "input_json": {
                 "app_spec": app_spec,
+                "policy_bundle": policy_bundle,
                 "app_spec_artifact_id": artifact_id,
+                "policy_bundle_artifact_id": policy_bundle_artifact_id,
                 "generated_artifact": {
                     **packaged_artifact,
                     "registry_import": registry_artifact,
@@ -1543,8 +1788,11 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
     return (
         {
             "app_spec": app_spec,
+            "policy_bundle": policy_bundle,
             "app_spec_artifact_id": artifact_id,
+            "policy_bundle_artifact_id": policy_bundle_artifact_id,
             "app_spec_schema": "xyn.appspec.v0",
+            "policy_bundle_schema": "xyn.policy_bundle.v0",
             "primitive_catalog": primitive_catalog,
             "selected_images": selected_images,
             "selected_ports": selected_ports,

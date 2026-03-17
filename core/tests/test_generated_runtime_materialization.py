@@ -2,14 +2,53 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import uuid
+import json
+import zipfile
 from pathlib import Path
 from unittest import mock
 
-from core.app_jobs import _materialize_net_inventory_compose, _prefer_local_platform_images_for_smoke
+from core.app_jobs import _build_app_spec, _build_policy_bundle, _materialize_net_inventory_compose, _package_generated_app, _prefer_local_platform_images_for_smoke
 from core.provisioning_local import ProvisionLocalRequest, _ensure_remote_workspace, _resolve_images_for_provision
 
 
 class GeneratedRuntimeMaterializationTests(unittest.TestCase):
+    def test_generated_package_includes_policy_bundle_artifact(self):
+        workspace_id = uuid.uuid4()
+        app_spec = _build_app_spec(
+            workspace_id=workspace_id,
+            title="Team Lunch Poll",
+            raw_prompt=(
+                'Build a simple internal web app called "Team Lunch Poll". Purpose: Let a small team propose lunch options. '
+                "Requirements: Core entities: 1. Poll - title - poll_date - status (draft, open, closed, selected) "
+                "2. Lunch Option - poll - name - restaurant - notes - active (yes/no) "
+                "3. Vote - poll - lunch option - voter_name - created_at "
+                "Validation / rules: - Prevent voting on polls that are not open."
+            ),
+        )
+        policy_bundle = _build_policy_bundle(
+            workspace_id=workspace_id,
+            app_spec=app_spec,
+            raw_prompt="Validation / rules: - Prevent voting on polls that are not open.",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch("core.app_jobs._generated_artifacts_root", return_value=Path(tmpdir)):
+                packaged = _package_generated_app(
+                    workspace_id=workspace_id,
+                    source_job_id="job-1",
+                    app_spec=app_spec,
+                    policy_bundle=policy_bundle,
+                    runtime_config={},
+                )
+            with zipfile.ZipFile(packaged["artifact_package_path"], "r") as archive:
+                manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+
+        refs = {(row["type"], row["slug"]) for row in manifest["artifacts"]}
+        self.assertIn(("application", "app.team-lunch-poll"), refs)
+        self.assertIn(("policy_bundle", "policy.team-lunch-poll"), refs)
+        self.assertEqual(packaged["policy_bundle_slug"], "policy.team-lunch-poll")
+
     def test_compose_injects_manifest_entity_contracts(self):
         app_spec = {
             "app_slug": "net-inventory",

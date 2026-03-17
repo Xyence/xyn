@@ -5,7 +5,7 @@ import unittest
 import uuid
 from pathlib import Path
 
-from core.app_jobs import _build_app_spec, _materialize_net_inventory_compose
+from core.app_jobs import _build_app_spec, _build_policy_bundle, _materialize_net_inventory_compose
 
 
 TEAM_LUNCH_POLL_PROMPT = (
@@ -75,6 +75,29 @@ class GenericAppBuilderTests(unittest.TestCase):
         self.assertIn('SERVICE_NAME: "team-lunch-poll-api"', text)
         self.assertIn('APP_TITLE: "Team Lunch Poll"', text)
         self.assertNotIn("net-inventory-db:", text)
+
+    def test_generated_apps_build_policy_bundle_by_default(self):
+        workspace_id = uuid.uuid4()
+        spec = _build_app_spec(
+            workspace_id=workspace_id,
+            title="Team Lunch Poll",
+            raw_prompt=TEAM_LUNCH_POLL_PROMPT,
+        )
+
+        bundle = _build_policy_bundle(
+            workspace_id=workspace_id,
+            app_spec=spec,
+            raw_prompt=TEAM_LUNCH_POLL_PROMPT,
+        )
+
+        self.assertEqual(bundle["schema_version"], "xyn.policy_bundle.v0")
+        self.assertEqual(bundle["bundle_id"], "policy.team-lunch-poll")
+        self.assertEqual(bundle["scope"]["artifact_slug"], "app.team-lunch-poll")
+        self.assertIn("validation_policies", bundle["policies"])
+        self.assertIn("transition_policies", bundle["policies"])
+        self.assertIn("render_policy_bundle", bundle["explanation"]["future_capabilities"])
+        documented = sum(len(bundle["policies"][key]) for key in bundle["policies"])
+        self.assertGreater(documented, 0)
 
 
 if __name__ == "__main__":
