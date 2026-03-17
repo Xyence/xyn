@@ -82,6 +82,12 @@ class SeedConfig:
     ai_provider: str
     ai_model: str
     ai_enabled: bool
+    ai_planning_provider: str
+    ai_planning_model: str
+    ai_planning_api_key: str
+    ai_coding_provider: str
+    ai_coding_model: str
+    ai_coding_api_key: str
     openai_api_key: str
     gemini_api_key: str
     anthropic_api_key: str
@@ -89,6 +95,9 @@ class SeedConfig:
     credentials_encryption_key: str
     database_url: str
     redis_url: str
+    artifact_root: str
+    workspace_root: str
+    workspace_retention_days: int
 
 
 def _resolve_ai_provider_and_keys() -> tuple[str, bool, dict[str, str]]:
@@ -123,6 +132,23 @@ def _default_ai_model(provider: str) -> str:
     if provider in AI_MODEL_DEFAULTS:
         return AI_MODEL_DEFAULTS[provider]
     return "none"
+
+
+def _resolve_overlay_ai_role(role_slug: str) -> tuple[str, str, str]:
+    prefix = f"XYN_AI_{role_slug.upper()}"
+    provider = _env(f"{prefix}_PROVIDER", "").strip().lower()
+    model = _env(f"{prefix}_MODEL", "").strip()
+    api_key = _env(f"{prefix}_API_KEY", "").strip()
+    if not provider and not model and not api_key:
+        return "", "", ""
+    if not provider or not model or not api_key:
+        raise RuntimeError(
+            f"{prefix}_PROVIDER, {prefix}_MODEL, and {prefix}_API_KEY must all be set when configuring the {role_slug} bootstrap agent"
+        )
+    if provider not in {"openai", "gemini", "anthropic", "google"}:
+        raise RuntimeError(f"{prefix}_PROVIDER must be one of: openai|gemini|anthropic")
+    normalized_provider = "gemini" if provider == "google" else provider
+    return normalized_provider, model, api_key
 
 
 def load_seed_config() -> SeedConfig:
@@ -167,9 +193,19 @@ def load_seed_config() -> SeedConfig:
 
     ai_provider, ai_enabled, ai_keys = _resolve_ai_provider_and_keys()
     ai_model = _default_ai_model(ai_provider) if ai_enabled else "none"
+    planning_provider, planning_model, planning_api_key = _resolve_overlay_ai_role("planning")
+    coding_provider, coding_model, coding_api_key = _resolve_overlay_ai_role("coding")
+    if (planning_provider or coding_provider) and not ai_enabled:
+        raise RuntimeError("Default AI provider/model/key must be configured before planning or coding bootstrap overlays can be used")
 
     database_url = _env("DATABASE_URL", "postgresql://xyn:xyn_dev_password@postgres:5432/xyn")
     redis_url = _env("REDIS_URL", "redis://redis:6379/0")
+    artifact_root = _env("XYN_ARTIFACT_ROOT", _env("ARTIFACT_STORE_PATH", ".xyn/artifacts"))
+    workspace_root = _env("XYN_WORKSPACE_ROOT", _env("XYN_LOCAL_WORKSPACE_ROOT", _env("XYNSEED_WORKSPACE", ".xyn/workspace")))
+    try:
+        workspace_retention_days = max(1, int(_env("XYN_WORKSPACE_RETENTION_DAYS", "14")))
+    except (TypeError, ValueError):
+        workspace_retention_days = 14
     secret_key = _env("XYN_SECRET_KEY", "")
     credentials_encryption_key = _env("XYN_CREDENTIALS_ENCRYPTION_KEY", "")
 
@@ -188,6 +224,12 @@ def load_seed_config() -> SeedConfig:
         ai_provider=ai_provider,
         ai_model=ai_model,
         ai_enabled=ai_enabled,
+        ai_planning_provider=planning_provider,
+        ai_planning_model=planning_model,
+        ai_planning_api_key=planning_api_key,
+        ai_coding_provider=coding_provider,
+        ai_coding_model=coding_model,
+        ai_coding_api_key=coding_api_key,
         openai_api_key=ai_keys["openai"],
         gemini_api_key=ai_keys["gemini"],
         anthropic_api_key=ai_keys["anthropic"],
@@ -195,6 +237,9 @@ def load_seed_config() -> SeedConfig:
         credentials_encryption_key=credentials_encryption_key,
         database_url=database_url,
         redis_url=redis_url,
+        artifact_root=artifact_root,
+        workspace_root=workspace_root,
+        workspace_retention_days=workspace_retention_days,
     )
 
 
@@ -215,6 +260,12 @@ def export_runtime_env(config: SeedConfig) -> dict[str, str]:
         "XYN_AI_PROVIDER": config.ai_provider,
         "XYN_AI_MODEL": config.ai_model,
         "XYN_AI_ENABLED": "true" if config.ai_enabled else "false",
+        "XYN_AI_PLANNING_PROVIDER": config.ai_planning_provider,
+        "XYN_AI_PLANNING_MODEL": config.ai_planning_model,
+        "XYN_AI_PLANNING_API_KEY": config.ai_planning_api_key,
+        "XYN_AI_CODING_PROVIDER": config.ai_coding_provider,
+        "XYN_AI_CODING_MODEL": config.ai_coding_model,
+        "XYN_AI_CODING_API_KEY": config.ai_coding_api_key,
         "XYN_DEFAULT_MODEL_PROVIDER": config.ai_provider,
         "XYN_DEFAULT_MODEL_NAME": config.ai_model,
         "XYN_OPENAI_API_KEY": config.openai_api_key,
@@ -229,6 +280,12 @@ def export_runtime_env(config: SeedConfig) -> dict[str, str]:
         "XYN_CREDENTIALS_ENCRYPTION_KEY": config.credentials_encryption_key,
         "DATABASE_URL": config.database_url,
         "REDIS_URL": config.redis_url,
+        "XYN_ARTIFACT_ROOT": config.artifact_root,
+        "ARTIFACT_STORE_PATH": config.artifact_root,
+        "XYN_WORKSPACE_ROOT": config.workspace_root,
+        "XYN_LOCAL_WORKSPACE_ROOT": config.workspace_root,
+        "XYNSEED_WORKSPACE": config.workspace_root,
+        "XYN_WORKSPACE_RETENTION_DAYS": str(config.workspace_retention_days),
     }
     if config.base_domain:
         exported["DOMAIN"] = config.base_domain

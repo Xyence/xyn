@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, Optional
 from sqlalchemy.orm import Session
 
 from core import models
+from core.artifact_store import get_runtime_artifact_store
 from core.context_packs import default_instance_workspace_root
 from core.runtime_contract import (
     AllowedRequestedOutput,
@@ -63,6 +64,7 @@ ALLOWED_ARTIFACT_TYPES = {"patch", "log", "report", "code", "summary"}
 
 
 def _runtime_artifact_root() -> Path:
+    # Legacy fallback path for artifacts written before runtime store abstraction.
     root = Path(default_instance_workspace_root()).resolve() / "runtime_runs"
     root.mkdir(parents=True, exist_ok=True)
     return root
@@ -80,15 +82,6 @@ def _artifact_uri(run_id: uuid.UUID, artifact_id: uuid.UUID, file_name: Optional
     if file_name:
         return f"artifact://runs/{run_id}/{file_name}"
     return f"artifact://runs/{run_id}/artifacts/{artifact_id}"
-
-
-def _artifact_path(run_id: uuid.UUID, artifact_id: uuid.UUID, artifact_type: str, file_name: Optional[str] = None) -> Path:
-    root = _runtime_artifact_root() / str(run_id) / "artifacts"
-    root.mkdir(parents=True, exist_ok=True)
-    if file_name:
-        return root / file_name
-    suffix = "json" if artifact_type in {"report", "summary"} else "txt"
-    return root / f"{artifact_id}.{suffix}"
 
 
 def _runtime_controls(run: models.Run) -> Dict[str, Any]:
@@ -339,7 +332,6 @@ def capture_run_artifact(
         raise ValueError(f"unknown artifact type: {artifact_type}")
     artifact_id = uuid.uuid4()
     uri = _artifact_uri(run_id, artifact_id, file_name=file_name)
-    path = _artifact_path(run_id, artifact_id, artifact_type, file_name=file_name)
     if isinstance(content, dict):
         payload_bytes = _serialize_json(content)
         content_type = "application/json"
@@ -347,7 +339,8 @@ def capture_run_artifact(
         text_content = "" if content is None else str(content)
         payload_bytes = text_content.encode("utf-8")
         content_type = "text/plain"
-    path.write_bytes(payload_bytes)
+    artifact_store = get_runtime_artifact_store()
+    storage_key, sha256_hash = artifact_store.store_bytes(artifact_id=artifact_id, content=payload_bytes, compute_sha256=True)
     artifact = models.Artifact(
         id=artifact_id,
         run_id=run_id,
@@ -355,8 +348,14 @@ def capture_run_artifact(
         kind=artifact_type,
         content_type=content_type,
         byte_length=len(payload_bytes),
+        sha256=sha256_hash,
         created_by="runtime",
-        extra_metadata=dict(metadata_json or {}),
+        extra_metadata={
+            **dict(metadata_json or {}),
+            "storage_key": storage_key,
+            "storage_provider": artifact_store.provider,
+            "runtime_artifact_uri": uri,
+        },
         storage_path=uri,
         created_at=datetime.utcnow(),
     )
@@ -599,18 +598,23 @@ def collect_run_artifact_descriptors(db: Session, run_id: uuid.UUID) -> list[Wor
 def read_run_artifact_content(db: Session, run_id: uuid.UUID, artifact_id: uuid.UUID) -> Dict[str, Any]:
     row = db.query(models.Artifact).filter(models.Artifact.id == artifact_id, models.Artifact.run_id == run_id).one()
     uri = str(row.storage_path or "")
-    root = _runtime_artifact_root() / str(run_id) / "artifacts"
-    file_name = uri.split(f"artifact://runs/{run_id}/", 1)[1] if uri.startswith(f"artifact://runs/{run_id}/") else ""
-    path = (root / file_name).resolve() if file_name else None
-    if path is None or not path.exists():
-        raise FileNotFoundError(uri)
+    artifact_store = get_runtime_artifact_store()
+    payload = artifact_store.retrieve_bytes(artifact_id=artifact_id)
+    if payload is None:
+        # Legacy fallback for artifacts persisted before runtime backend abstraction.
+        root = _runtime_artifact_root() / str(run_id) / "artifacts"
+        file_name = uri.split(f"artifact://runs/{run_id}/", 1)[1] if uri.startswith(f"artifact://runs/{run_id}/") else ""
+        path = (root / file_name).resolve() if file_name else None
+        if path is None or not path.exists():
+            raise FileNotFoundError(uri)
+        payload = path.read_bytes()
     return {
         "artifact_id": str(row.id),
         "artifact_type": row.kind,
         "label": row.name,
         "uri": uri,
         "content_type": row.content_type,
-        "content": path.read_text(encoding="utf-8"),
+        "content": payload.decode("utf-8", errors="replace"),
     }
 
 

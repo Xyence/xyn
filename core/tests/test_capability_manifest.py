@@ -156,6 +156,47 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertTrue(entities["interfaces"]["operations"]["update"]["declared"])
         self.assertTrue(entities["interfaces"]["operations"]["delete"]["declared"])
 
+    def test_explicit_entity_contracts_drive_generated_manifest_without_inventory_defaults(self):
+        manifest = build_resolved_capability_manifest(
+            {
+                "app_slug": "team-lunch-poll",
+                "title": "Team Lunch Poll",
+                "workspace_id": str(uuid.uuid4()),
+                "reports": [],
+                "entity_contracts": [
+                    {
+                        "key": "polls",
+                        "singular_label": "poll",
+                        "plural_label": "polls",
+                        "collection_path": "/polls",
+                        "item_path_template": "/polls/{id}",
+                        "operations": {
+                            "list": {"declared": True, "method": "GET", "path": "/polls"},
+                            "get": {"declared": True, "method": "GET", "path": "/polls/{id}"},
+                            "create": {"declared": True, "method": "POST", "path": "/polls"},
+                            "update": {"declared": True, "method": "PATCH", "path": "/polls/{id}"},
+                            "delete": {"declared": True, "method": "DELETE", "path": "/polls/{id}"},
+                        },
+                        "fields": [
+                            {"name": "id", "type": "uuid", "required": True, "readable": True, "writable": False, "identity": True},
+                            {"name": "workspace_id", "type": "uuid", "required": True, "readable": True, "writable": True, "identity": False},
+                            {"name": "title", "type": "string", "required": True, "readable": True, "writable": True, "identity": True},
+                            {"name": "poll_date", "type": "string", "required": True, "readable": True, "writable": True, "identity": False},
+                            {"name": "status", "type": "string", "required": True, "readable": True, "writable": True, "identity": False},
+                        ],
+                        "presentation": {"default_list_fields": ["title", "poll_date", "status"], "default_detail_fields": ["id", "title", "poll_date", "status"], "title_field": "title"},
+                        "validation": {"required_on_create": ["workspace_id", "title", "poll_date", "status"], "allowed_on_update": ["title", "poll_date", "status"]},
+                        "relationships": [],
+                    }
+                ],
+            }
+        )
+        prompts = {entry["prompt"] for entry in manifest["commands"]}
+        self.assertIn("show polls", prompts)
+        self.assertIn("create poll", prompts)
+        self.assertNotIn("show devices", prompts)
+        self.assertEqual({entry["key"] for entry in manifest["entities"]}, {"polls"})
+
 
 if __name__ == "__main__":
     unittest.main()

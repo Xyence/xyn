@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -19,6 +20,7 @@ import base64
 import hashlib
 import io
 import zipfile
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +44,7 @@ HTTP_TIMEOUT_SECONDS = int(os.getenv("XYN_APP_JOB_HTTP_TIMEOUT", "10"))
 APP_DEPLOY_HEALTH_TIMEOUT_SECONDS = int(os.getenv("XYN_APP_DEPLOY_HEALTH_TIMEOUT_SECONDS", "180"))
 COMMAND_TIMEOUT_SECONDS = int(os.getenv("XYN_APP_JOB_COMMAND_TIMEOUT_SECONDS", "240"))
 APPSPEC_SCHEMA_PATH = Path(__file__).resolve().parent / "contracts" / "appspec_v0.schema.json"
+POLICY_BUNDLE_SCHEMA_PATH = Path(__file__).resolve().parent / "contracts" / "policy_bundle_v0.schema.json"
 NET_INVENTORY_IMAGE = str(
     os.getenv("XYN_NET_INVENTORY_IMAGE", "public.ecr.aws/i0h0h0n4/xyn/artifacts/net-inventory-api:dev")
 ).strip()
@@ -63,8 +66,23 @@ def _safe_slug(value: str, *, default: str = "app") -> str:
     return collapsed or default
 
 
+def _as_bool(value: str) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _prefer_local_platform_images_for_smoke() -> bool:
+    # Local app-builder smoke runs should validate against the platform code
+    # currently running in this workspace, not a potentially stale :dev image.
+    return _as_bool(os.getenv("XYN_APP_SMOKE_PREFER_LOCAL_IMAGES", "true"))
+
+
 def _workspace_root() -> Path:
-    root = Path(os.getenv("XYN_LOCAL_WORKSPACE_ROOT", os.getenv("XYNSEED_WORKSPACE", default_instance_workspace_root()))).resolve()
+    root = Path(
+        os.getenv("XYN_WORKSPACE_ROOT")
+        or os.getenv("XYN_LOCAL_WORKSPACE_ROOT")
+        or os.getenv("XYNSEED_WORKSPACE")
+        or default_instance_workspace_root()
+    ).resolve()
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -95,6 +113,10 @@ def _effective_net_inventory_image() -> str:
 
 def _generated_artifact_slug(app_slug: str) -> str:
     return f"app.{_safe_slug(app_slug, default='generated-app')}"
+
+
+def _policy_bundle_slug(app_slug: str) -> str:
+    return f"policy.{_safe_slug(app_slug, default='generated-app')}"
 
 
 def _run(cmd: list[str], *, cwd: Optional[Path] = None) -> tuple[int, str, str]:
@@ -359,25 +381,81 @@ def _build_generated_artifact_manifest(*, app_spec: dict[str, Any], runtime_conf
     }
 
 
+def _build_generated_policy_artifact_manifest(*, app_spec: dict[str, Any], policy_bundle: dict[str, Any]) -> dict[str, Any]:
+    app_slug = _safe_slug(str(app_spec.get("app_slug") or "generated-app"), default="generated-app")
+    artifact_slug = _policy_bundle_slug(app_slug)
+    title = str(policy_bundle.get("title") or f"{str(app_spec.get('title') or app_slug).strip() or app_slug} Policy Bundle").strip()
+    families = list(policy_bundle.get("policy_families") or [])
+    return {
+        "artifact": {
+            "id": artifact_slug,
+            "type": "policy_bundle",
+            "slug": artifact_slug,
+            "version": GENERATED_ARTIFACT_VERSION,
+            "name": title,
+            "generated": True,
+        },
+        "capability": {
+            "visibility": "contextual",
+            "category": "policy",
+            "label": title,
+            "description": "Generated application policy bundle for future validation, rendering, explanation, and enforcement flows.",
+            "tags": ["generated", "policy_bundle", app_slug],
+            "order": 140,
+        },
+        "summary": {
+            "app_slug": app_slug,
+            "policy_families": families,
+            "policy_count": sum(
+                len(policy_bundle.get("policies", {}).get(key) or [])
+                for key in (
+                    "validation_policies",
+                    "relation_constraints",
+                    "transition_policies",
+                    "invariant_policies",
+                    "derived_policies",
+                    "trigger_policies",
+                )
+            ),
+            "future_capabilities": list((policy_bundle.get("explanation") or {}).get("future_capabilities") or []),
+        },
+        "content": {
+            "policy_bundle": policy_bundle,
+            "app_slug": app_slug,
+            "generated_artifact_slug": _generated_artifact_slug(app_slug),
+        },
+    }
+
+
 def _package_generated_app(
     *,
     workspace_id: uuid.UUID,
     source_job_id: str,
     app_spec: dict[str, Any],
+    policy_bundle: dict[str, Any],
     runtime_config: dict[str, Any],
 ) -> dict[str, Any]:
     app_slug = _safe_slug(str(app_spec.get("app_slug") or "generated-app"), default="generated-app")
     artifact_slug = _generated_artifact_slug(app_slug)
+    policy_artifact_slug = _policy_bundle_slug(app_slug)
     package_root = _generated_artifacts_root() / app_slug
     payload_root = package_root / "payload"
     payload_root.mkdir(parents=True, exist_ok=True)
 
     artifact_manifest = _build_generated_artifact_manifest(app_spec=app_spec, runtime_config=runtime_config)
+    artifact_manifest["content"]["policy_bundle_summary"] = {
+        "artifact_slug": policy_artifact_slug,
+        "title": str(policy_bundle.get("title") or "").strip(),
+        "policy_families": list(policy_bundle.get("policy_families") or []),
+    }
+    policy_artifact_manifest = _build_generated_policy_artifact_manifest(app_spec=app_spec, policy_bundle=policy_bundle)
     artifact_manifest_path = package_root / "artifact.json"
     app_spec_path = payload_root / "app_spec.json"
+    policy_bundle_path = payload_root / "policy_bundle.json"
     runtime_config_path = payload_root / "runtime_config.json"
     artifact_manifest_path.write_text(json.dumps(artifact_manifest, indent=2, sort_keys=True), encoding="utf-8")
     app_spec_path.write_text(json.dumps(app_spec, indent=2, sort_keys=True), encoding="utf-8")
+    policy_bundle_path.write_text(json.dumps(policy_bundle, indent=2, sort_keys=True), encoding="utf-8")
     runtime_config_path.write_text(json.dumps(runtime_config, indent=2, sort_keys=True), encoding="utf-8")
 
     artifact_entry = {
@@ -390,23 +468,50 @@ def _package_generated_app(
         "dependencies": [],
         "bindings": [],
     }
+    policy_artifact_entry = {
+        "type": "policy_bundle",
+        "slug": policy_artifact_slug,
+        "version": GENERATED_ARTIFACT_VERSION,
+        "artifact_id": policy_artifact_slug,
+        "title": str(policy_bundle.get("title") or f"{str(app_spec.get('title') or app_slug).strip() or app_slug} Policy Bundle"),
+        "description": "Generated application policy bundle",
+        "dependencies": [],
+        "bindings": [],
+    }
     files: dict[str, bytes] = {}
     base = f"artifacts/application/{artifact_slug}/{GENERATED_ARTIFACT_VERSION}"
+    policy_base = f"artifacts/policy_bundle/{policy_artifact_slug}/{GENERATED_ARTIFACT_VERSION}"
     artifact_zip_path = f"{base}/artifact.json"
     payload_zip_path = f"{base}/payload/payload.json"
     surfaces_zip_path = f"{base}/surfaces.json"
     runtime_roles_zip_path = f"{base}/runtime_roles.json"
+    policy_artifact_zip_path = f"{policy_base}/artifact.json"
+    policy_payload_zip_path = f"{policy_base}/payload/payload.json"
+    policy_surfaces_zip_path = f"{policy_base}/surfaces.json"
+    policy_runtime_roles_zip_path = f"{policy_base}/runtime_roles.json"
     combined_payload = {
         "app_spec": app_spec,
+        "policy_bundle": policy_bundle,
         "runtime_config": runtime_config,
         "generated": True,
         "source_job_id": source_job_id,
         "source_workspace_id": str(workspace_id),
     }
+    policy_payload = {
+        "policy_bundle": policy_bundle,
+        "generated": True,
+        "source_job_id": source_job_id,
+        "source_workspace_id": str(workspace_id),
+        "app_slug": app_slug,
+    }
     files[artifact_zip_path] = json.dumps(artifact_manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     files[payload_zip_path] = json.dumps(combined_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     files[surfaces_zip_path] = b"[]"
     files[runtime_roles_zip_path] = b"[]"
+    files[policy_artifact_zip_path] = json.dumps(policy_artifact_manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    files[policy_payload_zip_path] = json.dumps(policy_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    files[policy_surfaces_zip_path] = b"[]"
+    files[policy_runtime_roles_zip_path] = b"[]"
     manifest = {
         "format_version": 1,
         "package_name": artifact_slug,
@@ -417,7 +522,11 @@ def _package_generated_app(
             {
                 **artifact_entry,
                 "artifact_hash": hashlib.sha256(files[artifact_zip_path]).hexdigest(),
-            }
+            },
+            {
+                **policy_artifact_entry,
+                "artifact_hash": hashlib.sha256(files[policy_artifact_zip_path]).hexdigest(),
+            },
         ],
         "checksums": {path: hashlib.sha256(content).hexdigest() for path, content in files.items()},
     }
@@ -431,11 +540,13 @@ def _package_generated_app(
     return {
         "artifact_slug": artifact_slug,
         "artifact_version": GENERATED_ARTIFACT_VERSION,
+        "policy_bundle_slug": policy_artifact_slug,
         "artifact_manifest_path": str(artifact_manifest_path),
         "artifact_package_path": str(package_zip_path),
         "artifact_dir": str(package_root),
         "runtime_config_path": str(runtime_config_path),
         "app_spec_path": str(app_spec_path),
+        "policy_bundle_path": str(policy_bundle_path),
         "package_size_bytes": package_zip_path.stat().st_size,
     }
 
@@ -691,6 +802,10 @@ def _load_appspec_schema() -> dict[str, Any]:
     return json.loads(APPSPEC_SCHEMA_PATH.read_text(encoding="utf-8"))
 
 
+def _load_policy_bundle_schema() -> dict[str, Any]:
+    return json.loads(POLICY_BUNDLE_SCHEMA_PATH.read_text(encoding="utf-8"))
+
+
 def _persist_json_artifact(
     db: Session,
     *,
@@ -740,7 +855,1148 @@ def _normalize_unique_strings(values: list[Any] | tuple[Any, ...] | set[Any] | N
     return result
 
 
+def _policy_family_from_statement(statement: str) -> str:
+    lowered = str(statement or "").strip().lower()
+    if any(token in lowered for token in ("vote counts", "counts per", "count per", "rollup", "aggregate", "total")):
+        return "derived_policies"
+    if "selected" in lowered and any(token in lowered for token in ("exactly one", "more than one", "only one", "at most one", "at least one")):
+        return "invariant_policies"
+    if any(token in lowered for token in ("does not belong", "belong to", "exactly one", "more than one", "only one")):
+        return "relation_constraints"
+    if any(token in lowered for token in ("automatically", "when ", "upon ", "after ")) and any(
+        token in lowered for token in ("become", "set ", "mark ", "selected")
+    ):
+        return "trigger_policies"
+    if any(token in lowered for token in ("status", "state", "transition", "allows", "does not allow", "must have")):
+        return "transition_policies"
+    return "validation_policies"
+
+
+def _policy_targets_from_statement(statement: str, *, entity_contracts: list[dict[str, Any]]) -> dict[str, Any]:
+    lowered = str(statement or "").strip().lower()
+    entity_keys: list[str] = []
+    field_names: list[str] = []
+    for contract in entity_contracts:
+        if not isinstance(contract, dict):
+            continue
+        entity_key = str(contract.get("key") or "").strip()
+        singular = str(contract.get("singular_label") or entity_key.rstrip("s")).strip().lower()
+        plural = str(contract.get("plural_label") or entity_key).strip().lower()
+        if singular and singular in lowered or plural and plural in lowered:
+            entity_keys.append(entity_key)
+        for field in contract.get("fields") if isinstance(contract.get("fields"), list) else []:
+            if not isinstance(field, dict):
+                continue
+            field_name = str(field.get("name") or "").strip()
+            if field_name and field_name.replace("_", " ") in lowered:
+                field_names.append(field_name)
+    return {
+        "entity_keys": _normalize_unique_strings(entity_keys),
+        "field_names": _normalize_unique_strings(field_names),
+    }
+
+
+def _policy_entity_token_matches(contract: dict[str, Any], token: str) -> bool:
+    normalized = str(token or "").strip().lower()
+    if not normalized:
+        return False
+    singular = str(contract.get("singular_label") or str(contract.get("key") or "").rstrip("s")).strip().lower()
+    plural = str(contract.get("plural_label") or contract.get("key") or "").strip().lower()
+    candidates = {singular, plural}
+    if singular.endswith("e"):
+        candidates.add(f"{singular[:-1]}ing")
+    if singular:
+        candidates.add(f"{singular}ing")
+    return normalized in {item for item in candidates if item}
+
+
+def _policy_statement_entity_mentions(statement: str, *, entity_contracts: list[dict[str, Any]]) -> list[str]:
+    lowered = str(statement or "").strip().lower()
+    tokens = re.findall(r"[a-z_]+", lowered)
+    mentions: list[str] = []
+    for contract in entity_contracts:
+        if not isinstance(contract, dict):
+            continue
+        singular = str(contract.get("singular_label") or str(contract.get("key") or "").rstrip("s")).strip().lower()
+        plural = str(contract.get("plural_label") or contract.get("key") or "").strip().lower()
+        phrase_match = any(candidate and candidate in lowered for candidate in (singular, plural))
+        token_match = any(_policy_entity_token_matches(contract, token) for token in tokens)
+        if phrase_match or token_match:
+            mentions.append(str(contract.get("key") or "").strip())
+    return _normalize_unique_strings(mentions)
+
+
+def _policy_status_field(contract: dict[str, Any]) -> tuple[str | None, list[str]]:
+    for field in contract.get("fields") if isinstance(contract.get("fields"), list) else []:
+        if not isinstance(field, dict):
+            continue
+        field_name = str(field.get("name") or "").strip()
+        options = [str(option).strip() for option in field.get("options") if str(option).strip()] if isinstance(field.get("options"), list) else []
+        if field_name == "status" and options:
+            return field_name, options
+    return None, []
+
+
+def _compile_relation_constraint_policies(
+    *,
+    app_slug: str,
+    entity_contracts: list[dict[str, Any]],
+    start_sequence: int,
+) -> tuple[list[dict[str, Any]], int]:
+    contracts = {
+        str(contract.get("key") or "").strip(): contract
+        for contract in entity_contracts
+        if isinstance(contract, dict) and str(contract.get("key") or "").strip()
+    }
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    sequence = start_sequence
+    for entity_key, contract in contracts.items():
+        relationships = contract.get("relationships") if isinstance(contract.get("relationships"), list) else []
+        relation_rows = [row for row in relationships if isinstance(row, dict) and str(row.get("field") or "").strip()]
+        if len(relation_rows) < 2:
+            continue
+        for relation in relation_rows:
+            source_field = str(relation.get("field") or "").strip()
+            related_entity = str(relation.get("target_entity") or "").strip()
+            if not source_field or not related_entity:
+                continue
+            related_contract = contracts.get(related_entity)
+            if not related_contract:
+                continue
+            related_relationships = related_contract.get("relationships") if isinstance(related_contract.get("relationships"), list) else []
+            for sibling_relation in relation_rows:
+                comparison_field = str(sibling_relation.get("field") or "").strip()
+                comparison_entity = str(sibling_relation.get("target_entity") or "").strip()
+                if not comparison_field or not comparison_entity or comparison_field == source_field:
+                    continue
+                backlink = next(
+                    (
+                        row
+                        for row in related_relationships
+                        if isinstance(row, dict)
+                        and str(row.get("target_entity") or "").strip() == comparison_entity
+                        and str(row.get("field") or "").strip()
+                    ),
+                    None,
+                )
+                if not backlink:
+                    continue
+                key = (entity_key, source_field, comparison_field, str(backlink.get("field") or "").strip())
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(
+                    {
+                        "id": f"{app_slug}-{sequence:03d}",
+                        "name": f"{entity_key}.{source_field} must align with {comparison_field}",
+                        "description": (
+                            f"Ensure the related {related_entity.rstrip('s')} referenced by {source_field} belongs to the same "
+                            f"{comparison_entity.rstrip('s')} referenced by {comparison_field}."
+                        ),
+                        "family": "relation_constraints",
+                        "status": "compiled",
+                        "enforcement_stage": "runtime_enforced",
+                        "targets": {
+                            "entity_keys": [entity_key, related_entity, comparison_entity],
+                            "field_names": [source_field, comparison_field, str(backlink.get("field") or "").strip()],
+                        },
+                        "parameters": {
+                            "runtime_rule": "match_related_field",
+                            "entity_key": entity_key,
+                            "source_field": source_field,
+                            "related_entity": related_entity,
+                            "related_lookup_field": str(relation.get("target_field") or "id").strip() or "id",
+                            "related_match_field": str(backlink.get("field") or "").strip(),
+                            "comparison_field": comparison_field,
+                            "comparison_entity": comparison_entity,
+                        },
+                        "source": {
+                            "kind": "derived_from_entity_contracts",
+                            "reason": "multiple_relationship_consistency",
+                        },
+                        "explanation": {
+                            "user_summary": (
+                                f"{entity_key.rstrip('s').replace('_', ' ')} references must stay aligned across related records."
+                            ),
+                            "why_it_exists": "Derived from generated relationship structure so cross-parent mismatches are rejected generically.",
+                        },
+                    }
+                )
+                sequence += 1
+    return rows, sequence
+
+
+def _compile_parent_status_gate_policies(
+    *,
+    app_slug: str,
+    entity_contracts: list[dict[str, Any]],
+    sections: dict[str, list[str]],
+    start_sequence: int,
+) -> tuple[list[dict[str, Any]], int]:
+    contracts = {
+        str(contract.get("key") or "").strip(): contract
+        for contract in entity_contracts
+        if isinstance(contract, dict) and str(contract.get("key") or "").strip()
+    }
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = set()
+    sequence = start_sequence
+    statements = [str(item or "").strip() for section in ("behavior", "validation") for item in sections.get(section, []) if str(item or "").strip()]
+    for statement in statements:
+        lowered = statement.lower()
+        mentions = _policy_statement_entity_mentions(statement, entity_contracts=entity_contracts)
+        if not mentions:
+            continue
+        child_contract = next(
+            (
+                contract
+                for contract in entity_contracts
+                if isinstance(contract, dict)
+                and any(_policy_entity_token_matches(contract, token) for token in re.findall(r"[a-z_]+", lowered))
+                and len(contract.get("relationships") or []) > 0
+            ),
+            None,
+        )
+        if not child_contract:
+            continue
+        child_entity = str(child_contract.get("key") or "").strip()
+        for relation in child_contract.get("relationships") if isinstance(child_contract.get("relationships"), list) else []:
+            if not isinstance(relation, dict):
+                continue
+            parent_entity = str(relation.get("target_entity") or "").strip()
+            if parent_entity not in mentions:
+                continue
+            parent_contract = contracts.get(parent_entity)
+            if not parent_contract:
+                continue
+            status_field, status_options = _policy_status_field(parent_contract)
+            if not status_field or not status_options:
+                continue
+            mentioned_statuses = [option for option in status_options if re.search(rf"\b{re.escape(option.lower())}\b", lowered)]
+            allowed_statuses: list[str] = []
+            blocked_statuses: list[str] = []
+            if re.search(r"\bnot\s+\w+\b", lowered) and "prevent" in lowered and mentioned_statuses:
+                allowed_statuses = mentioned_statuses
+            elif "does not allow" in lowered or "not allow" in lowered or "blocked" in lowered:
+                blocked_statuses = mentioned_statuses
+            elif "allow" in lowered and mentioned_statuses:
+                allowed_statuses = mentioned_statuses
+            if not allowed_statuses and not blocked_statuses:
+                continue
+            key = (child_entity, str(relation.get("field") or "").strip(), tuple(sorted(allowed_statuses)), tuple(sorted(blocked_statuses)))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                {
+                    "id": f"{app_slug}-{sequence:03d}",
+                    "name": f"{child_entity} writes must respect {parent_entity} status",
+                    "description": statement,
+                    "family": "validation_policies",
+                    "status": "compiled",
+                    "enforcement_stage": "runtime_enforced",
+                    "targets": {
+                        "entity_keys": [child_entity, parent_entity],
+                        "field_names": [str(relation.get("field") or "").strip(), status_field],
+                    },
+                    "parameters": {
+                        "runtime_rule": "parent_status_gate",
+                        "entity_key": child_entity,
+                        "parent_entity": parent_entity,
+                        "parent_relation_field": str(relation.get("field") or "").strip(),
+                        "parent_status_field": status_field,
+                        "allowed_parent_statuses": allowed_statuses,
+                        "blocked_parent_statuses": blocked_statuses,
+                        "on_operations": ["create", "update"],
+                    },
+                    "source": {
+                        "kind": "prompt_section",
+                        "text": statement,
+                    },
+                    "explanation": {
+                        "user_summary": statement,
+                        "why_it_exists": "Derived from prompt-described status-gated write behavior.",
+                    },
+                }
+            )
+            sequence += 1
+    return rows, sequence
+
+
+def _compile_transition_policies(
+    *,
+    app_slug: str,
+    entity_contracts: list[dict[str, Any]],
+    sections: dict[str, list[str]],
+    start_sequence: int,
+) -> tuple[list[dict[str, Any]], int]:
+    statements = " ".join(str(item or "").strip().lower() for section in ("behavior", "validation") for item in sections.get(section, []))
+    sequence = start_sequence
+    rows: list[dict[str, Any]] = []
+    for contract in entity_contracts:
+        if not isinstance(contract, dict):
+            continue
+        entity_key = str(contract.get("key") or "").strip()
+        if not entity_key:
+            continue
+        singular = str(contract.get("singular_label") or entity_key.rstrip("s")).strip().lower()
+        status_field, status_options = _policy_status_field(contract)
+        if not status_field or len(status_options) < 2:
+            continue
+        if singular not in statements and entity_key not in statements and "status" not in statements:
+            continue
+        allowed_transitions = {
+            option: _normalize_unique_strings(
+                [option]
+                + ([status_options[index + 1]] if index + 1 < len(status_options) else [])
+            )
+            for index, option in enumerate(status_options)
+        }
+        rows.append(
+            {
+                "id": f"{app_slug}-{sequence:03d}",
+                "name": f"{entity_key}.{status_field} transition guard",
+                "description": f"Restrict {entity_key} {status_field} changes to the declared ordered states.",
+                "family": "transition_policies",
+                "status": "compiled",
+                "enforcement_stage": "runtime_enforced",
+                "targets": {
+                    "entity_keys": [entity_key],
+                    "field_names": [status_field],
+                },
+                "parameters": {
+                    "runtime_rule": "field_transition_guard",
+                    "entity_key": entity_key,
+                    "field_name": status_field,
+                    "allowed_transitions": allowed_transitions,
+                },
+                "source": {
+                    "kind": "derived_from_entity_contracts",
+                    "reason": "ordered_status_enum",
+                },
+                "explanation": {
+                    "user_summary": f"{entity_key.replace('_', ' ')} status changes follow the declared status order.",
+                    "why_it_exists": "Derived from ordered status options in the generated entity contract.",
+                },
+            }
+        )
+        sequence += 1
+    return rows, sequence
+
+
+def _contract_field(contract: dict[str, Any], field_name: str) -> dict[str, Any] | None:
+    for field in contract.get("fields") if isinstance(contract.get("fields"), list) else []:
+        if not isinstance(field, dict):
+            continue
+        if str(field.get("name") or "").strip() == field_name:
+            return field
+    return None
+
+
+def _compile_related_count_policies(
+    *,
+    app_slug: str,
+    entity_contracts: list[dict[str, Any]],
+    sections: dict[str, list[str]],
+    start_sequence: int,
+) -> tuple[list[dict[str, Any]], int]:
+    contracts = {
+        str(contract.get("key") or "").strip(): contract
+        for contract in entity_contracts
+        if isinstance(contract, dict) and str(contract.get("key") or "").strip()
+    }
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    sequence = start_sequence
+    statements = [str(item or "").strip() for item in sections.get("validation", []) + sections.get("views", []) if str(item or "").strip()]
+    for statement in statements:
+        lowered = statement.lower()
+        if "count" not in lowered and "counts" not in lowered:
+            continue
+        mentions = _policy_statement_entity_mentions(statement, entity_contracts=entity_contracts)
+        for child_entity, child_contract in contracts.items():
+            relationships = child_contract.get("relationships") if isinstance(child_contract.get("relationships"), list) else []
+            for relation in relationships:
+                if not isinstance(relation, dict):
+                    continue
+                parent_entity = str(relation.get("target_entity") or "").strip()
+                relation_field = str(relation.get("field") or "").strip()
+                if not parent_entity or not relation_field:
+                    continue
+                if child_entity not in mentions or parent_entity not in mentions:
+                    continue
+                key = (parent_entity, child_entity, relation_field)
+                if key in seen:
+                    continue
+                seen.add(key)
+                output_field = f"{child_entity}_count"
+                rows.append(
+                    {
+                        "id": f"{app_slug}-{sequence:03d}",
+                        "name": f"{parent_entity} {child_entity} count",
+                        "description": statement,
+                        "family": "derived_policies",
+                        "status": "compiled",
+                        "enforcement_stage": "runtime_enforced",
+                        "targets": {
+                            "entity_keys": [parent_entity, child_entity],
+                            "field_names": [relation_field, output_field],
+                        },
+                        "parameters": {
+                            "runtime_rule": "related_count",
+                            "entity_key": parent_entity,
+                            "child_entity": child_entity,
+                            "child_relation_field": relation_field,
+                            "output_field": output_field,
+                            "surfaces": ["list", "detail"],
+                        },
+                        "source": {
+                            "kind": "prompt_section",
+                            "text": statement,
+                        },
+                        "explanation": {
+                            "user_summary": statement,
+                            "why_it_exists": "Derived from prompt-described aggregate/count requirement.",
+                        },
+                    }
+                )
+                sequence += 1
+    return rows, sequence
+
+
+def _compile_trigger_policies(
+    *,
+    app_slug: str,
+    entity_contracts: list[dict[str, Any]],
+    sections: dict[str, list[str]],
+    start_sequence: int,
+) -> tuple[list[dict[str, Any]], int]:
+    contracts = {
+        str(contract.get("key") or "").strip(): contract
+        for contract in entity_contracts
+        if isinstance(contract, dict) and str(contract.get("key") or "").strip()
+    }
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str, str]] = set()
+    sequence = start_sequence
+    statements = [str(item or "").strip() for item in sections.get("behavior", []) if str(item or "").strip()]
+    for statement in statements:
+        lowered = statement.lower()
+        if "automatic" not in lowered and "automatically" not in lowered:
+            continue
+        mentions = _policy_statement_entity_mentions(statement, entity_contracts=entity_contracts)
+        if len(mentions) < 2:
+            continue
+        for source_entity, source_contract in contracts.items():
+            if source_entity not in mentions:
+                continue
+            relationships = source_contract.get("relationships") if isinstance(source_contract.get("relationships"), list) else []
+            for relation in relationships:
+                if not isinstance(relation, dict):
+                    continue
+                target_entity = str(relation.get("target_entity") or "").strip()
+                relation_field = str(relation.get("field") or "").strip()
+                if not target_entity or target_entity not in mentions:
+                    continue
+                condition_field = ""
+                condition_value: Any = None
+                selected_field = _contract_field(source_contract, "selected")
+                if isinstance(selected_field, dict):
+                    condition_field = "selected"
+                    condition_value = "yes" if "yes" in [str(option).strip().lower() for option in selected_field.get("options") or []] else True
+                else:
+                    status_field, status_options = _policy_status_field(source_contract)
+                    if status_field and "selected" in {option.lower() for option in status_options}:
+                        condition_field = status_field
+                        condition_value = "selected"
+                target_status_field, target_status_options = _policy_status_field(contracts.get(target_entity, {}))
+                if not condition_field or not target_status_field or "selected" not in {option.lower() for option in target_status_options}:
+                    continue
+                trigger_key = (source_entity, condition_field, str(condition_value), target_entity, relation_field, target_status_field)
+                if trigger_key in seen:
+                    continue
+                seen.add(trigger_key)
+                rows.append(
+                    {
+                        "id": f"{app_slug}-{sequence:03d}",
+                        "name": f"{source_entity} selected updates {target_entity} status",
+                        "description": statement,
+                        "family": "trigger_policies",
+                        "status": "compiled",
+                        "enforcement_stage": "runtime_enforced",
+                        "targets": {
+                            "entity_keys": [source_entity, target_entity],
+                            "field_names": [condition_field, relation_field, target_status_field],
+                        },
+                        "parameters": {
+                            "runtime_rule": "post_write_related_update",
+                            "source_entity": source_entity,
+                            "on_operations": ["create", "update"],
+                            "condition_field": condition_field,
+                            "condition_equals": condition_value,
+                            "target_entity": target_entity,
+                            "target_relation_field": relation_field,
+                            "target_lookup_field": str(relation.get("target_field") or "id").strip() or "id",
+                            "target_update_field": target_status_field,
+                            "target_update_value": "selected",
+                        },
+                        "source": {
+                            "kind": "prompt_section",
+                            "text": statement,
+                        },
+                        "explanation": {
+                            "user_summary": statement,
+                            "why_it_exists": "Derived from prompt-described post-write state update behavior.",
+                        },
+                    }
+                )
+                sequence += 1
+    return rows, sequence
+
+
+def _compile_parent_scoped_uniqueness_invariants(
+    *,
+    app_slug: str,
+    entity_contracts: list[dict[str, Any]],
+    sections: dict[str, list[str]],
+    start_sequence: int,
+) -> tuple[list[dict[str, Any]], int]:
+    contracts = {
+        str(contract.get("key") or "").strip(): contract
+        for contract in entity_contracts
+        if isinstance(contract, dict) and str(contract.get("key") or "").strip()
+    }
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    sequence = start_sequence
+    statements = [str(item or "").strip() for item in sections.get("behavior", []) + sections.get("validation", []) if str(item or "").strip()]
+    for statement in statements:
+        lowered = statement.lower()
+        if "selected" not in lowered or not any(token in lowered for token in ("only one", "exactly one", "more than one", "at most one")):
+            continue
+        mentions = set(_policy_statement_entity_mentions(statement, entity_contracts=entity_contracts))
+        for child_entity, child_contract in contracts.items():
+            selected_field = _contract_field(child_contract, "selected")
+            if not isinstance(selected_field, dict):
+                continue
+            relationships = child_contract.get("relationships") if isinstance(child_contract.get("relationships"), list) else []
+            for relation in relationships:
+                if not isinstance(relation, dict):
+                    continue
+                parent_entity = str(relation.get("target_entity") or "").strip()
+                parent_relation_field = str(relation.get("field") or "").strip()
+                if not parent_entity or not parent_relation_field:
+                    continue
+                if mentions and (child_entity not in mentions or parent_entity not in mentions):
+                    continue
+                invariant_key = (child_entity, parent_entity, parent_relation_field, "selected")
+                if invariant_key in seen:
+                    continue
+                seen.add(invariant_key)
+                rows.append(
+                    {
+                        "id": f"{app_slug}-{sequence:03d}",
+                        "name": f"{child_entity} selection unique within {parent_entity}",
+                        "description": statement,
+                        "family": "invariant_policies",
+                        "status": "compiled",
+                        "enforcement_stage": "runtime_enforced",
+                        "targets": {
+                            "entity_keys": [child_entity, parent_entity],
+                            "field_names": [parent_relation_field, "selected"],
+                        },
+                        "parameters": {
+                            "runtime_rule": "at_most_one_matching_child_per_parent",
+                            "entity_key": child_entity,
+                            "parent_entity": parent_entity,
+                            "parent_relation_field": parent_relation_field,
+                            "match_field": "selected",
+                            "match_value": "yes",
+                            "on_operations": ["create", "update"],
+                        },
+                        "source": {
+                            "kind": "prompt_section",
+                            "text": statement,
+                        },
+                        "explanation": {
+                            "user_summary": statement,
+                            "why_it_exists": "Derived from prompt-described single-selection invariant.",
+                        },
+                    }
+                )
+                sequence += 1
+    return rows, sequence
+
+
+def _infer_parent_state_gate_from_statement(
+    *,
+    statement: str,
+    parent_contract: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    status_field, status_options = _policy_status_field(parent_contract)
+    if not status_field or not status_options:
+        return None, None
+    lowered = str(statement or "").strip().lower()
+    for option in status_options:
+        lowered_option = str(option or "").strip().lower()
+        if not lowered_option:
+            continue
+        if (
+            f"in {lowered_option} status" in lowered
+            or f"status {lowered_option}" in lowered
+            or f"status is {lowered_option}" in lowered
+            or f"status = {lowered_option}" in lowered
+        ):
+            return status_field, option
+    return None, None
+
+
+def _compile_parent_scoped_minimum_selection_invariants(
+    *,
+    app_slug: str,
+    entity_contracts: list[dict[str, Any]],
+    sections: dict[str, list[str]],
+    start_sequence: int,
+) -> tuple[list[dict[str, Any]], int]:
+    contracts = {
+        str(contract.get("key") or "").strip(): contract
+        for contract in entity_contracts
+        if isinstance(contract, dict) and str(contract.get("key") or "").strip()
+    }
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str, str]] = set()
+    sequence = start_sequence
+    statements = [str(item or "").strip() for item in sections.get("behavior", []) + sections.get("validation", []) if str(item or "").strip()]
+    for statement in statements:
+        lowered = statement.lower()
+        if "selected" not in lowered:
+            continue
+        if not any(token in lowered for token in ("exactly one", "at least one", "must have one", "must have exactly one")):
+            continue
+        mentions = set(_policy_statement_entity_mentions(statement, entity_contracts=entity_contracts))
+        for child_entity, child_contract in contracts.items():
+            selected_field = _contract_field(child_contract, "selected")
+            if not isinstance(selected_field, dict):
+                continue
+            relationships = child_contract.get("relationships") if isinstance(child_contract.get("relationships"), list) else []
+            for relation in relationships:
+                if not isinstance(relation, dict):
+                    continue
+                parent_entity = str(relation.get("target_entity") or "").strip()
+                parent_relation_field = str(relation.get("field") or "").strip()
+                if not parent_entity or not parent_relation_field:
+                    continue
+                if mentions and (child_entity not in mentions or parent_entity not in mentions):
+                    continue
+                parent_contract = contracts.get(parent_entity)
+                if not parent_contract:
+                    continue
+                parent_state_field, parent_state_value = _infer_parent_state_gate_from_statement(
+                    statement=statement,
+                    parent_contract=parent_contract,
+                )
+                invariant_key = (
+                    child_entity,
+                    parent_entity,
+                    parent_relation_field,
+                    "selected",
+                    parent_state_field or "",
+                    parent_state_value or "",
+                )
+                if invariant_key in seen:
+                    continue
+                seen.add(invariant_key)
+                parameters: dict[str, Any] = {
+                    "runtime_rule": "at_least_one_matching_child_per_parent",
+                    "entity_key": child_entity,
+                    "parent_entity": parent_entity,
+                    "parent_relation_field": parent_relation_field,
+                    "match_field": "selected",
+                    "match_value": "yes",
+                    "on_parent_operations": ["create", "update"],
+                    "on_child_operations": ["create", "update", "delete"],
+                }
+                if parent_state_field and parent_state_value:
+                    parameters["parent_state_field"] = parent_state_field
+                    parameters["parent_state_value"] = parent_state_value
+                rows.append(
+                    {
+                        "id": f"{app_slug}-{sequence:03d}",
+                        "name": f"{parent_entity} requires selected {child_entity}",
+                        "description": statement,
+                        "family": "invariant_policies",
+                        "status": "compiled",
+                        "enforcement_stage": "runtime_enforced",
+                        "targets": {
+                            "entity_keys": [parent_entity, child_entity],
+                            "field_names": _normalize_unique_strings(
+                                [parent_relation_field, "selected", parent_state_field or ""]
+                            ),
+                        },
+                        "parameters": parameters,
+                        "source": {
+                            "kind": "prompt_section",
+                            "text": statement,
+                        },
+                        "explanation": {
+                            "user_summary": statement,
+                            "why_it_exists": "Derived from prompt-described required-selection invariant.",
+                        },
+                    }
+                )
+                sequence += 1
+    return rows, sequence
+
+
+def _augment_contracts_with_inferred_selection_flags(
+    *,
+    raw_prompt: str,
+    contracts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    prompt = str(raw_prompt or "").lower()
+    if "selected" not in prompt:
+        return contracts
+    updated = copy.deepcopy(contracts)
+    for contract in updated:
+        if not isinstance(contract, dict):
+            continue
+        relationships = contract.get("relationships") if isinstance(contract.get("relationships"), list) else []
+        if not relationships:
+            continue
+        fields = contract.get("fields") if isinstance(contract.get("fields"), list) else []
+        field_names = {str(field.get("name") or "").strip() for field in fields if isinstance(field, dict)}
+        if "selected" in field_names:
+            continue
+        singular = str(contract.get("singular_label") or str(contract.get("key") or "").rstrip("s")).strip().lower()
+        plural = str(contract.get("plural_label") or contract.get("key") or "").strip().lower()
+        if singular not in prompt and plural not in prompt:
+            continue
+        if not any(token in prompt for token in (f"selected {singular}", f"selected {plural}", f"{singular} is selected", f"{plural} is selected", f"mark one {singular}", f"mark {singular}")):
+            continue
+        fields.append(
+            {
+                "name": "selected",
+                "type": "string",
+                "required": False,
+                "readable": True,
+                "writable": True,
+                "identity": False,
+                "options": ["yes", "no"],
+            }
+        )
+        validation = contract.get("validation") if isinstance(contract.get("validation"), dict) else {}
+        validation["allowed_on_update"] = _normalize_unique_strings(list(validation.get("allowed_on_update") or []) + ["selected"])
+        contract["validation"] = validation
+        presentation = contract.get("presentation") if isinstance(contract.get("presentation"), dict) else {}
+        presentation["default_list_fields"] = _normalize_unique_strings(list(presentation.get("default_list_fields") or []) + ["selected"])
+        presentation["default_detail_fields"] = _normalize_unique_strings(list(presentation.get("default_detail_fields") or []) + ["selected"])
+        contract["presentation"] = presentation
+    return updated
+
+
+def _build_policy_bundle(
+    *,
+    workspace_id: uuid.UUID,
+    app_spec: dict[str, Any],
+    raw_prompt: str,
+) -> dict[str, Any]:
+    app_slug = str(app_spec.get("app_slug") or "generated-app").strip() or "generated-app"
+    app_title = str(app_spec.get("title") or app_slug).strip() or app_slug
+    entity_contracts = app_spec.get("entity_contracts") if isinstance(app_spec.get("entity_contracts"), list) else []
+    sections = _extract_objective_sections(raw_prompt)
+    families = {
+        "validation_policies": [],
+        "relation_constraints": [],
+        "transition_policies": [],
+        "invariant_policies": [],
+        "derived_policies": [],
+        "trigger_policies": [],
+    }
+    sequence = 1
+    for section_name in ("behavior", "validation"):
+        for statement in sections.get(section_name, []):
+            text = str(statement or "").strip()
+            if not text:
+                continue
+            family = _policy_family_from_statement(text)
+            entry = {
+                "id": f"{app_slug}-{sequence:03d}",
+                "name": text[:96],
+                "description": text,
+                "family": family,
+                "status": "documented",
+                "enforcement_stage": "not_compiled",
+                "targets": _policy_targets_from_statement(text, entity_contracts=[row for row in entity_contracts if isinstance(row, dict)]),
+                "parameters": {},
+                "source": {
+                    "kind": "prompt_section",
+                    "section": section_name,
+                    "text": text,
+                },
+                "explanation": {
+                    "user_summary": text,
+                    "why_it_exists": f"Derived from the generated app request {section_name} section.",
+                },
+            }
+            families[family].append(entry)
+            sequence += 1
+
+    compiled_relation_constraints, sequence = _compile_relation_constraint_policies(
+        app_slug=app_slug,
+        entity_contracts=[row for row in entity_contracts if isinstance(row, dict)],
+        start_sequence=sequence,
+    )
+    families["relation_constraints"].extend(compiled_relation_constraints)
+    compiled_parent_status_gates, sequence = _compile_parent_status_gate_policies(
+        app_slug=app_slug,
+        entity_contracts=[row for row in entity_contracts if isinstance(row, dict)],
+        sections=sections,
+        start_sequence=sequence,
+    )
+    families["validation_policies"].extend(compiled_parent_status_gates)
+    compiled_transition_policies, sequence = _compile_transition_policies(
+        app_slug=app_slug,
+        entity_contracts=[row for row in entity_contracts if isinstance(row, dict)],
+        sections=sections,
+        start_sequence=sequence,
+    )
+    families["transition_policies"].extend(compiled_transition_policies)
+    compiled_derived_policies, sequence = _compile_related_count_policies(
+        app_slug=app_slug,
+        entity_contracts=[row for row in entity_contracts if isinstance(row, dict)],
+        sections=sections,
+        start_sequence=sequence,
+    )
+    families["derived_policies"].extend(compiled_derived_policies)
+    compiled_trigger_policies, sequence = _compile_trigger_policies(
+        app_slug=app_slug,
+        entity_contracts=[row for row in entity_contracts if isinstance(row, dict)],
+        sections=sections,
+        start_sequence=sequence,
+    )
+    families["trigger_policies"].extend(compiled_trigger_policies)
+    compiled_invariant_policies, sequence = _compile_parent_scoped_uniqueness_invariants(
+        app_slug=app_slug,
+        entity_contracts=[row for row in entity_contracts if isinstance(row, dict)],
+        sections=sections,
+        start_sequence=sequence,
+    )
+    families["invariant_policies"].extend(compiled_invariant_policies)
+    compiled_minimum_invariants, sequence = _compile_parent_scoped_minimum_selection_invariants(
+        app_slug=app_slug,
+        entity_contracts=[row for row in entity_contracts if isinstance(row, dict)],
+        sections=sections,
+        start_sequence=sequence,
+    )
+    families["invariant_policies"].extend(compiled_minimum_invariants)
+
+    future_capabilities = [
+        "render_policy_bundle",
+        "validate_policy_bundle",
+        "compile_policy_bundle",
+        "simulate_policy_bundle",
+        "explain_policy_bundle",
+    ]
+    return {
+        "schema_version": "xyn.policy_bundle.v0",
+        "bundle_id": _policy_bundle_slug(app_slug),
+        "app_slug": app_slug,
+        "workspace_id": str(workspace_id),
+        "title": f"{app_title} Policy Bundle",
+        "description": "Prompt-derived business policy bundle for the generated application. This artifact is durable and inspectable. A narrow generic subset is compiled into runtime enforcement, while unsupported families remain documented-only.",
+        "scope": {
+            "artifact_slug": _generated_artifact_slug(app_slug),
+            "applies_to": ["generated_runtime", "palette", "future_editor", "future_validator"],
+        },
+        "ownership": {
+            "owner_kind": "generated_application",
+            "editable": True,
+            "source": "generated_from_prompt",
+        },
+        "policy_families": [key for key, rows in families.items() if rows] or list(families.keys()),
+        "policies": families,
+        "configurable_parameters": [],
+        "explanation": {
+            "summary": "Policy bundle scaffolds business-rule intent separately from entity contracts so rendering, editing, validation, and runtime enforcement can target the same durable artifact. The current runtime slice compiles relation constraints, status-based write gates, transition guards, parent-scoped selection invariants (at-most-one plus optional-gated at-least-one), related-count projections, and simple post-write related updates.",
+            "coverage": {
+                "documented_policy_count": sum(len(rows) for rows in families.values()),
+                "compiled_policy_count": sum(
+                    1
+                    for rows in families.values()
+                    for item in rows
+                    if isinstance(item, dict) and str(item.get("enforcement_stage") or "").strip() == "runtime_enforced"
+                ),
+                "entity_contract_count": len(entity_contracts),
+            },
+            "future_capabilities": future_capabilities,
+        },
+    }
+
+
+def _title_case_words(value: str) -> str:
+    return " ".join(part.capitalize() for part in re.split(r"[\s_]+", str(value or "").strip()) if part)
+
+
+def _pluralize_label(value: str) -> str:
+    text = str(value or "").strip()
+    lower = text.lower()
+    if not lower:
+        return "records"
+    if lower.endswith("y") and lower[-2:] not in {"ay", "ey", "iy", "oy", "uy"}:
+        return f"{text[:-1]}ies"
+    if lower.endswith(("s", "x", "z", "ch", "sh")):
+        return f"{text}es"
+    return f"{text}s"
+
+
+def _extract_objective_sections(objective: str) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {
+        "core_entities": [],
+        "behavior": [],
+        "views": [],
+        "validation": [],
+    }
+    text = re.sub(r"\s+", " ", str(objective or "")).strip()
+    if not text:
+        return sections
+    section_patterns = {
+        "core_entities": re.compile(
+            r"core entities\s*:\s*(.*?)(?=\bbehavior\s*:|\bviews\s*/\s*usability\s*:|\bviews\s*:|\bvalidation\s*/\s*rules\s*:|\bvalidation\s*:|$)",
+            re.IGNORECASE,
+        ),
+        "behavior": re.compile(
+            r"behavior\s*:\s*(.*?)(?=\bviews\s*/\s*usability\s*:|\bviews\s*:|\bvalidation\s*/\s*rules\s*:|\bvalidation\s*:|$)",
+            re.IGNORECASE,
+        ),
+        "views": re.compile(
+            r"(?:views\s*/\s*usability|views)\s*:\s*(.*?)(?=\bvalidation\s*/\s*rules\s*:|\bvalidation\s*:|$)",
+            re.IGNORECASE,
+        ),
+        "validation": re.compile(r"(?:validation\s*/\s*rules|validation)\s*:\s*(.*)$", re.IGNORECASE),
+    }
+    for section_name, pattern in section_patterns.items():
+        match = pattern.search(text)
+        if not match:
+            continue
+        body = str(match.group(1) or "").strip()
+        if not body:
+            continue
+        if section_name == "core_entities":
+            sections[section_name].extend(part.strip() for part in re.split(r"\s+(?=\d+\.)", body) if part.strip())
+            continue
+        sections[section_name].extend(
+            re.sub(r"^\s*[-*]\s*", "", part).strip()
+            for part in re.split(r"\s+-\s+", body)
+            if re.sub(r"^\s*[-*]\s*", "", part).strip()
+        )
+    return sections
+
+
+def _extract_app_name_from_prompt(raw_prompt: str, *, fallback: str) -> str:
+    text = str(raw_prompt or "").strip()
+    patterns = [
+        re.compile(r'called\s+[“"]([^”"]+)[”"]', re.IGNORECASE),
+        re.compile(r'build\s+(?:a|an)\s+.*?\s+called\s+([^.;]+)', re.IGNORECASE),
+    ]
+    for pattern in patterns:
+        match = pattern.search(text)
+        if match:
+            value = str(match.group(1) or "").strip().strip(".")
+            if value:
+                return value
+    return str(fallback or "").strip() or "Generated App"
+
+
+def _extract_objective_entities(raw_prompt: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for line in _extract_objective_sections(raw_prompt).get("core_entities", []):
+        cleaned_line = re.sub(r"^\s*\d+\.\s*", "", line).strip()
+        if not cleaned_line:
+            continue
+        parts = [part.strip() for part in re.split(r"\s+-\s+", cleaned_line) if part.strip()]
+        if not parts:
+            continue
+        label = _title_case_words(parts[0])
+        fields = [part.strip() for part in parts[1:] if part.strip()]
+        if label:
+            rows.append({"label": label, "fields": fields})
+    return rows
+
+
+def _field_options_from_token(token: str) -> list[str]:
+    match = re.search(r"\(([^)]+)\)", token)
+    if not match:
+        return []
+    return _normalize_unique_strings(
+        part.strip()
+        for part in re.split(r"[,/]|\\bor\\b", str(match.group(1) or ""), flags=re.IGNORECASE)
+    )
+
+
+def _sanitize_field_label(token: str) -> str:
+    cleaned = re.sub(r"\([^)]*\)", "", str(token or "")).strip()
+    return cleaned
+
+
+def _field_key(token: str) -> str:
+    return _safe_slug(str(token or "").replace("/", " ").replace("-", " "), default="field").replace("-", "_")
+
+
+def _field_type_for_token(token: str, *, options: list[str]) -> str:
+    key = _field_key(token)
+    if key.endswith("_id"):
+        return "uuid"
+    if key in {"created_at", "updated_at", "poll_date", "date"}:
+        return "datetime" if key in {"created_at", "updated_at"} else "string"
+    if options and {item.casefold() for item in options} <= {"yes", "no", "true", "false"}:
+        return "string"
+    return "string"
+
+
+def _build_entity_contracts_from_prompt(raw_prompt: str) -> list[dict[str, Any]]:
+    entity_rows = _extract_objective_entities(raw_prompt)
+    if not entity_rows:
+        return []
+
+    singular_index: dict[str, tuple[str, str]] = {}
+    for row in entity_rows:
+        label = str(row["label"])
+        singular_label = label.lower()
+        plural_label = _pluralize_label(singular_label)
+        entity_key = _safe_slug(plural_label, default="records").replace("-", "_")
+        singular_index[_safe_slug(singular_label, default="record").replace("-", "_")] = (entity_key, singular_label)
+
+    contracts: list[dict[str, Any]] = []
+    for row in entity_rows:
+        label = str(row["label"])
+        singular_label = label.lower()
+        plural_label = _pluralize_label(singular_label)
+        entity_key = _safe_slug(plural_label, default="records").replace("-", "_")
+        field_rows: list[dict[str, Any]] = [
+            {"name": "id", "type": "uuid", "required": True, "readable": True, "writable": False, "identity": True},
+            {"name": "workspace_id", "type": "uuid", "required": True, "readable": True, "writable": True, "identity": False},
+        ]
+        seen_field_names = {"id", "workspace_id"}
+        relationships: list[dict[str, Any]] = []
+        required_on_create: list[str] = ["workspace_id"]
+        allowed_on_update: list[str] = []
+
+        raw_fields = row.get("fields") if isinstance(row.get("fields"), list) else []
+        for token in raw_fields:
+            cleaned = _sanitize_field_label(str(token))
+            options = _field_options_from_token(str(token))
+            normalized = _field_key(cleaned)
+            relation_target = singular_index.get(normalized)
+            if relation_target:
+                field_name = f"{normalized}_id"
+                relation = {
+                    "target_entity": relation_target[0],
+                    "target_field": "id",
+                    "relation_kind": "belongs_to",
+                }
+                field_rows.append(
+                    {
+                        "name": field_name,
+                        "type": "uuid",
+                        "required": True,
+                        "readable": True,
+                        "writable": True,
+                        "identity": False,
+                        "relation": relation,
+                    }
+                )
+                seen_field_names.add(field_name)
+                relationships.append(
+                    {
+                        "field": field_name,
+                        "target_entity": relation_target[0],
+                        "target_field": "id",
+                        "relation_kind": "belongs_to",
+                        "required": True,
+                    }
+                )
+                required_on_create.append(field_name)
+                allowed_on_update.append(field_name)
+                continue
+
+            field_name = normalized
+            if field_name in seen_field_names:
+                continue
+            field: dict[str, Any] = {
+                "name": field_name,
+                "type": _field_type_for_token(field_name, options=options),
+                "required": field_name not in {"notes"},
+                "readable": True,
+                "writable": field_name not in {"created_at", "updated_at"},
+                "identity": field_name in {"name", "title", "voter_name"},
+            }
+            if options:
+                field["options"] = options
+            field_rows.append(field)
+            seen_field_names.add(field_name)
+            if field["writable"]:
+                allowed_on_update.append(field_name)
+            if field["required"] and field["writable"]:
+                required_on_create.append(field_name)
+
+        for standard_field in (
+            {"name": "created_at", "type": "datetime", "required": True, "readable": True, "writable": False, "identity": False},
+            {"name": "updated_at", "type": "datetime", "required": True, "readable": True, "writable": False, "identity": False},
+        ):
+            if standard_field["name"] in seen_field_names:
+                continue
+            field_rows.append(standard_field)
+            seen_field_names.add(standard_field["name"])
+        title_field = next(
+            (
+                candidate
+                for candidate in ("title", "name", "voter_name")
+                if any(str(field.get("name") or "") == candidate for field in field_rows)
+            ),
+            "id",
+        )
+        default_list_fields = [name for name in (title_field, "status", "poll_id", "lunch_option_id") if any(str(field.get("name") or "") == name for field in field_rows)]
+        if not default_list_fields:
+            default_list_fields = [str(field.get("name") or "") for field in field_rows if str(field.get("name") or "") not in {"id", "workspace_id", "created_at", "updated_at"}][:4]
+        default_detail_fields = ["id", title_field]
+        for name in [str(field.get("name") or "") for field in field_rows]:
+            if name and name not in default_detail_fields and name not in {"updated_at"}:
+                default_detail_fields.append(name)
+        contracts.append(
+            {
+                "key": entity_key,
+                "singular_label": singular_label,
+                "plural_label": plural_label,
+                "collection_path": f"/{entity_key}",
+                "item_path_template": f"/{entity_key}" + "/{id}",
+                "operations": {
+                    "list": {"declared": True, "method": "GET", "path": f"/{entity_key}"},
+                    "get": {"declared": True, "method": "GET", "path": f"/{entity_key}" + "/{id}"},
+                    "create": {"declared": True, "method": "POST", "path": f"/{entity_key}"},
+                    "update": {"declared": True, "method": "PATCH", "path": f"/{entity_key}" + "/{id}"},
+                    "delete": {"declared": True, "method": "DELETE", "path": f"/{entity_key}" + "/{id}"},
+                },
+                "fields": field_rows,
+                "presentation": {
+                    "default_list_fields": _normalize_unique_strings(default_list_fields),
+                    "default_detail_fields": _normalize_unique_strings(default_detail_fields),
+                    "title_field": title_field,
+                },
+                "validation": {
+                    "required_on_create": _normalize_unique_strings(required_on_create),
+                    "allowed_on_update": _normalize_unique_strings(allowed_on_update),
+                },
+                "relationships": relationships,
+            }
+        )
+    return _augment_contracts_with_inferred_selection_flags(raw_prompt=raw_prompt, contracts=contracts)
+
+
 def _infer_entities_from_prompt(raw_prompt: str) -> list[str]:
+    structured_contracts = _build_entity_contracts_from_prompt(raw_prompt)
+    if structured_contracts:
+        return [str(row.get("key") or "").strip() for row in structured_contracts if str(row.get("key") or "").strip()]
     prompt = str(raw_prompt or "").lower()
     entity_map = {
         "devices": ("device", "devices"),
@@ -769,6 +2025,12 @@ def _infer_requested_visuals_from_prompt(raw_prompt: str) -> list[str]:
 
 
 def _infer_entities_from_app_spec(app_spec: dict[str, Any]) -> list[str]:
+    contract_rows = app_spec.get("entity_contracts") if isinstance(app_spec.get("entity_contracts"), list) else []
+    contract_keys = _normalize_unique_strings(
+        [str(row.get("key") or "").strip() for row in contract_rows if isinstance(row, dict)]
+    )
+    if contract_keys:
+        return contract_keys
     entities = _normalize_unique_strings(app_spec.get("entities") if isinstance(app_spec.get("entities"), list) else [])
     if entities:
         return entities
@@ -802,38 +2064,19 @@ def _build_app_spec(
     mentions_inventory = any(token in prompt for token in ("inventory", "device", "devices", "network"))
     base_spec = copy.deepcopy(current_app_spec) if isinstance(current_app_spec, dict) else {
         "schema_version": "xyn.appspec.v0",
-        "services": [
-            {
-                "name": "net-inventory-api",
-                "image": _effective_net_inventory_image(),
-                "env": {
-                    "PORT": "8080",
-                    "DATABASE_URL": "postgresql://xyn:xyn_dev_password@net-inventory-db:5432/net_inventory",
-                },
-                "ports": [{"container": 8080, "host": 0, "protocol": "tcp"}],
-                "depends_on": ["net-inventory-db"],
-            },
-            {
-                "name": "net-inventory-db",
-                "image": "postgres:16-alpine",
-                "env": {
-                    "POSTGRES_DB": "net_inventory",
-                    "POSTGRES_USER": "xyn",
-                    "POSTGRES_PASSWORD": "xyn_dev_password",
-                },
-                "ports": [{"container": 5432, "host": 0, "protocol": "tcp"}],
-                "depends_on": [],
-            },
-        ],
         "ingress": {"enabled": False},
-        "data": {"postgres": {"required": True, "service": "net-inventory-db"}},
-        "reports": ["devices_by_status"],
+        "data": {"postgres": {"required": True}},
+        "reports": [],
     }
 
+    extracted_title = _extract_app_name_from_prompt(raw_prompt, fallback=title or str(base_spec.get("title") or "Generated App"))
     app_slug = str(base_spec.get("app_slug") or "").strip() or (
-        "net-inventory" if mentions_inventory else _safe_slug(title, default="net-inventory")
+        "net-inventory" if mentions_inventory else _safe_slug(extracted_title, default=_safe_slug(title, default="generated-app"))
     )
-    app_title = str(title or base_spec.get("title") or "Network Inventory").strip() or "Network Inventory"
+    app_title = str(extracted_title or title or base_spec.get("title") or "Generated App").strip() or "Generated App"
+    db_name = _safe_slug(app_slug, default="generated-app").replace("-", "_")
+    app_service_name = f"{app_slug}-api"
+    db_service_name = f"{app_slug}-db"
     requested_entities = _normalize_unique_strings(
         (
             (initial_intent or {}).get("requested_entities")
@@ -858,13 +2101,26 @@ def _build_app_spec(
             else []
         )
     )
-    entities = _normalize_unique_strings(existing_entities + summary_entities + requested_entities + inferred_entities)
-    if not entities:
-        entities = ["devices", "locations"]
-
-    existing_reports = _normalize_unique_strings(
-        base_spec.get("reports") if isinstance(base_spec.get("reports"), list) else []
+    generated_contracts = _build_entity_contracts_from_prompt(raw_prompt)
+    current_contracts = (
+        copy.deepcopy(base_spec.get("entity_contracts"))
+        if isinstance(base_spec.get("entity_contracts"), list)
+        else []
     )
+    entity_contracts = copy.deepcopy(current_contracts or generated_contracts)
+    entities = _normalize_unique_strings(existing_entities + summary_entities + requested_entities + inferred_entities)
+    if entity_contracts:
+        contract_keys = _normalize_unique_strings(
+            [str(row.get("key") or "").strip() for row in entity_contracts if isinstance(row, dict)]
+        )
+        entities = _normalize_unique_strings(contract_keys + entities)
+    if not entities:
+        raise RuntimeError(
+            "AppSpec generation could not derive any entity contracts from the request. "
+            "The generic builder must not silently fall back to inventory semantics."
+        )
+
+    existing_reports = _normalize_unique_strings(base_spec.get("reports") if isinstance(base_spec.get("reports"), list) else [])
     reports = existing_reports[:]
     visuals = _normalize_unique_strings(
         (
@@ -873,7 +2129,7 @@ def _build_app_spec(
             + inferred_visuals
         )
     )
-    if "devices" in entities and "devices_by_status_chart" not in visuals and "devices_by_status" not in reports:
+    if not entity_contracts and "devices" in entities and "devices_by_status_chart" not in visuals and "devices_by_status" not in reports:
         visuals.append("devices_by_status_chart")
     visual_report_map = {
         "devices_by_status_chart": "devices_by_status",
@@ -908,10 +2164,46 @@ def _build_app_spec(
     spec["title"] = app_title
     spec["workspace_id"] = str(workspace_id)
     spec["source_prompt"] = raw_prompt
+    spec["purpose"] = str(raw_prompt or "").strip()
     spec["entities"] = entities
     spec["phase_1_scope"] = phase_1_scope
     spec["requested_visuals"] = visuals
     spec["reports"] = reports
+    if entity_contracts:
+        spec["entity_contracts"] = entity_contracts
+    spec["services"] = [
+        {
+            "name": app_service_name,
+            "image": _effective_net_inventory_image(),
+            "env": {
+                "PORT": "8080",
+                "SERVICE_NAME": app_service_name,
+                "APP_TITLE": app_title,
+                "DATABASE_URL": f"postgresql://xyn:xyn_dev_password@{db_service_name}:5432/{db_name}",
+            },
+            "ports": [{"container": 8080, "host": 0, "protocol": "tcp"}],
+            "depends_on": [db_service_name],
+        },
+        {
+            "name": db_service_name,
+            "image": "postgres:16-alpine",
+            "env": {
+                "POSTGRES_DB": db_name,
+                "POSTGRES_USER": "xyn",
+                "POSTGRES_PASSWORD": "xyn_dev_password",
+            },
+            "ports": [{"container": 5432, "host": 0, "protocol": "tcp"}],
+            "depends_on": [],
+        },
+    ]
+    spec.setdefault("data", {})
+    if not isinstance(spec.get("data"), dict):
+        spec["data"] = {}
+    spec["data"].setdefault("postgres", {})
+    if not isinstance(spec["data"].get("postgres"), dict):
+        spec["data"]["postgres"] = {}
+    spec["data"]["postgres"]["required"] = True
+    spec["data"]["postgres"]["service"] = db_service_name
     if requires_primitives:
         spec["requires_primitives"] = _normalize_unique_strings(requires_primitives)
     if revision_anchor:
@@ -953,18 +2245,28 @@ def _docker_network_exists(network_name: str) -> bool:
 def _materialize_net_inventory_compose(
     *,
     app_spec: dict[str, Any],
+    policy_bundle: dict[str, Any] | None = None,
     deployment_dir: Path,
     compose_project: str,
     external_network_name: str | None = None,
     external_network_alias: str | None = None,
 ) -> Path:
-    app_service = next((row for row in app_spec.get("services", []) if row.get("name") == "net-inventory-api"), {})
-    db_service = next((row for row in app_spec.get("services", []) if row.get("name") == "net-inventory-db"), {})
+    services = [row for row in app_spec.get("services", []) if isinstance(row, dict)]
+    db_service = next((row for row in services if "postgres" in str(row.get("image") or "").lower()), {})
+    app_service = next((row for row in services if row is not db_service), {})
+    app_service_name = str(app_service.get("name") or "generated-app-api").strip() or "generated-app-api"
+    db_service_name = str(db_service.get("name") or "generated-app-db").strip() or "generated-app-db"
+    db_env = db_service.get("env") if isinstance(db_service.get("env"), dict) else {}
+    app_env = app_service.get("env") if isinstance(app_service.get("env"), dict) else {}
+    db_name = str(db_env.get("POSTGRES_DB") or "generated_app").strip() or "generated_app"
+    db_user = str(db_env.get("POSTGRES_USER") or "xyn").strip() or "xyn"
+    db_password = str(db_env.get("POSTGRES_PASSWORD") or "xyn_dev_password").strip() or "xyn_dev_password"
     entity_contracts_json = json.dumps(
         build_resolved_capability_manifest(app_spec).get("entities") or [],
         separators=(",", ":"),
         sort_keys=True,
     ).replace("'", "''")
+    policy_bundle_json = json.dumps(policy_bundle or {}, separators=(",", ":"), sort_keys=True).replace("'", "''")
     app_image = str(app_service.get("image") or _effective_net_inventory_image())
     app_ports = _ports_yaml(list(app_service.get("ports") or [{"host": 0, "container": 8080, "protocol": "tcp"}]))
     app_network_lines: list[str] = []
@@ -990,34 +2292,37 @@ def _materialize_net_inventory_compose(
         "\n".join(
             [
                 "services:",
-                "  net-inventory-db:",
+                f"  {db_service_name}:",
                 f"    image: {db_service.get('image') or 'postgres:16-alpine'}",
                 f"    container_name: {compose_project}-db",
                 "    restart: unless-stopped",
                 "    environment:",
-                "      POSTGRES_DB: net_inventory",
-                "      POSTGRES_USER: xyn",
-                "      POSTGRES_PASSWORD: xyn_dev_password",
+                f"      POSTGRES_DB: \"{db_name}\"",
+                f"      POSTGRES_USER: \"{db_user}\"",
+                f"      POSTGRES_PASSWORD: \"{db_password}\"",
                 "    healthcheck:",
-                "      test: [\"CMD-SHELL\", \"pg_isready -U xyn -d net_inventory\"]",
+                f"      test: [\"CMD-SHELL\", \"pg_isready -U {db_user} -d {db_name}\"]",
                 "      interval: 5s",
                 "      timeout: 5s",
                 "      retries: 20",
                 "",
-                "  net-inventory-api:",
+                f"  {app_service_name}:",
                 f"    image: {app_image}",
                 f"    container_name: {compose_project}-api",
                 "    restart: unless-stopped",
                 "    environment:",
-                "      PORT: \"8080\"",
-                "      DATABASE_URL: postgresql://xyn:xyn_dev_password@net-inventory-db:5432/net_inventory",
+                f"      PORT: \"{str(app_env.get('PORT') or '8080')}\"",
+                f"      SERVICE_NAME: \"{str(app_env.get('SERVICE_NAME') or app_service_name)}\"",
+                f"      APP_TITLE: \"{str(app_env.get('APP_TITLE') or app_spec.get('title') or app_service_name)}\"",
+                f"      DATABASE_URL: \"{str(app_env.get('DATABASE_URL') or f'postgresql://{db_user}:{db_password}@{db_service_name}:5432/{db_name}')}\"",
                 f"      GENERATED_ENTITY_CONTRACTS_JSON: '{entity_contracts_json}'",
+                f"      GENERATED_POLICY_BUNDLE_JSON: '{policy_bundle_json}'",
                 "      GENERATED_ENTITY_CONTRACTS_ALLOW_DEFAULTS: \"0\"",
                 "    ports:",
                 *app_ports,
                 *app_network_lines,
                 "    depends_on:",
-                "      net-inventory-db:",
+                f"      {db_service_name}:",
                 "        condition: service_healthy",
                 "",
                 *trailer_lines,
@@ -1032,6 +2337,7 @@ def _materialize_net_inventory_compose(
 def _deploy_generated_runtime(
     *,
     app_spec: dict[str, Any],
+    policy_bundle: dict[str, Any] | None,
     deployment_dir: Path,
     compose_project: str,
     logs: list[str],
@@ -1040,6 +2346,7 @@ def _deploy_generated_runtime(
 ) -> dict[str, Any]:
     compose_path = _materialize_net_inventory_compose(
         app_spec=app_spec,
+        policy_bundle=policy_bundle,
         deployment_dir=deployment_dir,
         compose_project=compose_project,
         external_network_name=external_network_name,
@@ -1099,7 +2406,7 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
         findings=[
             "App-intent draft submit reached the non-trivial generation path.",
             "Primitive catalog inspection is required before finalizing AppSpec generation.",
-            "The prompt requests a workspace-scoped network inventory application.",
+            "The prompt requests a generated application contract that must remain faithful to the user's described domain.",
         ],
         root_cause="A durable AppSpec is required before deployment so runtime behavior remains auditable and artifact-linked.",
         proposed_fix="Generate an AppSpec first, persist it as an artifact, then queue deployment and validation stages while carrying the execution note forward.",
@@ -1131,6 +2438,16 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
     except ValidationError as exc:
         raise RuntimeError(f"AppSpec validation failed: {exc.message}") from exc
 
+    policy_bundle = _build_policy_bundle(
+        workspace_id=job.workspace_id,
+        app_spec=app_spec,
+        raw_prompt=raw_prompt,
+    )
+    try:
+        validate(instance=policy_bundle, schema=_load_policy_bundle_schema())
+    except ValidationError as exc:
+        raise RuntimeError(f"Policy bundle validation failed: {exc.message}") from exc
+
     artifact_id = _persist_json_artifact(
         db,
         workspace_id=job.workspace_id,
@@ -1140,6 +2457,15 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
         metadata={"job_id": str(job.id)},
     )
     _append_job_log(logs, f"Persisted AppSpec artifact: {artifact_id}")
+    policy_bundle_artifact_id = _persist_json_artifact(
+        db,
+        workspace_id=job.workspace_id,
+        name=_policy_bundle_slug(str(app_spec.get("app_slug") or "generated-app")),
+        kind="policy_bundle",
+        payload=policy_bundle,
+        metadata={"job_id": str(job.id), "app_spec_artifact_id": artifact_id},
+    )
+    _append_job_log(logs, f"Persisted policy bundle artifact: {policy_bundle_artifact_id}")
 
     selected_images = {svc.get("name"): svc.get("image") for svc in app_spec.get("services", []) if isinstance(svc, dict)}
     selected_ports = {
@@ -1152,6 +2478,7 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
         "artifact_slug": _generated_artifact_slug(str(app_spec.get("app_slug") or "generated-app")),
         "artifact_version": GENERATED_ARTIFACT_VERSION,
         "app_spec_artifact_id": artifact_id,
+        "policy_bundle_artifact_id": policy_bundle_artifact_id,
         "images": selected_images,
         "ports": selected_ports,
         "services": app_spec.get("services") if isinstance(app_spec.get("services"), list) else [],
@@ -1162,6 +2489,7 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
         workspace_id=job.workspace_id,
         source_job_id=str(job.id),
         app_spec=app_spec,
+        policy_bundle=policy_bundle,
         runtime_config=generated_artifact_runtime_config,
     )
     _append_job_log(
@@ -1189,7 +2517,9 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
         validation_summary=[
             "Primitive catalog loaded successfully.",
             "AppSpec validated against xyn.appspec.v0 schema.",
+            "Policy bundle validated against xyn.policy_bundle.v0 schema.",
             f"AppSpec artifact persisted: {artifact_id}.",
+            f"Policy bundle artifact persisted: {policy_bundle_artifact_id}.",
             f"Generated artifact package created: {packaged_artifact['artifact_slug']}@{packaged_artifact['artifact_version']}.",
             (
                 f"Generated artifact imported into registry: {packaged_artifact['artifact_slug']}"
@@ -1197,15 +2527,17 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
                 else f"Generated artifact registry import deferred: {registry_import_error or 'unknown error'}."
             ),
         ],
-        related_artifact_ids=[artifact_id],
-        extra_metadata_updates={"app_spec_artifact_id": artifact_id},
+        related_artifact_ids=[artifact_id, policy_bundle_artifact_id],
+        extra_metadata_updates={"app_spec_artifact_id": artifact_id, "policy_bundle_artifact_id": policy_bundle_artifact_id},
     )
     follow_up = [
         {
             "type": "deploy_app_local",
             "input_json": {
                 "app_spec": app_spec,
+                "policy_bundle": policy_bundle,
                 "app_spec_artifact_id": artifact_id,
+                "policy_bundle_artifact_id": policy_bundle_artifact_id,
                 "generated_artifact": {
                     **packaged_artifact,
                     "registry_import": registry_artifact,
@@ -1219,8 +2551,11 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
     return (
         {
             "app_spec": app_spec,
+            "policy_bundle": policy_bundle,
             "app_spec_artifact_id": artifact_id,
+            "policy_bundle_artifact_id": policy_bundle_artifact_id,
             "app_spec_schema": "xyn.appspec.v0",
+            "policy_bundle_schema": "xyn.policy_bundle.v0",
             "primitive_catalog": primitive_catalog,
             "selected_images": selected_images,
             "selected_ports": selected_ports,
@@ -1241,6 +2576,7 @@ def _handle_deploy_app_local(db: Session, job: Job, logs: list[str]) -> tuple[di
     execution_note_artifact_id = str(payload.get("execution_note_artifact_id") or "").strip()
     generated_artifact = payload.get("generated_artifact") if isinstance(payload.get("generated_artifact"), dict) else {}
     app_spec = payload.get("app_spec") if isinstance(payload.get("app_spec"), dict) else {}
+    policy_bundle = payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {}
     app_slug = _safe_slug(str(app_spec.get("app_slug") or "net-inventory"), default="net-inventory")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     deployment_dir = _deployments_root() / app_slug / stamp
@@ -1250,6 +2586,7 @@ def _handle_deploy_app_local(db: Session, job: Job, logs: list[str]) -> tuple[di
         "app_slug": app_slug,
         **_deploy_generated_runtime(
             app_spec=app_spec,
+            policy_bundle=policy_bundle,
             deployment_dir=deployment_dir,
             compose_project=compose_project,
             logs=logs,
@@ -1277,6 +2614,7 @@ def _handle_deploy_app_local(db: Session, job: Job, logs: list[str]) -> tuple[di
             "input_json": {
                 "deployment": app_output,
                 "app_spec": app_spec,
+                "policy_bundle": policy_bundle,
                 "generated_artifact": generated_artifact,
                 "execution_note_artifact_id": execution_note_artifact_id,
                 "source_job_id": str(job.id),
@@ -1327,6 +2665,7 @@ def _handle_provision_sibling_xyn(db: Session, job: Job, logs: list[str]) -> tup
                     workspace_slug=workspace_slug,
                     ui_host=ui_host,
                     api_host=api_host,
+                    prefer_local_images=_prefer_local_platform_images_for_smoke(),
                 )
             )
         except HTTPException as exc:
@@ -1397,6 +2736,7 @@ def _handle_provision_sibling_xyn(db: Session, job: Job, logs: list[str]) -> tup
     sibling_runtime_dir.mkdir(parents=True, exist_ok=True)
     sibling_runtime = _deploy_generated_runtime(
         app_spec=app_spec,
+        policy_bundle=payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {},
         deployment_dir=sibling_runtime_dir,
         compose_project=sibling_runtime_project,
         logs=logs,
@@ -1460,6 +2800,7 @@ def _handle_provision_sibling_xyn(db: Session, job: Job, logs: list[str]) -> tup
                 "deployment": deployment,
                 "sibling": sibling_output,
                 "app_spec": app_spec,
+                "policy_bundle": payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {},
                 "generated_artifact": generated_artifact,
                 "execution_note_artifact_id": execution_note_artifact_id,
                 "source_job_id": str(job.id),
@@ -1469,12 +2810,350 @@ def _handle_provision_sibling_xyn(db: Session, job: Job, logs: list[str]) -> tup
     return sibling_output, follow_up
 
 
+def _field_map_from_contract(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    rows = contract.get("fields") if isinstance(contract.get("fields"), list) else []
+    return {
+        str(row.get("name") or "").strip(): row
+        for row in rows
+        if isinstance(row, dict) and str(row.get("name") or "").strip()
+    }
+
+
+def _extract_items_from_response(body: Any) -> list[dict[str, Any]]:
+    if isinstance(body, list):
+        return [row for row in body if isinstance(row, dict)]
+    if isinstance(body, dict) and isinstance(body.get("items"), list):
+        return [row for row in body.get("items") if isinstance(row, dict)]
+    return []
+
+
+def _sample_field_value(
+    *,
+    contract: dict[str, Any],
+    field: dict[str, Any],
+    workspace_id: str,
+    created_records: dict[str, dict[str, Any]],
+) -> Any:
+    field_name = str(field.get("name") or "").strip()
+    relation = field.get("relation") if isinstance(field.get("relation"), dict) else None
+    if field_name == "workspace_id":
+        return workspace_id
+    if relation:
+        target_key = str(relation.get("target_entity") or "").strip()
+        target = created_records.get(target_key)
+        if not isinstance(target, dict):
+            return None
+        return str(target.get(relation.get("target_field") or "id") or "").strip() or None
+    options = _normalize_unique_strings(field.get("options") if isinstance(field.get("options"), list) else [])
+    if options:
+        return options[0]
+    field_type = str(field.get("type") or "string").strip().lower()
+    singular = str(contract.get("singular_label") or contract.get("key") or "record").strip().replace(" ", "-")
+    if field_name in {"title", "name"}:
+        return f"{singular}-1"
+    if field_name == "voter_name":
+        return "alex"
+    if field_name.endswith("_date") or field_name == "date":
+        return "2026-03-17"
+    if field_name in {"created_at", "updated_at"}:
+        return None
+    if field_type.startswith("bool"):
+        return True
+    return f"{singular}-{field_name}-1"
+
+
+def _build_contract_seed_payload(
+    *,
+    contract: dict[str, Any],
+    workspace_id: str,
+    created_records: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    fields = _field_map_from_contract(contract)
+    required = _normalize_unique_strings(
+        (contract.get("validation") or {}).get("required_on_create")
+        if isinstance(contract.get("validation"), dict)
+        else []
+    )
+    payload: dict[str, Any] = {}
+    for field_name in required:
+        field = fields.get(field_name)
+        if not isinstance(field, dict) or not bool(field.get("writable", False)):
+            continue
+        payload[field_name] = _sample_field_value(
+            contract=contract,
+            field=field,
+            workspace_id=workspace_id,
+            created_records=created_records,
+        )
+    for field_name, field in fields.items():
+        if field_name in payload or not bool(field.get("writable", False)):
+            continue
+        if field_name in {"notes", "status", "active"}:
+            payload[field_name] = _sample_field_value(
+                contract=contract,
+                field=field,
+                workspace_id=workspace_id,
+                created_records=created_records,
+            )
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def _build_contract_update_payload(contract: dict[str, Any]) -> dict[str, Any]:
+    fields = _field_map_from_contract(contract)
+    allowed = _normalize_unique_strings(
+        (contract.get("validation") or {}).get("allowed_on_update")
+        if isinstance(contract.get("validation"), dict)
+        else []
+    )
+    for field_name in allowed:
+        field = fields.get(field_name)
+        if not isinstance(field, dict):
+            continue
+        options = _normalize_unique_strings(field.get("options") if isinstance(field.get("options"), list) else [])
+        if len(options) > 1:
+            return {field_name: options[1]}
+        if field_name in {"name", "title", "notes"}:
+            return {field_name: f"updated-{field_name}"}
+    return {}
+
+
+def _policy_bundle_entries(policy_bundle: dict[str, Any], family: str) -> list[dict[str, Any]]:
+    policies = policy_bundle.get("policies") if isinstance(policy_bundle.get("policies"), dict) else {}
+    rows = policies.get(family) if isinstance(policies.get(family), list) else []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _compiled_runtime_policies(
+    *,
+    policy_bundle: dict[str, Any],
+    family: str,
+    runtime_rule: str,
+    entity_key: str,
+) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for policy in _policy_bundle_entries(policy_bundle, family):
+        params = policy.get("parameters") if isinstance(policy.get("parameters"), dict) else {}
+        if str(params.get("runtime_rule") or "").strip() != runtime_rule:
+            continue
+        if str(params.get("entity_key") or "").strip() != entity_key:
+            continue
+        matches.append(policy)
+    return matches
+
+
+def _allowed_transition_path(
+    *,
+    current_status: str,
+    allowed_statuses: list[str],
+    allowed_transitions: dict[str, list[str]],
+) -> list[str] | None:
+    current = str(current_status or "").strip()
+    targets = {str(value).strip() for value in allowed_statuses if str(value).strip()}
+    if not current or not targets:
+        return None
+    if current in targets:
+        return []
+    queue: deque[tuple[str, list[str]]] = deque([(current, [])])
+    seen = {current}
+    while queue:
+        state, path = queue.popleft()
+        for candidate in allowed_transitions.get(state, []):
+            next_state = str(candidate or "").strip()
+            if not next_state or next_state in seen:
+                continue
+            next_path = path + [next_state]
+            if next_state in targets:
+                return next_path
+            seen.add(next_state)
+            queue.append((next_state, next_path))
+    return None
+
+
+def _ensure_parent_status_gate_prerequisites(
+    *,
+    container_name: str,
+    port: int,
+    workspace_id: str,
+    contract: dict[str, Any],
+    entity_contracts: list[dict[str, Any]],
+    created_records: dict[str, dict[str, Any]],
+    policy_bundle: dict[str, Any],
+) -> None:
+    entity_key = str(contract.get("key") or "").strip()
+    if not entity_key or not policy_bundle:
+        return
+    contracts = {
+        str(item.get("key") or "").strip(): item
+        for item in entity_contracts
+        if isinstance(item, dict) and str(item.get("key") or "").strip()
+    }
+    gates = _compiled_runtime_policies(
+        policy_bundle=policy_bundle,
+        family="validation_policies",
+        runtime_rule="parent_status_gate",
+        entity_key=entity_key,
+    )
+    for gate in gates:
+        params = gate.get("parameters") if isinstance(gate.get("parameters"), dict) else {}
+        if "create" not in {str(value).strip() for value in params.get("on_operations") or [] if str(value).strip()}:
+            continue
+        parent_entity = str(params.get("parent_entity") or "").strip()
+        parent_status_field = str(params.get("parent_status_field") or "").strip()
+        allowed_statuses = [str(value).strip() for value in params.get("allowed_parent_statuses") or [] if str(value).strip()]
+        if not parent_entity or not parent_status_field or not allowed_statuses:
+            continue
+        parent_contract = contracts.get(parent_entity)
+        parent_record = created_records.get(parent_entity)
+        if not isinstance(parent_contract, dict) or not isinstance(parent_record, dict):
+            continue
+        current_status = str(parent_record.get(parent_status_field) or "").strip()
+        if current_status in set(allowed_statuses):
+            continue
+        transition_policy = next(
+            (
+                policy
+                for policy in _compiled_runtime_policies(
+                    policy_bundle=policy_bundle,
+                    family="transition_policies",
+                    runtime_rule="field_transition_guard",
+                    entity_key=parent_entity,
+                )
+                if str(((policy.get("parameters") or {}).get("field_name")) or "").strip() == parent_status_field
+            ),
+            None,
+        )
+        transition_params = transition_policy.get("parameters") if isinstance((transition_policy or {}).get("parameters"), dict) else {}
+        transition_path = _allowed_transition_path(
+            current_status=current_status,
+            allowed_statuses=allowed_statuses,
+            allowed_transitions=transition_params.get("allowed_transitions") if isinstance(transition_params.get("allowed_transitions"), dict) else {},
+        )
+        if transition_path is None:
+            transition_path = [allowed_statuses[0]]
+        item_ref = str(parent_record.get("id") or "").strip()
+        item_template = str(parent_contract.get("item_path_template") or f"/{parent_entity}" + "/{id}").strip()
+        item_path = item_template.replace("{id}", item_ref)
+        for next_status in transition_path:
+            patch_code, patch_body, patch_text = _container_http_json(
+                container_name,
+                "PATCH",
+                f"{item_path}?workspace_id={workspace_id}",
+                port=port,
+                payload={parent_status_field: next_status},
+            )
+            if patch_code != 200:
+                raise RuntimeError(f"PATCH {item_path} failed ({patch_code}): {patch_text}")
+            if isinstance(patch_body, dict):
+                parent_record = patch_body
+                created_records[parent_entity] = patch_body
+
+
+def _exercise_runtime_contracts(
+    *,
+    container_name: str,
+    port: int,
+    workspace_id: str,
+    entity_contracts: list[dict[str, Any]],
+    policy_bundle: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    results: dict[str, Any] = {}
+    created_records: dict[str, dict[str, Any]] = {}
+    pending = [row for row in entity_contracts if isinstance(row, dict)]
+    while pending:
+        progressed = False
+        for contract in pending[:]:
+            relationships = contract.get("relationships") if isinstance(contract.get("relationships"), list) else []
+            deps = {
+                str(rel.get("target_entity") or "").strip()
+                for rel in relationships
+                if isinstance(rel, dict) and str(rel.get("target_entity") or "").strip()
+            }
+            if any(dep not in created_records for dep in deps):
+                continue
+            entity_key = str(contract.get("key") or "").strip()
+            collection_path = str(contract.get("collection_path") or f"/{entity_key}").strip()
+            _ensure_parent_status_gate_prerequisites(
+                container_name=container_name,
+                port=port,
+                workspace_id=workspace_id,
+                contract=contract,
+                entity_contracts=entity_contracts,
+                created_records=created_records,
+                policy_bundle=policy_bundle or {},
+            )
+            seed_payload = _build_contract_seed_payload(
+                contract=contract,
+                workspace_id=workspace_id,
+                created_records=created_records,
+            )
+            create_code, create_body, create_text = _container_http_json(
+                container_name,
+                "POST",
+                collection_path,
+                port=port,
+                payload=seed_payload,
+            )
+            if create_code not in {200, 201}:
+                raise RuntimeError(f"POST {collection_path} failed ({create_code}): {create_text}")
+            created_record = create_body if isinstance(create_body, dict) else {}
+            created_records[entity_key] = created_record
+            list_code, list_body, list_text = _container_http_json(
+                container_name,
+                "GET",
+                f"{collection_path}?workspace_id={workspace_id}",
+                port=port,
+            )
+            if list_code != 200:
+                raise RuntimeError(f"GET {collection_path} failed ({list_code}): {list_text}")
+            items = _extract_items_from_response(list_body)
+            if not items:
+                raise RuntimeError(f"GET {collection_path} returned no items after seeding {entity_key}")
+            item_ref = str(created_record.get("id") or "").strip()
+            item_path_template = str(contract.get("item_path_template") or f"{collection_path}" + "/{id}")
+            item_path = item_path_template.replace("{id}", item_ref)
+            get_code, get_body, get_text = _container_http_json(
+                container_name,
+                "GET",
+                f"{item_path}?workspace_id={workspace_id}",
+                port=port,
+            )
+            if get_code != 200:
+                raise RuntimeError(f"GET {item_path} failed ({get_code}): {get_text}")
+            update_payload = _build_contract_update_payload(contract)
+            update_result: dict[str, Any] | None = None
+            if update_payload:
+                update_code, update_body, update_text = _container_http_json(
+                    container_name,
+                    "PATCH",
+                    f"{item_path}?workspace_id={workspace_id}",
+                    port=port,
+                    payload=update_payload,
+                )
+                if update_code != 200:
+                    raise RuntimeError(f"PATCH {item_path} failed ({update_code}): {update_text}")
+                update_result = {"code": update_code, "body": update_body or update_text}
+            results[entity_key] = {
+                "seed_payload": seed_payload,
+                "create": {"code": create_code, "body": create_body or create_text},
+                "list": {"code": list_code, "body": list_body or list_text},
+                "get": {"code": get_code, "body": get_body or get_text},
+                "update": update_result,
+            }
+            pending.remove(contract)
+            progressed = True
+        if not progressed:
+            unresolved = [str(row.get("key") or "").strip() for row in pending if isinstance(row, dict)]
+            raise RuntimeError(f"Could not resolve seed order for generated entity contracts: {unresolved}")
+    return results
+
+
 def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     payload = job.input_json or {}
     execution_note_artifact_id = str(payload.get("execution_note_artifact_id") or "").strip()
     deployment = payload.get("deployment") if isinstance(payload.get("deployment"), dict) else {}
     sibling = payload.get("sibling") if isinstance(payload.get("sibling"), dict) else {}
     app_spec = payload.get("app_spec") if isinstance(payload.get("app_spec"), dict) else {}
+    policy_bundle = payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {}
     generated_artifact = payload.get("generated_artifact") if isinstance(payload.get("generated_artifact"), dict) else {}
     app_container_name = str(deployment.get("app_container_name") or "").strip()
     if not app_container_name:
@@ -1489,61 +3168,16 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
     health_code, health_body, health_text = _container_http_json(app_container_name, "GET", "/health", port=8080)
     if health_code != 200:
         raise RuntimeError(f"App health check failed ({health_code}): {health_text}")
-
-    list_code, list_body, list_text = _container_http_json(
-        app_container_name,
-        "GET",
-        f"/devices?workspace_id={job.workspace_id}",
+    entity_contracts = build_resolved_capability_manifest(app_spec).get("entities") if isinstance(build_resolved_capability_manifest(app_spec).get("entities"), list) else []
+    if not entity_contracts:
+        raise RuntimeError("Generated app contract smoke requires resolved entity contracts")
+    local_contract_checks = _exercise_runtime_contracts(
+        container_name=app_container_name,
         port=8080,
+        workspace_id=str(job.workspace_id),
+        entity_contracts=entity_contracts,
+        policy_bundle=policy_bundle,
     )
-    if list_code != 200:
-        raise RuntimeError(f"GET /devices failed ({list_code}): {list_text}")
-    location_code, location_body, location_text = _container_http_json(
-        app_container_name,
-        "POST",
-        "/locations",
-        port=8080,
-        payload={
-            "workspace_id": str(job.workspace_id),
-            "name": "seeded-location-1",
-            "kind": "site",
-            "city": "Austin",
-        },
-    )
-    if location_code not in {200, 201}:
-        raise RuntimeError(f"POST /locations failed ({location_code}): {location_text}")
-    location_id = str(location_body.get("id") or "").strip() if isinstance(location_body, dict) else ""
-    create_code, create_body, create_text = _container_http_json(
-        app_container_name,
-        "POST",
-        "/devices",
-        port=8080,
-        payload={
-            "workspace_id": str(job.workspace_id),
-            "name": "seeded-device-1",
-            "kind": "router",
-            "status": "online",
-            "location_id": location_id or None,
-        },
-    )
-    if create_code not in {200, 201}:
-        raise RuntimeError(f"POST /devices failed ({create_code}): {create_text}")
-    list_locations_code, list_locations_body, list_locations_text = _container_http_json(
-        app_container_name,
-        "GET",
-        f"/locations?workspace_id={job.workspace_id}",
-        port=8080,
-    )
-    if list_locations_code != 200:
-        raise RuntimeError(f"GET /locations failed ({list_locations_code}): {list_locations_text}")
-    report_code, report_body, report_text = _container_http_json(
-        app_container_name,
-        "GET",
-        f"/reports/devices-by-status?workspace_id={job.workspace_id}",
-        port=8080,
-    )
-    if report_code != 200:
-        raise RuntimeError(f"GET /reports/devices-by-status failed ({report_code}): {report_text}")
 
     generated_artifact_slug = str(generated_artifact.get("artifact_slug") or "").strip()
     generated_artifact_version = str(generated_artifact.get("artifact_version") or "").strip()
@@ -1658,97 +3292,35 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
             raise RuntimeError(
                 f"Sibling workspace is missing generated artifact {generated_artifact_slug}@{generated_artifact_version}"
             )
-    sibling_location_code, sibling_location_body, sibling_location_text = _container_http_json(
-        sibling_runtime_container,
-        "POST",
-        "/locations",
+    sibling_contract_checks = _exercise_runtime_contracts(
+        container_name=sibling_runtime_container,
         port=8080,
-        payload={
-            "workspace_id": sibling_workspace_id,
-            "name": "sibling-location-1",
-            "kind": "site",
-            "city": "Austin",
-        },
+        workspace_id=sibling_workspace_id,
+        entity_contracts=entity_contracts,
+        policy_bundle=policy_bundle,
     )
-    if sibling_location_code not in {200, 201}:
-        raise RuntimeError(f"Sibling POST /locations failed ({sibling_location_code}): {sibling_location_text}")
-    sibling_location_id = str(sibling_location_body.get("id") or "").strip() if isinstance(sibling_location_body, dict) else ""
-    sibling_create_code, sibling_create_body, sibling_create_text = _container_http_json(
-        sibling_runtime_container,
-        "POST",
-        "/devices",
-        port=8080,
-        payload={
-            "workspace_id": sibling_workspace_id,
-            "name": "sibling-device-1",
-            "kind": "router",
-            "status": "online",
-            "location_id": sibling_location_id or None,
-        },
-    )
-    if sibling_create_code not in {200, 201}:
-        raise RuntimeError(f"Sibling POST /devices failed ({sibling_create_code}): {sibling_create_text}")
 
-    sibling_interface_code = 0
-    sibling_interface_body: dict[str, Any] = {}
-    sibling_interface_report_code = 0
-    sibling_interface_report_body: dict[str, Any] = {}
-    app_entities = _infer_entities_from_app_spec(app_spec)
-    if "interfaces" in app_entities:
-        sibling_device_id = str(sibling_create_body.get("id") or "").strip() if isinstance(sibling_create_body, dict) else ""
-        if not sibling_device_id:
-            raise RuntimeError("Sibling POST /devices did not return a device id required for interface seeding")
-        sibling_interface_code, sibling_interface_body, sibling_interface_text = _container_http_json(
-            sibling_runtime_container,
-            "POST",
-            "/interfaces",
-            port=8080,
-            payload={
-                "workspace_id": sibling_workspace_id,
-                "device_id": sibling_device_id,
-                "name": "eth0",
-                "status": "up",
-            },
-        )
-        if sibling_interface_code not in {200, 201}:
-            raise RuntimeError(f"Sibling POST /interfaces failed ({sibling_interface_code}): {sibling_interface_text}")
-        sibling_interface_list_code, sibling_interface_list_body, sibling_interface_list_text = _container_http_json(
-            sibling_runtime_container,
-            "GET",
-            f"/interfaces?workspace_id={sibling_workspace_id}",
-            port=8080,
-        )
-        if sibling_interface_list_code != 200:
-            raise RuntimeError(f"Sibling GET /interfaces failed ({sibling_interface_list_code}): {sibling_interface_list_text}")
-        sibling_interface_items = sibling_interface_list_body if isinstance(sibling_interface_list_body, list) else (
-            sibling_interface_list_body.get("items")
-            if isinstance(sibling_interface_list_body, dict) and isinstance(sibling_interface_list_body.get("items"), list)
-            else []
-        )
-        if not any(str(item.get("name") or "").strip() == "eth0" for item in sibling_interface_items if isinstance(item, dict)):
-            raise RuntimeError("Sibling GET /interfaces did not include the seeded interface")
-        sibling_interface_report_code, sibling_interface_report_body, sibling_interface_report_text = _container_http_json(
-            sibling_runtime_container,
-            "GET",
-            f"/reports/interfaces-by-status?workspace_id={sibling_workspace_id}",
-            port=8080,
-        )
-        if sibling_interface_report_code != 200:
-            raise RuntimeError(
-                f"Sibling GET /reports/interfaces-by-status failed ({sibling_interface_report_code}): {sibling_interface_report_text}"
-            )
-
+    manifest = build_resolved_capability_manifest(app_spec)
+    list_commands = [
+        row
+        for row in (manifest.get("commands") if isinstance(manifest.get("commands"), list) else [])
+        if isinstance(row, dict) and str(row.get("operation_kind") or "") == "list"
+    ]
+    if not list_commands:
+        raise RuntimeError("Generated app contract smoke requires at least one declared list command")
+    primary_list_command = list_commands[0]
+    palette_prompt = str(primary_list_command.get("prompt") or "").strip()
     palette_status, palette_result, palette_text = _execute_sibling_palette_prompt(
         sibling_api_container=sibling_api_container,
         workspace_slug=sibling_workspace_slug,
-        prompt="show devices",
+        prompt=palette_prompt,
     )
     if palette_status != 200:
         raise RuntimeError(f"Sibling palette request failed ({palette_status}): {palette_text}")
     if palette_result.get("kind") != "table":
         raise RuntimeError(f"Palette did not return table: {palette_result}")
     if not isinstance(palette_result.get("rows"), list) or not palette_result.get("rows"):
-        raise RuntimeError("Palette show devices returned no rows")
+        raise RuntimeError(f"Palette {palette_prompt} returned no rows")
     palette_meta = palette_result.get("meta") if isinstance(palette_result.get("meta"), dict) else {}
     palette_base_url = str(palette_meta.get("base_url") or "").strip()
     allowed_runtime_urls = {value for value in (sibling_runtime_base_url, sibling_runtime_public_url) if value}
@@ -1757,75 +3329,7 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
             "Sibling palette targeted unexpected runtime base URL: "
             f"{palette_meta.get('base_url')} not in {sorted(allowed_runtime_urls)}"
         )
-    _append_job_log(logs, f"Palette check returned {len(palette_result.get('rows') or [])} rows")
-    palette_create_location_status, palette_create_location_result, palette_create_location_text = _execute_sibling_palette_prompt(
-        sibling_api_container=sibling_api_container,
-        workspace_slug=sibling_workspace_slug,
-        prompt="create location",
-    )
-    if palette_create_location_status != 200:
-        raise RuntimeError(
-            f"Sibling palette create location request failed ({palette_create_location_status}): {palette_create_location_text}"
-        )
-    if palette_create_location_result.get("kind") != "text":
-        raise RuntimeError(f"Palette did not return create-location completion prompt: {palette_create_location_result}")
-    missing_fields = palette_create_location_result.get("meta", {}).get("missing_fields")
-    if not isinstance(missing_fields, list) or "name" not in missing_fields:
-        raise RuntimeError(f"Palette create location did not report missing required fields: {palette_create_location_result}")
-
-    palette_create_location_filled_status, palette_create_location_filled_result, palette_create_location_filled_text = _execute_sibling_palette_prompt(
-        sibling_api_container=sibling_api_container,
-        workspace_slug=sibling_workspace_slug,
-        prompt="create location named sibling-location-2 in Austin TX USA",
-    )
-    if palette_create_location_filled_status != 200:
-        raise RuntimeError(
-            f"Sibling palette create location completion failed ({palette_create_location_filled_status}): {palette_create_location_filled_text}"
-        )
-    if palette_create_location_filled_result.get("kind") != "table":
-        raise RuntimeError(f"Palette did not return location creation table: {palette_create_location_filled_result}")
-    if not isinstance(palette_create_location_filled_result.get("rows"), list) or not palette_create_location_filled_result.get("rows"):
-        raise RuntimeError("Palette create location completion returned no rows")
-
-    palette_locations_status, palette_locations_result, palette_locations_text = _execute_sibling_palette_prompt(
-        sibling_api_container=sibling_api_container,
-        workspace_slug=sibling_workspace_slug,
-        prompt="show locations",
-    )
-    if palette_locations_status != 200:
-        raise RuntimeError(f"Sibling palette locations request failed ({palette_locations_status}): {palette_locations_text}")
-    if palette_locations_result.get("kind") != "table":
-        raise RuntimeError(f"Palette did not return locations table: {palette_locations_result}")
-    if not isinstance(palette_locations_result.get("rows"), list) or not palette_locations_result.get("rows"):
-        raise RuntimeError("Palette show locations returned no rows")
-    sibling_interfaces_palette: dict[str, Any] = {}
-    sibling_interfaces_chart: dict[str, Any] = {}
-    if "interfaces" in app_entities:
-        palette_interfaces_status, palette_interfaces_result, palette_interfaces_text = _execute_sibling_palette_prompt(
-            sibling_api_container=sibling_api_container,
-            workspace_slug=sibling_workspace_slug,
-            prompt="show interfaces",
-        )
-        if palette_interfaces_status != 200:
-            raise RuntimeError(f"Sibling palette interfaces request failed ({palette_interfaces_status}): {palette_interfaces_text}")
-        if palette_interfaces_result.get("kind") != "table":
-            raise RuntimeError(f"Palette did not return interface table: {palette_interfaces_result}")
-        if not isinstance(palette_interfaces_result.get("rows"), list) or not palette_interfaces_result.get("rows"):
-            raise RuntimeError("Palette show interfaces returned no rows")
-        sibling_interfaces_palette = palette_interfaces_result
-
-        palette_interfaces_chart_status, palette_interfaces_chart_result, palette_interfaces_chart_text = _execute_sibling_palette_prompt(
-            sibling_api_container=sibling_api_container,
-            workspace_slug=sibling_workspace_slug,
-            prompt="show interfaces by status",
-        )
-        if palette_interfaces_chart_status != 200:
-            raise RuntimeError(
-                f"Sibling palette interface chart request failed ({palette_interfaces_chart_status}): {palette_interfaces_chart_text}"
-            )
-        if palette_interfaces_chart_result.get("kind") != "bar_chart":
-            raise RuntimeError(f"Palette did not return interface chart: {palette_interfaces_chart_result}")
-        sibling_interfaces_chart = palette_interfaces_chart_result
+    _append_job_log(logs, f"Palette check returned {len(palette_result.get('rows') or [])} rows for {palette_prompt}")
 
     stopped_root_runtime = {"status": "skipped"}
     restarted_root_runtime = {"status": "skipped"}
@@ -1841,7 +3345,7 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
             palette_after_stop_status, palette_after_stop_result, palette_after_stop_text = _execute_sibling_palette_prompt(
                 sibling_api_container=sibling_api_container,
                 workspace_slug=sibling_workspace_slug,
-                prompt="show devices",
+                prompt=palette_prompt,
             )
             if palette_after_stop_status != 200:
                 raise RuntimeError(
@@ -1868,28 +3372,11 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
         update_execution_note(
             db,
             artifact_id=uuid.UUID(execution_note_artifact_id),
-            implementation_summary="Completed deployment smoke tests, sibling reachability checks, and palette verification for the generated application.",
+            implementation_summary="Completed platform plumbing checks and generated-application contract smoke for the deployed application.",
             append_validation=[
-                "App health endpoint returned 200.",
-                "Location CRUD smoke checks succeeded.",
-                "Device CRUD smoke checks succeeded.",
-                "Sibling Xyn health check succeeded.",
-                "Sibling runtime health endpoint returned 200.",
-                "Sibling runtime location/device CRUD smoke checks succeeded.",
-                f"Palette returned {len(palette_result.get('rows') or [])} rows for show devices.",
-                f"Palette create location requested missing fields: {', '.join(str(field) for field in missing_fields)}.",
-                f"Palette returned {len(palette_create_location_filled_result.get('rows') or [])} rows for completed create location.",
-                f"Palette returned {len(palette_locations_result.get('rows') or [])} rows for show locations.",
-                (
-                    f"Palette returned {len(sibling_interfaces_palette.get('rows') or [])} rows for show interfaces."
-                    if sibling_interfaces_palette
-                    else "Interface palette validation not required for this AppSpec."
-                ),
-                (
-                    f"Palette returned {len(sibling_interfaces_chart.get('values') or [])} buckets for show interfaces by status."
-                    if sibling_interfaces_chart
-                    else "Interface chart validation not required for this AppSpec."
-                ),
+                "Platform plumbing smoke passed: local runtime, sibling API, sibling runtime, and artifact install all became reachable.",
+                f"Generated app contract smoke passed for entities: {', '.join(str(row.get('key') or '') for row in entity_contracts)}.",
+                f"Palette returned {len(palette_result.get('rows') or [])} rows for {palette_prompt}.",
                 (
                     f"Sibling palette still returned {len(palette_after_root_stop.get('rows') or [])} rows after root runtime stop."
                     if palette_after_root_stop
@@ -1901,42 +3388,25 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
 
     return (
         {
-            "app_health": {"code": health_code, "body": health_body or health_text},
-            "app_checks": {
-                "list_devices": {"code": list_code, "body": list_body or list_text},
-                "create_location": {"code": location_code, "body": location_body or location_text},
-                "list_locations": {"code": list_locations_code, "body": list_locations_body or list_locations_text},
-                "create_device": {"code": create_code, "body": create_body or create_text},
-                "report_devices_by_status": {"code": report_code, "body": report_body or report_text},
+            "platform_plumbing": {
+                "app_health": {"code": health_code, "body": health_body or health_text},
+                "sibling_health": {"code": sibling_health_code, "body": sibling_health_body or sibling_health_text},
+                "sibling_runtime": {
+                    "base_url": sibling_runtime_base_url,
+                    "health": {"code": sibling_runtime_health_code, "body": sibling_runtime_health_body or sibling_runtime_health_text},
+                },
+                "generated_artifact": {
+                    "registry_catalog": registry_catalog,
+                    "installed_in_sibling": generated_artifact_slug,
+                    "installed_version": generated_artifact_version,
+                },
             },
-            "sibling_health": {"code": sibling_health_code, "body": sibling_health_body or sibling_health_text},
-            "sibling_runtime": {
-                "base_url": sibling_runtime_base_url,
-                "health": {"code": sibling_runtime_health_code, "body": sibling_runtime_health_body or sibling_runtime_health_text},
-                "create_location": {"code": sibling_location_code, "body": sibling_location_body or sibling_location_text},
-                "create_device": {"code": sibling_create_code, "body": sibling_create_body or sibling_create_text},
-                "create_interface": (
-                    {"code": sibling_interface_code, "body": sibling_interface_body}
-                    if sibling_interface_code in {200, 201}
-                    else None
-                ),
-                "report_interfaces_by_status": (
-                    {"code": sibling_interface_report_code, "body": sibling_interface_report_body}
-                    if sibling_interface_report_code == 200
-                    else None
-                ),
+            "generated_app_contract_smoke": {
+                "local_runtime": local_contract_checks,
+                "sibling_runtime": sibling_contract_checks,
+                "palette": {"prompt": palette_prompt, "result": palette_result},
             },
             "sibling_xyn": sibling,
-            "generated_artifact": {
-                "registry_catalog": registry_catalog,
-                "installed_in_sibling": generated_artifact_slug,
-                "installed_version": generated_artifact_version,
-            },
-            "palette": palette_result,
-            "palette_create_location": palette_create_location_result,
-            "palette_locations": palette_locations_result,
-            "palette_interfaces": sibling_interfaces_palette,
-            "palette_interfaces_by_status": sibling_interfaces_chart,
             "palette_after_root_runtime_stop": palette_after_root_stop,
             "root_runtime_stop": stopped_root_runtime,
             "root_runtime_restart": restarted_root_runtime,

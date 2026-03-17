@@ -16,11 +16,18 @@ def _utc_now() -> datetime:
 
 
 def default_instance_artifact_root() -> str:
-    return str(os.getenv("ARTIFACT_STORE_PATH", ".xyn/artifacts")).strip() or ".xyn/artifacts"
+    return str(os.getenv("XYN_ARTIFACT_ROOT") or os.getenv("ARTIFACT_STORE_PATH", ".xyn/artifacts")).strip() or ".xyn/artifacts"
 
 
 def default_instance_workspace_root() -> str:
-    return str(os.getenv("XYNSEED_WORKSPACE", ".xyn/workspace")).strip() or ".xyn/workspace"
+    return (
+        str(
+            os.getenv("XYN_WORKSPACE_ROOT")
+            or os.getenv("XYN_LOCAL_WORKSPACE_ROOT")
+            or os.getenv("XYNSEED_WORKSPACE", ".xyn/workspace")
+        ).strip()
+        or ".xyn/workspace"
+    )
 
 
 def default_instance_deployments_root() -> str:

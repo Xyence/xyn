@@ -182,6 +182,8 @@ class RuntimeExecutionTests(unittest.TestCase):
 
         self.assertEqual(artifact.kind, "summary")
         self.assertTrue(str(artifact.storage_path).startswith("artifact://runs/"))
+        self.assertIn("storage_key", dict(artifact.extra_metadata or {}))
+        self.assertEqual(dict(artifact.extra_metadata or {}).get("storage_provider"), "local")
         event = self.db.query(models.Event).filter(
             models.Event.run_id == run.id,
             models.Event.event_name == "run.artifact.created",

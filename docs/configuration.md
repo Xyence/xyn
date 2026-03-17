@@ -26,6 +26,9 @@ Production deployments should inject env via seed/compose and should not depend 
   - `XYN_OPENAI_API_KEY`
   - `XYN_GEMINI_API_KEY`
   - `XYN_ANTHROPIC_API_KEY`
+- Optional purpose-specific bootstrap overlays:
+  - `XYN_AI_PLANNING_PROVIDER` / `XYN_AI_PLANNING_MODEL` / `XYN_AI_PLANNING_API_KEY`
+  - `XYN_AI_CODING_PROVIDER` / `XYN_AI_CODING_MODEL` / `XYN_AI_CODING_API_KEY`
 - Secret encryption key (for encrypted credential storage fallback):
   - `XYN_SECRET_KEY` (or `XYN_CREDENTIALS_ENCRYPTION_KEY`)
 
@@ -34,11 +37,28 @@ Provider resolution:
 - If provider is unset and exactly one key is present, provider is inferred.
 - If provider is unset and multiple keys are present, startup fails fast and requires explicit provider.
 - If no keys are present, AI bootstrap is disabled and runtime remains bootable.
+- Planning/coding bootstrap overlays are optional. If any overlay field is set for a role, that role requires the full provider/model/api-key triplet.
 
 ### Database / Cache
 
 - `DATABASE_URL`
 - `REDIS_URL`
+
+### Managed Storage Roots
+
+- `XYN_ARTIFACT_ROOT`
+  - canonical durable artifact root for local/runtime storage
+  - defaults to `.xyn/artifacts` in seed-owned local/dev setups
+- `XYN_WORKSPACE_ROOT`
+  - canonical managed workspace root for active coding/scratch workspaces
+  - defaults to `.xyn/workspace`
+- `XYN_WORKSPACE_RETENTION_DAYS`
+  - local retention hint for stale managed workspace cleanup eligibility
+  - default: `14`
+
+Compatibility aliases still exported for current local flows:
+- `ARTIFACT_STORE_PATH` mirrors `XYN_ARTIFACT_ROOT`
+- `XYN_LOCAL_WORKSPACE_ROOT` and `XYNSEED_WORKSPACE` mirror `XYN_WORKSPACE_ROOT`
 
 ## Compatibility Aliases (Migration Window)
 

@@ -85,19 +85,10 @@ class CliCodexExecutor:
         with tempfile.NamedTemporaryFile("w+", suffix=".txt", delete=False) as summary_file:
             summary_path = Path(summary_file.name)
         prompt = f"{prompt_title.strip()}\n\n{prompt_body.strip()}".strip()
-        cmd = [
-            self.binary,
-            "-a",
-            "never",
-            "-s",
-            "workspace-write",
-            "exec",
-            "-C",
-            str(repo_path),
-            "--json",
-            "--output-last-message",
-            str(summary_path),
-        ]
+        auth_error = _ensure_codex_login(self.binary)
+        if auth_error:
+            raise CodexExecutionError(auth_error)
+        cmd = self._build_exec_command(repo_path=repo_path, summary_path=summary_path)
         try:
             proc = subprocess.run(
                 cmd,
@@ -127,6 +118,27 @@ class CliCodexExecutor:
             exit_code=proc.returncode,
         )
 
+    def _build_exec_command(self, *, repo_path: Path, summary_path: Path) -> list[str]:
+        command = [self.binary]
+        if _codex_bypass_sandbox_enabled():
+            # xyn-core already runs inside a dedicated container with controlled repo mounts.
+            # The Codex workspace sandbox still presents those mounts as read-only here, so
+            # local runtime execution needs the CLI bypass mode to make real repository edits.
+            command.append("--dangerously-bypass-approvals-and-sandbox")
+        else:
+            command.extend(["-a", "never", "-s", _codex_sandbox_mode()])
+        command.extend(
+            [
+                "exec",
+                "-C",
+                str(repo_path),
+                "--json",
+                "--output-last-message",
+                str(summary_path),
+            ]
+        )
+        return command
+
 
 def check_codex_availability(binary: Optional[str] = None) -> CodexAvailability:
     resolved = binary or os.getenv("XYN_CODEX_BINARY") or shutil.which("codex") or "codex"
@@ -152,7 +164,60 @@ def check_codex_availability(binary: Optional[str] = None) -> CodexAvailability:
             binary=binary_path,
             reason=output or f"codex --help exited with status {proc.returncode}",
         )
+    auth_error = _ensure_codex_login(binary_path)
+    if auth_error:
+        return CodexAvailability(available=False, binary=binary_path, reason=auth_error)
     return CodexAvailability(available=True, binary=binary_path)
+
+
+def _codex_api_key() -> str:
+    return str(os.getenv("OPENAI_API_KEY") or os.getenv("XYN_OPENAI_API_KEY") or "").strip()
+
+
+def _codex_sandbox_mode() -> str:
+    return str(os.getenv("XYN_CODEX_SANDBOX_MODE") or "workspace-write").strip() or "workspace-write"
+
+
+def _codex_bypass_sandbox_enabled() -> bool:
+    value = str(os.getenv("XYN_CODEX_BYPASS_SANDBOX") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _ensure_codex_login(binary: str) -> Optional[str]:
+    status = subprocess.run(
+        [binary, "login", "status"],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+    if status.returncode == 0:
+        return None
+    api_key = _codex_api_key()
+    if not api_key:
+        return "codex is not logged in and no OpenAI API key is configured for bootstrap auth"
+    login = subprocess.run(
+        [binary, "login", "--with-api-key"],
+        input=f"{api_key}\n",
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+    if login.returncode != 0:
+        output = "\n".join(part for part in [(login.stdout or "").strip(), (login.stderr or "").strip()] if part).strip()
+        return output or "codex login bootstrap failed"
+    verify = subprocess.run(
+        [binary, "login", "status"],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+    if verify.returncode == 0:
+        return None
+    output = "\n".join(part for part in [(verify.stdout or "").strip(), (verify.stderr or "").strip()] if part).strip()
+    return output or "codex login bootstrap did not establish an authenticated session"
 
 
 class LocalValidationRunner:

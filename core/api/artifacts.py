@@ -1,23 +1,19 @@
 """Artifact API endpoints"""
 import uuid
-import os
 from typing import Optional
 from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pathlib import Path
 from sqlalchemy.orm import Session
 
 from core.database import get_db
 from core import models, schemas
-from core.artifact_store import LocalFSArtifactStore
-from core.context_packs import default_instance_artifact_root
+from core.artifact_store import get_runtime_artifact_store
 
 router = APIRouter()
 
 # Initialize artifact store
-artifact_store = LocalFSArtifactStore(
-    base_path=os.getenv("ARTIFACT_STORE_PATH", default_instance_artifact_root())
-)
+artifact_store = get_runtime_artifact_store()
 
 
 @router.post("/artifacts", response_model=schemas.Artifact, status_code=201)
@@ -216,17 +212,31 @@ async def download_artifact(
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
-    # Prefer the artifact store path, but allow explicitly persisted storage_path
-    # for artifact kinds that are written outside the generic artifact store.
+    # Prefer direct file serving when available (local filesystem backend).
     artifact_path = artifact_store.get_path(artifact_id)
-    if (not artifact_path or not artifact_path.exists()) and artifact.storage_path:
+    if artifact_path and artifact_path.exists():
+        return FileResponse(
+            path=str(artifact_path),
+            media_type=artifact.content_type,
+            filename=artifact.name
+        )
+
+    # Fall back to backend retrieval (required for non-filesystem providers).
+    payload = await artifact_store.retrieve(artifact_id)
+    if payload is not None:
+        return Response(
+            content=payload,
+            media_type=artifact.content_type or "application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{artifact.name}"'},
+        )
+
+    # Legacy fallback for artifact rows that persisted explicit local paths.
+    if artifact.storage_path:
         artifact_path = Path(str(artifact.storage_path))
-
-    if not artifact_path or not artifact_path.exists():
-        raise HTTPException(status_code=404, detail="Artifact content not found")
-
-    return FileResponse(
-        path=str(artifact_path),
-        media_type=artifact.content_type,
-        filename=artifact.name
-    )
+        if artifact_path.exists():
+            return FileResponse(
+                path=str(artifact_path),
+                media_type=artifact.content_type,
+                filename=artifact.name
+            )
+    raise HTTPException(status_code=404, detail="Artifact content not found")

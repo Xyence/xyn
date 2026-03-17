@@ -10,7 +10,7 @@ from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 
 from core import models, schemas
-from core.artifact_store import LocalFSArtifactStore
+from core.artifact_store import ArtifactStoreBase, get_runtime_artifact_store
 from core.log_capture import StepLogCapture
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ class SimpleExecutor:
     This demonstrates the run/step lifecycle for smoke testing.
     """
 
-    def __init__(self, db: Session, artifact_store: Optional[LocalFSArtifactStore] = None):
+    def __init__(self, db: Session, artifact_store: Optional[ArtifactStoreBase] = None):
         """Initialize executor with database session.
 
         Args:
@@ -31,7 +31,7 @@ class SimpleExecutor:
             artifact_store: Artifact store instance (creates default if not provided)
         """
         self.db = db
-        self.artifact_store = artifact_store or LocalFSArtifactStore()
+        self.artifact_store = artifact_store or get_runtime_artifact_store()
 
     async def create_run(
         self,

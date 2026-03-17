@@ -12,7 +12,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from core import models
-from core.artifact_store import LocalFSArtifactStore
+from core.artifact_store import ArtifactStoreBase
 
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ class StepLogCapture:
         step_id: uuid.UUID,
         run_id: uuid.UUID,
         db: Session,
-        artifact_store: LocalFSArtifactStore,
+        artifact_store: ArtifactStoreBase,
         correlation_id: Optional[str] = None
     ):
         """Initialize log capture for a step.
@@ -133,7 +133,7 @@ def capture_step_logs(
     step_id: uuid.UUID,
     run_id: uuid.UUID,
     db: Session,
-    artifact_store: LocalFSArtifactStore
+    artifact_store: ArtifactStoreBase
 ) -> Generator[StepLogCapture, None, None]:
     """Context manager for capturing step logs.
 

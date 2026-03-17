@@ -11,7 +11,7 @@ import uuid
 
 
 def _workspace_root() -> Path:
-    env_path = os.getenv("XYNSEED_WORKSPACE")
+    env_path = os.getenv("XYN_WORKSPACE_ROOT") or os.getenv("XYN_LOCAL_WORKSPACE_ROOT") or os.getenv("XYNSEED_WORKSPACE")
     if env_path:
         return Path(env_path)
     repo_root = Path(__file__).resolve().parents[3]

@@ -84,6 +84,19 @@ def _docker_image_exists(image_ref: str) -> bool:
     return code == 0
 
 
+def _running_container_image_ref(container_name: str) -> str:
+    name = str(container_name or "").strip()
+    if not name:
+        return ""
+    code, stdout, _ = _run(["docker", "inspect", "--format", "{{.Image}}", name])
+    if code == 0 and str(stdout or "").strip():
+        return str(stdout or "").strip()
+    code, stdout, _ = _run(["docker", "inspect", "--format", "{{.Config.Image}}", name])
+    if code == 0 and str(stdout or "").strip():
+        return str(stdout or "").strip()
+    return ""
+
+
 def _tls_enabled() -> bool:
     if _as_bool(os.getenv("XYN_TRAEFIK_ENABLE_TLS", "false")):
         return True
@@ -313,11 +326,18 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       OIDC_ISSUER: ${{XYN_OIDC_ISSUER:-}}
       OIDC_CLIENT_ID: ${{XYN_OIDC_CLIENT_ID:-}}
       XYN_UI_BEARER_TOKEN: ${{XYN_UI_BEARER_TOKEN:-}}
-      XYN_AI_PROVIDER: ${{XYN_AI_PROVIDER:-openai}}
-      XYN_AI_MODEL: ${{XYN_AI_MODEL:-gpt-5-mini}}
+      XYN_AI_PROVIDER: ${{XYN_AI_PROVIDER:-}}
+      XYN_AI_MODEL: ${{XYN_AI_MODEL:-}}
+      XYN_AI_PLANNING_PROVIDER: ${{XYN_AI_PLANNING_PROVIDER:-}}
+      XYN_AI_PLANNING_MODEL: ${{XYN_AI_PLANNING_MODEL:-}}
+      XYN_AI_PLANNING_API_KEY: ${{XYN_AI_PLANNING_API_KEY:-}}
+      XYN_AI_CODING_PROVIDER: ${{XYN_AI_CODING_PROVIDER:-}}
+      XYN_AI_CODING_MODEL: ${{XYN_AI_CODING_MODEL:-}}
+      XYN_AI_CODING_API_KEY: ${{XYN_AI_CODING_API_KEY:-}}
       XYN_OPENAI_API_KEY: ${{XYN_OPENAI_API_KEY:-}}
       XYN_GEMINI_API_KEY: ${{XYN_GEMINI_API_KEY:-}}
       XYN_ANTHROPIC_API_KEY: ${{XYN_ANTHROPIC_API_KEY:-}}
+      XYN_CREDENTIALS_ENCRYPTION_KEY: ${{XYN_CREDENTIALS_ENCRYPTION_KEY:-}}
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network={traefik_network}"
@@ -366,11 +386,18 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       OIDC_ISSUER: ${{XYN_OIDC_ISSUER:-}}
       OIDC_CLIENT_ID: ${{XYN_OIDC_CLIENT_ID:-}}
       XYN_UI_BEARER_TOKEN: ${{XYN_UI_BEARER_TOKEN:-}}
-      XYN_AI_PROVIDER: ${{XYN_AI_PROVIDER:-openai}}
-      XYN_AI_MODEL: ${{XYN_AI_MODEL:-gpt-5-mini}}
+      XYN_AI_PROVIDER: ${{XYN_AI_PROVIDER:-}}
+      XYN_AI_MODEL: ${{XYN_AI_MODEL:-}}
+      XYN_AI_PLANNING_PROVIDER: ${{XYN_AI_PLANNING_PROVIDER:-}}
+      XYN_AI_PLANNING_MODEL: ${{XYN_AI_PLANNING_MODEL:-}}
+      XYN_AI_PLANNING_API_KEY: ${{XYN_AI_PLANNING_API_KEY:-}}
+      XYN_AI_CODING_PROVIDER: ${{XYN_AI_CODING_PROVIDER:-}}
+      XYN_AI_CODING_MODEL: ${{XYN_AI_CODING_MODEL:-}}
+      XYN_AI_CODING_API_KEY: ${{XYN_AI_CODING_API_KEY:-}}
       XYN_OPENAI_API_KEY: ${{XYN_OPENAI_API_KEY:-}}
       XYN_GEMINI_API_KEY: ${{XYN_GEMINI_API_KEY:-}}
       XYN_ANTHROPIC_API_KEY: ${{XYN_ANTHROPIC_API_KEY:-}}
+      XYN_CREDENTIALS_ENCRYPTION_KEY: ${{XYN_CREDENTIALS_ENCRYPTION_KEY:-}}
     command:
       - /bin/sh
       - -lc
@@ -674,9 +701,28 @@ def _artifact_image_defaults() -> dict[str, str]:
     }
 
 
-def _context_has_dockerfile(path_text: str) -> bool:
-    candidate = Path(path_text).expanduser().resolve()
-    return candidate.is_dir() and (candidate / "Dockerfile").exists()
+def _candidate_contexts(explicit: str, candidates: list[Path]) -> list[str]:
+    values: list[str] = []
+    if explicit:
+        values.append(str(explicit).strip())
+    values.extend(str(candidate) for candidate in candidates)
+    unique: list[str] = []
+    for value in values:
+        token = str(value or "").strip()
+        if token and token not in unique:
+            unique.append(token)
+    return unique
+
+
+def _build_local_image(tag: str, contexts: list[str]) -> tuple[str, list[str]]:
+    attempts: list[str] = []
+    for context in contexts:
+        code, _, stderr = _run(["docker", "build", "-t", tag, context])
+        if code == 0:
+            attempts.append(f"Built local image {tag} from {context}")
+            return context, attempts
+        attempts.append(f"Failed to build local image {tag} from {context}: {stderr or 'unknown error'}")
+    return "", attempts
 
 
 def _resolve_images_for_provision(request: ProvisionLocalRequest) -> dict[str, Any]:
@@ -699,11 +745,55 @@ def _resolve_images_for_provision(request: ProvisionLocalRequest) -> dict[str, A
 
     prefer_local_images = bool(request.prefer_local_images) or _as_bool(os.getenv("XYN_PROVISION_PREFER_LOCAL_IMAGES", "false"))
     if prefer_local_images:
+        local_api_image_ref = _running_container_image_ref(str(os.getenv("XYN_PLATFORM_API_CONTAINER", "xyn-local-api")).strip() or "xyn-local-api")
+        local_ui_image_ref = _running_container_image_ref(str(os.getenv("XYN_PLATFORM_UI_CONTAINER", "xyn-local-ui")).strip() or "xyn-local-ui")
+        if local_api_image_ref and local_ui_image_ref and _docker_image_exists(local_api_image_ref) and _docker_image_exists(local_ui_image_ref):
+            operations.append(f"Using running local API image {local_api_image_ref}")
+            operations.append(f"Using running local UI image {local_ui_image_ref}")
+            return {
+                "mode": "running_local_images",
+                "registry": defaults["registry"],
+                "ui_image": local_ui_image_ref,
+                "api_image": local_api_image_ref,
+                "registry_slug": None,
+                "registry_source": "running_local_images",
+                "channel": str(request.channel or DEFAULT_IMAGE_TAG).strip() or DEFAULT_IMAGE_TAG,
+                "operations": operations,
+            }
         src_root = str(os.getenv("XYN_HOST_SRC_ROOT", "/home/ubuntu/src")).strip() or "/home/ubuntu/src"
-        local_ui_context = str(os.getenv("XYN_LOCAL_UI_CONTEXT", "")).strip() or str((Path(src_root) / "xyn-ui").resolve())
-        local_api_context = str(os.getenv("XYN_LOCAL_API_CONTEXT", "")).strip() or str((Path(src_root) / "xyn-api").resolve())
-        local_contexts_ready = bool(local_ui_context and local_api_context)
+        src_root_path = Path(src_root).expanduser().resolve()
+        local_ui_contexts = _candidate_contexts(
+            str(os.getenv("XYN_LOCAL_UI_CONTEXT", "")).strip(),
+            [
+                src_root_path / "xyn-platform" / "apps" / "xyn-ui",
+                src_root_path / "xyn-ui",
+            ],
+        )
+        local_api_contexts = _candidate_contexts(
+            str(os.getenv("XYN_LOCAL_API_CONTEXT", "")).strip(),
+            [
+                src_root_path / "xyn-platform" / "services" / "xyn-api",
+                src_root_path / "xyn-api",
+            ],
+        )
+        built_api_context, api_attempts = _build_local_image(DEFAULT_API_IMAGE_NAME, local_api_contexts)
+        built_ui_context, ui_attempts = _build_local_image(DEFAULT_UI_IMAGE_NAME, local_ui_contexts)
+        if built_api_context and built_ui_context:
+            operations.extend(api_attempts[-1:])
+            operations.extend(ui_attempts[-1:])
+            return {
+                "mode": "local_build",
+                "registry": defaults["registry"],
+                "ui_image": DEFAULT_UI_IMAGE_NAME,
+                "api_image": DEFAULT_API_IMAGE_NAME,
+                "registry_slug": None,
+                "registry_source": "local_build",
+                "channel": str(request.channel or DEFAULT_IMAGE_TAG).strip() or DEFAULT_IMAGE_TAG,
+                "operations": operations,
+            }
         if _docker_image_exists(DEFAULT_UI_IMAGE_NAME) and _docker_image_exists(DEFAULT_API_IMAGE_NAME):
+            operations.extend(api_attempts)
+            operations.extend(ui_attempts)
             operations.append(f"Using prebuilt local image {DEFAULT_API_IMAGE_NAME}")
             operations.append(f"Using prebuilt local image {DEFAULT_UI_IMAGE_NAME}")
             return {
@@ -713,27 +803,6 @@ def _resolve_images_for_provision(request: ProvisionLocalRequest) -> dict[str, A
                 "api_image": DEFAULT_API_IMAGE_NAME,
                 "registry_slug": None,
                 "registry_source": "prebuilt_local_images",
-                "channel": str(request.channel or DEFAULT_IMAGE_TAG).strip() or DEFAULT_IMAGE_TAG,
-                "operations": operations,
-            }
-        if local_contexts_ready and _context_has_dockerfile(local_ui_context) and _context_has_dockerfile(local_api_context):
-            code, _, stderr = _run(["docker", "build", "-t", DEFAULT_API_IMAGE_NAME, local_api_context])
-            if code != 0:
-                raise RuntimeError(f"Failed to build local API context: {stderr or local_api_context}")
-            operations.append(f"Built local image {DEFAULT_API_IMAGE_NAME} from {local_api_context}")
-
-            code, _, stderr = _run(["docker", "build", "-t", DEFAULT_UI_IMAGE_NAME, local_ui_context])
-            if code != 0:
-                raise RuntimeError(f"Failed to build local UI context: {stderr or local_ui_context}")
-            operations.append(f"Built local image {DEFAULT_UI_IMAGE_NAME} from {local_ui_context}")
-
-            return {
-                "mode": "local_build",
-                "registry": defaults["registry"],
-                "ui_image": DEFAULT_UI_IMAGE_NAME,
-                "api_image": DEFAULT_API_IMAGE_NAME,
-                "registry_slug": None,
-                "registry_source": "local_build",
                 "channel": str(request.channel or DEFAULT_IMAGE_TAG).strip() or DEFAULT_IMAGE_TAG,
                 "operations": operations,
             }

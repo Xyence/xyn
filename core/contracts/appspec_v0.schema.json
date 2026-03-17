@@ -81,6 +81,10 @@
     "requires_primitives": {
       "type": "array",
       "items": {"type": "string"}
+    },
+    "entity_contracts": {
+      "type": "array",
+      "items": {"type": "object"}
     }
   }
 }

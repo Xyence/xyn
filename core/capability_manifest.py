@@ -340,6 +340,33 @@ def _entity_operation_payload(*, declared: bool, method: str, path: str) -> dict
 
 
 def _build_entity_contracts(app_spec: dict[str, Any], *, enabled_keys: set[str]) -> list[dict[str, Any]]:
+    explicit_contracts = app_spec.get("entity_contracts") if isinstance(app_spec.get("entity_contracts"), list) else []
+    if explicit_contracts:
+        rows: list[dict[str, Any]] = []
+        for contract in explicit_contracts:
+            if not isinstance(contract, dict):
+                continue
+            row = json.loads(json.dumps(contract))
+            entity_key = str(row.get("key") or "").strip()
+            if not entity_key:
+                continue
+            row.setdefault("collection_path", f"/{entity_key}")
+            row.setdefault("item_path_template", f"/{entity_key}" + "/{id}")
+            operations = row.get("operations") if isinstance(row.get("operations"), dict) else {}
+            normalized_operations: dict[str, dict[str, Any]] = {}
+            for operation in ("list", "get", "create", "update", "delete"):
+                spec = operations.get(operation) if isinstance(operations.get(operation), dict) else {}
+                default_path = row["collection_path"] if operation in {"list", "create"} else row["item_path_template"]
+                normalized_operations[operation] = {
+                    "declared": bool(spec.get("declared", True)),
+                    "method": str(spec.get("method") or ("GET" if operation in {"list", "get"} else "POST" if operation == "create" else "PATCH" if operation == "update" else "DELETE")).upper(),
+                    "path": str(spec.get("path") or default_path),
+                }
+            row["operations"] = normalized_operations
+            rows.append(row)
+        rows.sort(key=lambda row: str(row.get("key") or ""))
+        return rows
+
     entities = _infer_entities_from_app_spec(app_spec)
     specs = _entity_contract_specs()
     rows: list[dict[str, Any]] = []
@@ -427,6 +454,12 @@ def _normalize_unique(values: list[Any] | tuple[Any, ...] | set[Any] | None) -> 
 
 
 def _infer_entities_from_app_spec(app_spec: dict[str, Any]) -> list[str]:
+    explicit_contracts = app_spec.get("entity_contracts") if isinstance(app_spec.get("entity_contracts"), list) else []
+    explicit_keys = _normalize_unique(
+        [str(row.get("key") or "").strip() for row in explicit_contracts if isinstance(row, dict)]
+    )
+    if explicit_keys:
+        return explicit_keys
     entities = _normalize_unique(app_spec.get("entities") if isinstance(app_spec.get("entities"), list) else [])
     if entities:
         return entities
@@ -450,9 +483,15 @@ def _enabled_command_keys(app_spec: dict[str, Any]) -> set[str]:
     entities = {item.casefold() for item in _infer_entities_from_app_spec(app_spec)}
     reports = {item.casefold() for item in _normalize_unique(app_spec.get("reports") if isinstance(app_spec.get("reports"), list) else [])}
     enabled: set[str] = set()
+    explicit_contracts = app_spec.get("entity_contracts") if isinstance(app_spec.get("entity_contracts"), list) else []
+    explicit_map = {
+        str(contract.get("key") or "").strip().casefold(): contract
+        for contract in explicit_contracts
+        if isinstance(contract, dict) and str(contract.get("key") or "").strip()
+    }
     specs = _entity_contract_specs()
     for entity_key in entities:
-        contract = specs.get(entity_key)
+        contract = explicit_map.get(entity_key) or specs.get(entity_key)
         if not isinstance(contract, dict):
             continue
         singular = str(contract.get("singular_label") or entity_key.rstrip("s")).strip() or entity_key.rstrip("s")
@@ -489,6 +528,7 @@ def build_resolved_capability_manifest(app_spec: dict[str, Any]) -> dict[str, An
     entities = _build_entity_contracts(app_spec, enabled_keys=enabled_keys)
     enabled_entity_keys = {str(row.get("key") or "").strip() for row in entities if isinstance(row, dict)}
     all_entity_specs = _entity_contract_specs()
+    explicit_contracts = app_spec.get("entity_contracts") if isinstance(app_spec.get("entity_contracts"), list) else []
 
     for contract in entities:
         if not isinstance(contract, dict):
@@ -516,6 +556,8 @@ def build_resolved_capability_manifest(app_spec: dict[str, Any]) -> dict[str, An
                     }
                 )
     for entity_key, spec in all_entity_specs.items():
+        if explicit_contracts:
+            break
         if entity_key in enabled_entity_keys:
             continue
         latent_contract = {
