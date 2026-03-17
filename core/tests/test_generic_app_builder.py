@@ -21,6 +21,7 @@ TEAM_LUNCH_POLL_PROMPT = (
     "2. Lunch Option - poll - name - restaurant - notes - active (yes/no) "
     "3. Vote - poll - lunch option - voter_name - created_at "
     "Behavior: - Users can create a poll, add lunch options, and cast votes. "
+    "- When a Lunch Option is selected for a poll, the poll status should become selected automatically. "
     "Views / usability: - List all polls - View a poll with its options and vote counts. "
     "Validation / rules: - Prevent voting on polls that are not open."
 )
@@ -50,6 +51,7 @@ class GenericAppBuilderTests(unittest.TestCase):
         self.assertIn("lunch_option_id", {field["name"] for field in contracts["votes"]["fields"]})
         lunch_option_fields = {field["name"]: field for field in contracts["lunch_options"]["fields"]}
         self.assertEqual(lunch_option_fields["active"]["options"], ["yes", "no"])
+        self.assertEqual(lunch_option_fields["selected"]["options"], ["yes", "no"])
         vote_fields = [field["name"] for field in contracts["votes"]["fields"]]
         self.assertEqual(vote_fields.count("created_at"), 1)
 
@@ -119,6 +121,8 @@ class GenericAppBuilderTests(unittest.TestCase):
         self.assertIn("parent_status_gate", runtime_rules)
         self.assertIn("match_related_field", runtime_rules)
         self.assertIn("field_transition_guard", runtime_rules)
+        self.assertIn("related_count", runtime_rules)
+        self.assertIn("post_write_related_update", runtime_rules)
 
     def test_policy_aware_smoke_primes_parent_status_before_child_create(self):
         workspace_id = str(uuid.uuid4())

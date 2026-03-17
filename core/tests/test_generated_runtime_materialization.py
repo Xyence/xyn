@@ -23,6 +23,8 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
                 "Requirements: Core entities: 1. Poll - title - poll_date - status (draft, open, closed, selected) "
                 "2. Lunch Option - poll - name - restaurant - notes - active (yes/no) "
                 "3. Vote - poll - lunch option - voter_name - created_at "
+                "Behavior: - When a Lunch Option is selected for a poll, the poll status should become selected automatically. "
+                "Views / usability: - View a poll with its options and vote counts. "
                 "Validation / rules: - Prevent voting on polls that are not open."
             ),
         )
@@ -84,13 +86,19 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
                 "Requirements: Core entities: 1. Poll - title - poll_date - status (draft, open, closed, selected) "
                 "2. Lunch Option - poll - name - restaurant - notes - active (yes/no) "
                 "3. Vote - poll - lunch option - voter_name - created_at "
+                "Behavior: - When a Lunch Option is selected for a poll, the poll status should become selected automatically. "
+                "Views / usability: - View a poll with its options and vote counts. "
                 "Validation / rules: - Prevent voting on polls that are not open."
             ),
         )
         policy_bundle = _build_policy_bundle(
             workspace_id=uuid.uuid4(),
             app_spec=app_spec,
-            raw_prompt="Validation / rules: - Prevent voting on polls that are not open.",
+            raw_prompt=(
+                "Behavior: - When a Lunch Option is selected for a poll, the poll status should become selected automatically. "
+                "Views / usability: - View a poll with its options and vote counts. "
+                "Validation / rules: - Prevent voting on polls that are not open."
+            ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             compose_path = _materialize_net_inventory_compose(
@@ -103,6 +111,8 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
 
         self.assertIn("GENERATED_POLICY_BUNDLE_JSON", text)
         self.assertIn("parent_status_gate", text)
+        self.assertIn("related_count", text)
+        self.assertIn("post_write_related_update", text)
 
     def test_workspace_seed_creates_missing_workspace(self):
         class _FakeResponse:

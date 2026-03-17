@@ -909,11 +909,16 @@ def _policy_entity_token_matches(contract: dict[str, Any], token: str) -> bool:
 
 def _policy_statement_entity_mentions(statement: str, *, entity_contracts: list[dict[str, Any]]) -> list[str]:
     lowered = str(statement or "").strip().lower()
+    tokens = re.findall(r"[a-z_]+", lowered)
     mentions: list[str] = []
     for contract in entity_contracts:
         if not isinstance(contract, dict):
             continue
-        if any(_policy_entity_token_matches(contract, token) for token in re.findall(r"[a-z_]+", lowered)):
+        singular = str(contract.get("singular_label") or str(contract.get("key") or "").rstrip("s")).strip().lower()
+        plural = str(contract.get("plural_label") or contract.get("key") or "").strip().lower()
+        phrase_match = any(candidate and candidate in lowered for candidate in (singular, plural))
+        token_match = any(_policy_entity_token_matches(contract, token) for token in tokens)
+        if phrase_match or token_match:
             mentions.append(str(contract.get("key") or "").strip())
     return _normalize_unique_strings(mentions)
 
@@ -1177,6 +1182,222 @@ def _compile_transition_policies(
     return rows, sequence
 
 
+def _contract_field(contract: dict[str, Any], field_name: str) -> dict[str, Any] | None:
+    for field in contract.get("fields") if isinstance(contract.get("fields"), list) else []:
+        if not isinstance(field, dict):
+            continue
+        if str(field.get("name") or "").strip() == field_name:
+            return field
+    return None
+
+
+def _compile_related_count_policies(
+    *,
+    app_slug: str,
+    entity_contracts: list[dict[str, Any]],
+    sections: dict[str, list[str]],
+    start_sequence: int,
+) -> tuple[list[dict[str, Any]], int]:
+    contracts = {
+        str(contract.get("key") or "").strip(): contract
+        for contract in entity_contracts
+        if isinstance(contract, dict) and str(contract.get("key") or "").strip()
+    }
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    sequence = start_sequence
+    statements = [str(item or "").strip() for item in sections.get("validation", []) + sections.get("views", []) if str(item or "").strip()]
+    for statement in statements:
+        lowered = statement.lower()
+        if "count" not in lowered and "counts" not in lowered:
+            continue
+        mentions = _policy_statement_entity_mentions(statement, entity_contracts=entity_contracts)
+        for child_entity, child_contract in contracts.items():
+            relationships = child_contract.get("relationships") if isinstance(child_contract.get("relationships"), list) else []
+            for relation in relationships:
+                if not isinstance(relation, dict):
+                    continue
+                parent_entity = str(relation.get("target_entity") or "").strip()
+                relation_field = str(relation.get("field") or "").strip()
+                if not parent_entity or not relation_field:
+                    continue
+                if child_entity not in mentions or parent_entity not in mentions:
+                    continue
+                key = (parent_entity, child_entity, relation_field)
+                if key in seen:
+                    continue
+                seen.add(key)
+                output_field = f"{child_entity}_count"
+                rows.append(
+                    {
+                        "id": f"{app_slug}-{sequence:03d}",
+                        "name": f"{parent_entity} {child_entity} count",
+                        "description": statement,
+                        "family": "derived_policies",
+                        "status": "compiled",
+                        "enforcement_stage": "runtime_enforced",
+                        "targets": {
+                            "entity_keys": [parent_entity, child_entity],
+                            "field_names": [relation_field, output_field],
+                        },
+                        "parameters": {
+                            "runtime_rule": "related_count",
+                            "entity_key": parent_entity,
+                            "child_entity": child_entity,
+                            "child_relation_field": relation_field,
+                            "output_field": output_field,
+                            "surfaces": ["list", "detail"],
+                        },
+                        "source": {
+                            "kind": "prompt_section",
+                            "text": statement,
+                        },
+                        "explanation": {
+                            "user_summary": statement,
+                            "why_it_exists": "Derived from prompt-described aggregate/count requirement.",
+                        },
+                    }
+                )
+                sequence += 1
+    return rows, sequence
+
+
+def _compile_trigger_policies(
+    *,
+    app_slug: str,
+    entity_contracts: list[dict[str, Any]],
+    sections: dict[str, list[str]],
+    start_sequence: int,
+) -> tuple[list[dict[str, Any]], int]:
+    contracts = {
+        str(contract.get("key") or "").strip(): contract
+        for contract in entity_contracts
+        if isinstance(contract, dict) and str(contract.get("key") or "").strip()
+    }
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str, str]] = set()
+    sequence = start_sequence
+    statements = [str(item or "").strip() for item in sections.get("behavior", []) if str(item or "").strip()]
+    for statement in statements:
+        lowered = statement.lower()
+        if "automatic" not in lowered and "automatically" not in lowered:
+            continue
+        mentions = _policy_statement_entity_mentions(statement, entity_contracts=entity_contracts)
+        if len(mentions) < 2:
+            continue
+        for source_entity, source_contract in contracts.items():
+            if source_entity not in mentions:
+                continue
+            relationships = source_contract.get("relationships") if isinstance(source_contract.get("relationships"), list) else []
+            for relation in relationships:
+                if not isinstance(relation, dict):
+                    continue
+                target_entity = str(relation.get("target_entity") or "").strip()
+                relation_field = str(relation.get("field") or "").strip()
+                if not target_entity or target_entity not in mentions:
+                    continue
+                condition_field = ""
+                condition_value: Any = None
+                selected_field = _contract_field(source_contract, "selected")
+                if isinstance(selected_field, dict):
+                    condition_field = "selected"
+                    condition_value = "yes" if "yes" in [str(option).strip().lower() for option in selected_field.get("options") or []] else True
+                else:
+                    status_field, status_options = _policy_status_field(source_contract)
+                    if status_field and "selected" in {option.lower() for option in status_options}:
+                        condition_field = status_field
+                        condition_value = "selected"
+                target_status_field, target_status_options = _policy_status_field(contracts.get(target_entity, {}))
+                if not condition_field or not target_status_field or "selected" not in {option.lower() for option in target_status_options}:
+                    continue
+                trigger_key = (source_entity, condition_field, str(condition_value), target_entity, relation_field, target_status_field)
+                if trigger_key in seen:
+                    continue
+                seen.add(trigger_key)
+                rows.append(
+                    {
+                        "id": f"{app_slug}-{sequence:03d}",
+                        "name": f"{source_entity} selected updates {target_entity} status",
+                        "description": statement,
+                        "family": "trigger_policies",
+                        "status": "compiled",
+                        "enforcement_stage": "runtime_enforced",
+                        "targets": {
+                            "entity_keys": [source_entity, target_entity],
+                            "field_names": [condition_field, relation_field, target_status_field],
+                        },
+                        "parameters": {
+                            "runtime_rule": "post_write_related_update",
+                            "source_entity": source_entity,
+                            "on_operations": ["create", "update"],
+                            "condition_field": condition_field,
+                            "condition_equals": condition_value,
+                            "target_entity": target_entity,
+                            "target_relation_field": relation_field,
+                            "target_lookup_field": str(relation.get("target_field") or "id").strip() or "id",
+                            "target_update_field": target_status_field,
+                            "target_update_value": "selected",
+                        },
+                        "source": {
+                            "kind": "prompt_section",
+                            "text": statement,
+                        },
+                        "explanation": {
+                            "user_summary": statement,
+                            "why_it_exists": "Derived from prompt-described post-write state update behavior.",
+                        },
+                    }
+                )
+                sequence += 1
+    return rows, sequence
+
+
+def _augment_contracts_with_inferred_selection_flags(
+    *,
+    raw_prompt: str,
+    contracts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    prompt = str(raw_prompt or "").lower()
+    if "selected" not in prompt:
+        return contracts
+    updated = copy.deepcopy(contracts)
+    for contract in updated:
+        if not isinstance(contract, dict):
+            continue
+        relationships = contract.get("relationships") if isinstance(contract.get("relationships"), list) else []
+        if not relationships:
+            continue
+        fields = contract.get("fields") if isinstance(contract.get("fields"), list) else []
+        field_names = {str(field.get("name") or "").strip() for field in fields if isinstance(field, dict)}
+        if "selected" in field_names:
+            continue
+        singular = str(contract.get("singular_label") or str(contract.get("key") or "").rstrip("s")).strip().lower()
+        plural = str(contract.get("plural_label") or contract.get("key") or "").strip().lower()
+        if singular not in prompt and plural not in prompt:
+            continue
+        if not any(token in prompt for token in (f"selected {singular}", f"selected {plural}", f"{singular} is selected", f"{plural} is selected", f"mark one {singular}", f"mark {singular}")):
+            continue
+        fields.append(
+            {
+                "name": "selected",
+                "type": "string",
+                "required": False,
+                "readable": True,
+                "writable": True,
+                "identity": False,
+                "options": ["yes", "no"],
+            }
+        )
+        validation = contract.get("validation") if isinstance(contract.get("validation"), dict) else {}
+        validation["allowed_on_update"] = _normalize_unique_strings(list(validation.get("allowed_on_update") or []) + ["selected"])
+        contract["validation"] = validation
+        presentation = contract.get("presentation") if isinstance(contract.get("presentation"), dict) else {}
+        presentation["default_list_fields"] = _normalize_unique_strings(list(presentation.get("default_list_fields") or []) + ["selected"])
+        presentation["default_detail_fields"] = _normalize_unique_strings(list(presentation.get("default_detail_fields") or []) + ["selected"])
+        contract["presentation"] = presentation
+    return updated
+
+
 def _build_policy_bundle(
     *,
     workspace_id: uuid.UUID,
@@ -1243,6 +1464,20 @@ def _build_policy_bundle(
         start_sequence=sequence,
     )
     families["transition_policies"].extend(compiled_transition_policies)
+    compiled_derived_policies, sequence = _compile_related_count_policies(
+        app_slug=app_slug,
+        entity_contracts=[row for row in entity_contracts if isinstance(row, dict)],
+        sections=sections,
+        start_sequence=sequence,
+    )
+    families["derived_policies"].extend(compiled_derived_policies)
+    compiled_trigger_policies, sequence = _compile_trigger_policies(
+        app_slug=app_slug,
+        entity_contracts=[row for row in entity_contracts if isinstance(row, dict)],
+        sections=sections,
+        start_sequence=sequence,
+    )
+    families["trigger_policies"].extend(compiled_trigger_policies)
 
     future_capabilities = [
         "render_policy_bundle",
@@ -1271,7 +1506,7 @@ def _build_policy_bundle(
         "policies": families,
         "configurable_parameters": [],
         "explanation": {
-            "summary": "Policy bundle scaffolds business-rule intent separately from entity contracts so rendering, editing, validation, and runtime enforcement can target the same durable artifact. This first slice compiles relation constraints, status-based write gates, and simple transition guards.",
+            "summary": "Policy bundle scaffolds business-rule intent separately from entity contracts so rendering, editing, validation, and runtime enforcement can target the same durable artifact. The current runtime slice compiles relation constraints, status-based write gates, transition guards, related-count projections, and simple post-write related updates.",
             "coverage": {
                 "documented_policy_count": sum(len(rows) for rows in families.values()),
                 "compiled_policy_count": sum(
@@ -1543,7 +1778,7 @@ def _build_entity_contracts_from_prompt(raw_prompt: str) -> list[dict[str, Any]]
                 "relationships": relationships,
             }
         )
-    return contracts
+    return _augment_contracts_with_inferred_selection_flags(raw_prompt=raw_prompt, contracts=contracts)
 
 
 def _infer_entities_from_prompt(raw_prompt: str) -> list[str]:
