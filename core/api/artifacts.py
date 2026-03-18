@@ -1,4 +1,6 @@
 """Artifact API endpoints"""
+import datetime
+import os
 import uuid
 from typing import Optional
 from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File
@@ -81,7 +83,7 @@ async def create_artifact(
     # Emit artifact.created event
     event = models.Event(
         event_name="xyn.artifact.created",
-        occurred_at=models.datetime.datetime.utcnow(),
+        occurred_at=datetime.datetime.utcnow(),
         env_id=os.getenv("ENV_ID", "local-dev"),
         actor="user",
         correlation_id=str(uuid.uuid4()),

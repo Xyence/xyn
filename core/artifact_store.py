@@ -45,6 +45,7 @@ class RuntimeArtifactStorageConfig:
     s3_access_key_id: str
     s3_secret_access_key: str
     s3_session_token: str
+    s3_force_path_style: bool
 
 
 def resolve_runtime_artifact_storage_config() -> RuntimeArtifactStorageConfig:
@@ -75,6 +76,7 @@ def resolve_runtime_artifact_storage_config() -> RuntimeArtifactStorageConfig:
     s3_access_key_id = _read_env("XYN_RUNTIME_ARTIFACT_S3_ACCESS_KEY_ID", aliases=("AWS_ACCESS_KEY_ID",))
     s3_secret_access_key = _read_env("XYN_RUNTIME_ARTIFACT_S3_SECRET_ACCESS_KEY", aliases=("AWS_SECRET_ACCESS_KEY",))
     s3_session_token = _read_env("XYN_RUNTIME_ARTIFACT_S3_SESSION_TOKEN", aliases=("AWS_SESSION_TOKEN",))
+    s3_force_path_style = _read_env("XYN_RUNTIME_ARTIFACT_S3_FORCE_PATH_STYLE", "true").strip().lower() in {"1", "true", "yes", "on"}
 
     return RuntimeArtifactStorageConfig(
         provider=provider,
@@ -87,6 +89,7 @@ def resolve_runtime_artifact_storage_config() -> RuntimeArtifactStorageConfig:
         s3_access_key_id=s3_access_key_id,
         s3_secret_access_key=s3_secret_access_key,
         s3_session_token=s3_session_token,
+        s3_force_path_style=s3_force_path_style,
     )
 
 
@@ -223,6 +226,7 @@ class S3ArtifactStore(ArtifactStoreBase):
         access_key_id: str = "",
         secret_access_key: str = "",
         session_token: str = "",
+        force_path_style: bool = False,
         client: Any = None,
     ):
         if not bucket.strip():
@@ -238,12 +242,22 @@ class S3ArtifactStore(ArtifactStoreBase):
             access_key_id=access_key_id.strip(),
             secret_access_key=secret_access_key.strip(),
             session_token=session_token.strip(),
+            force_path_style=force_path_style,
         )
 
     @staticmethod
-    def _build_client(*, region: str, endpoint_url: str, access_key_id: str, secret_access_key: str, session_token: str) -> Any:
+    def _build_client(
+        *,
+        region: str,
+        endpoint_url: str,
+        access_key_id: str,
+        secret_access_key: str,
+        session_token: str,
+        force_path_style: bool,
+    ) -> Any:
         try:
             import boto3  # type: ignore
+            from botocore.config import Config  # type: ignore
         except Exception as exc:  # pragma: no cover - exercised via explicit runtime configuration
             raise RuntimeError("S3 runtime artifact provider selected, but boto3 is not installed.") from exc
         kwargs: dict[str, Any] = {}
@@ -256,6 +270,8 @@ class S3ArtifactStore(ArtifactStoreBase):
             kwargs["aws_secret_access_key"] = secret_access_key
         if session_token:
             kwargs["aws_session_token"] = session_token
+        if force_path_style:
+            kwargs["config"] = Config(s3={"addressing_style": "path"})
         return boto3.client("s3", **kwargs)
 
     def _object_key(self, artifact_id: UUID) -> str:
@@ -321,6 +337,7 @@ def create_runtime_artifact_store(*, config: Optional[RuntimeArtifactStorageConf
             access_key_id=cfg.s3_access_key_id,
             secret_access_key=cfg.s3_secret_access_key,
             session_token=cfg.s3_session_token,
+            force_path_style=cfg.s3_force_path_style,
         )
     return LocalFSArtifactStore(base_path=str(cfg.local_root))
 

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+echo "[runtime-s3] Starting stack with MinIO overlay..."
+docker compose -f compose.yml -f compose.minio.yml up -d --build
+
+echo "[runtime-s3] Waiting for xyn-core health..."
+for i in {1..60}; do
+  if docker exec xyn-core python - <<'PY' >/dev/null 2>&1
+import urllib.request
+urllib.request.urlopen("http://localhost:8000/health", timeout=3)
+print("ok")
+PY
+  then
+    break
+  fi
+  sleep 2
+done
+
+echo "[runtime-s3] Running runtime S3 integration tests..."
+docker exec \
+  -e XYN_RUNTIME_ARTIFACT_PROVIDER=s3 \
+  -e XYN_RUNTIME_ARTIFACT_S3_BUCKET="${XYN_RUNTIME_ARTIFACT_S3_BUCKET:-xyn-runtime-artifacts}" \
+  -e XYN_RUNTIME_ARTIFACT_S3_REGION="${XYN_RUNTIME_ARTIFACT_S3_REGION:-us-east-1}" \
+  -e XYN_RUNTIME_ARTIFACT_S3_PREFIX="${XYN_RUNTIME_ARTIFACT_S3_PREFIX:-xyn/runtime}" \
+  -e XYN_RUNTIME_ARTIFACT_S3_ENDPOINT_URL="${XYN_RUNTIME_ARTIFACT_S3_ENDPOINT_URL:-http://minio:9000}" \
+  -e XYN_RUNTIME_ARTIFACT_S3_ACCESS_KEY_ID="${XYN_RUNTIME_ARTIFACT_S3_ACCESS_KEY_ID:-${XYN_MINIO_ROOT_USER:-xynminio}}" \
+  -e XYN_RUNTIME_ARTIFACT_S3_SECRET_ACCESS_KEY="${XYN_RUNTIME_ARTIFACT_S3_SECRET_ACCESS_KEY:-${XYN_MINIO_ROOT_PASSWORD:-xynminio123}}" \
+  -e XYN_RUNTIME_ARTIFACT_S3_FORCE_PATH_STYLE="${XYN_RUNTIME_ARTIFACT_S3_FORCE_PATH_STYLE:-true}" \
+  xyn-core \
+  python -m unittest core.tests.test_runtime_s3_minio_integration
+
+echo "[runtime-s3] Listing MinIO objects under configured prefix..."
+docker run --rm --network xyn_default --entrypoint /bin/sh \
+  -e XYN_MINIO_ROOT_USER="${XYN_MINIO_ROOT_USER:-xynminio}" \
+  -e XYN_MINIO_ROOT_PASSWORD="${XYN_MINIO_ROOT_PASSWORD:-xynminio123}" \
+  -e XYN_RUNTIME_ARTIFACT_S3_BUCKET="${XYN_RUNTIME_ARTIFACT_S3_BUCKET:-xyn-runtime-artifacts}" \
+  -e XYN_RUNTIME_ARTIFACT_S3_PREFIX="${XYN_RUNTIME_ARTIFACT_S3_PREFIX:-xyn/runtime}" \
+  minio/mc:RELEASE.2025-03-12T17-29-24Z -lc '
+    mc alias set local http://minio:9000 "$XYN_MINIO_ROOT_USER" "$XYN_MINIO_ROOT_PASSWORD" >/dev/null;
+    mc ls --recursive "local/$XYN_RUNTIME_ARTIFACT_S3_BUCKET/$XYN_RUNTIME_ARTIFACT_S3_PREFIX" || true
+  '
+
+echo "[runtime-s3] Validation complete."
