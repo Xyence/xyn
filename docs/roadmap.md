@@ -88,3 +88,7 @@ Epic H is complete enough to close. The items below are explicit follow-on work,
 - Tighten activity drawer click-through into work-item panels so conversation/activity references can open the corresponding durable coordination objects more directly.
 - Evaluate later whether `DevTask` should remain the long-term durable `WorkItem` substrate or be renamed/reified more explicitly once XCO-level coordination expands.
 - Evaluate later whether `RunStep` exposure in the UI should become richer, but only after there is a demonstrated supervisory need.
+
+## Rules Browser Follow-ons
+
+- Add explicit per-workspace/policy-bundle permission checks in the backend rule query path so multi-tenant visibility guarantees do not rely only on metadata and platform-admin gating.
