@@ -1,10 +1,13 @@
-# Platform Access Control Model (Canonical v1)
+# Platform Access Control Model (Compatibility Notes)
 
-This document defines the canonical role/capability shape for DealFinder-era app surfaces in Xyn.
+Canonical DealFinder-era role/capability definitions now live in `xyn-platform`:
+
+- [platform-access-control-model.md](/home/jrestivo/src/xyn-platform/docs/platform-access-control-model.md)
+- `services/xyn-api/backend/xyn_orchestrator/app_authorization.py`
 
 ## Scope
 
-The model is capability-first and intended to be reusable across applications.
+This file documents how `xyn/core` compatibility surfaces align with the canonical model.
 
 - Role checks should map to capabilities.
 - Endpoint/service enforcement should check capabilities, not role-name conditionals.
@@ -18,7 +21,7 @@ The model is capability-first and intended to be reusable across applications.
 
 ## Capability Families
 
-Primary capability slugs are defined in [core/access_control.py](/home/jrestivo/src/xyn/core/access_control.py).
+For `xyn/core` compatibility APIs, capability slugs are mirrored in [core/access_control.py](/home/jrestivo/src/xyn/core/access_control.py).
 
 Admin/data-source capabilities include:
 
@@ -91,5 +94,6 @@ platform surfaces in this repo:
 
 ## Notes
 
-- This is intentionally a lightweight canonical shape, not a full IAM subsystem.
+- `xyn/core` is not the canonical home for DealFinder-era platform/app authorization.
+- This layer is compatibility/runtime-only for core-local surfaces.
 - Fine-grained row-level policy and dynamic role assignment UX are follow-on work.

@@ -1,8 +1,10 @@
-"""Canonical role/capability access helpers for workspace-scoped applications.
+"""Compatibility role/capability access helpers for xyn/core runtime surfaces.
 
-This module is intentionally lightweight: it defines canonical role names,
-role-to-capability mappings, and reusable check helpers that endpoint/service
-code can consume without hardcoding role-name conditionals.
+Canonical DealFinder-era platform/app authorization lives in xyn-platform:
+`xyn_orchestrator.app_authorization`.
+
+This module intentionally mirrors that shape for core-local compatibility paths
+without being the canonical source of truth for new platform primitives.
 """
 from __future__ import annotations
 

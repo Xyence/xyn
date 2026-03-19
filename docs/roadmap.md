@@ -111,4 +111,4 @@ Epic H is complete enough to close. The items below are explicit follow-on work,
 - Add durable role-assignment persistence and admin management UI for `application_admin`, `campaign_operator`, and `read_only_analyst` instead of header-driven local/development claims.
 - Add fine-grained row/partition policy checks (for example jurisdiction-level scope constraints) in service/repository paths once DealFinder data partition semantics are finalized.
 - Add standardized authn claim adapters for OIDC/token modes so capability claims are resolved from identity provider or issued platform tokens, not request-header conventions.
-- Apply the same capability checks to dedicated campaign/watch/subscriber/source-connector APIs when those primitives are exposed directly in this repository (currently covered only through nearest equivalent surfaces).
+- Keep `xyn/core` access-control usage compatibility-only and defer canonical DealFinder-era role/capability evolution to `xyn-platform` (`xyn_orchestrator.app_authorization`).
