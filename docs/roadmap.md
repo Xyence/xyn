@@ -104,3 +104,4 @@ Epic H is complete enough to close. The items below are explicit follow-on work,
 - Integrate additional lifecycle-heavy models (for example pack installations and connector-like objects) onto the shared lifecycle service instead of ad hoc status writes.
 - Add optional policy-driven transition hooks for notifications/escalations while preserving deterministic guard checks in the lifecycle service.
 - Add lightweight operator UI affordances for object transition history filtering and manual transition actions where safe.
+- Continue reducing `xyn/core` lifecycle compatibility code by consuming canonical lifecycle definitions/services from `xyn-platform` where runtime coupling allows.

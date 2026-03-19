@@ -10,6 +10,12 @@ from core import models
 from core.lifecycle.definitions import get_lifecycle_definition
 from core.lifecycle.interfaces import TransitionRequest, TransitionResult
 
+# Compatibility note:
+# The canonical platform lifecycle primitive now lives in xyn-platform
+# (`xyn_orchestrator.lifecycle_primitive`). This module remains a thin
+# core-integration adapter that wires lifecycle validation to SQLAlchemy-backed
+# core objects and persistence.
+
 
 class LifecycleError(ValueError):
     """Base lifecycle transition validation error."""

@@ -1,3 +1,6 @@
+# Compatibility shim:
+# Canonical lifecycle primitive lives in xyn-platform.
+# Keep this package only for narrow xyn-core object integrations.
 from core.lifecycle.definitions import LifecycleDefinition, get_lifecycle_definition, supported_lifecycles
 from core.lifecycle.service import (
     InvalidTransitionError,

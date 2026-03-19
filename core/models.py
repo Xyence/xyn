@@ -387,7 +387,10 @@ class Artifact(Base):
 
 
 class LifecycleTransition(Base):
-    """Durable lifecycle transition history for platform objects."""
+    """Durable lifecycle transition history for core compatibility integrations.
+
+    Canonical platform lifecycle history now lives in xyn-platform.
+    """
     __tablename__ = "lifecycle_transitions"
     __table_args__ = (
         Index("ix_lifecycle_transitions_workspace_id", "workspace_id"),
