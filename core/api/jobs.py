@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from core.database import get_db
+from core.lifecycle.service import LifecycleError, transition_model_status
 from core.models import Job, JobStatus
 from core.workspaces import resolve_workspace_by_context, workspace_context
 
@@ -131,7 +132,18 @@ async def patch_job(
         status = str(payload.status).strip().lower()
         if status not in ALLOWED_JOB_STATUSES:
             raise HTTPException(status_code=400, detail=f"Invalid job status: {status}")
-        row.status = status
+        try:
+            transition_model_status(
+                db,
+                model_obj=row,
+                lifecycle="job",
+                object_type="job",
+                next_state=status,
+                actor="user",
+                reason="Job status updated via patch.",
+            )
+        except LifecycleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     if payload.output_json is not None:
         row.output_json = payload.output_json
     if payload.logs_text is not None:
@@ -140,4 +152,3 @@ async def patch_job(
     db.commit()
     db.refresh(row)
     return JobResponse.from_orm_model(row)
-

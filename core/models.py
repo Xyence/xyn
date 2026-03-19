@@ -333,7 +333,7 @@ class Artifact(Base):
     __tablename__ = "artifacts"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    workspace_id = Column(UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=True, index=True)
+    workspace_id = Column(UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=True)
     name = Column(String(255), nullable=False)
     kind = Column(String(50), nullable=False)  # log, report, bundle, file
     storage_scope = Column(String(32), nullable=False, default="instance-local", index=True)
@@ -384,6 +384,34 @@ class Artifact(Base):
     @metadata_json.setter
     def metadata_json(self, value):
         self.extra_metadata = value
+
+
+class LifecycleTransition(Base):
+    """Durable lifecycle transition history for platform objects."""
+    __tablename__ = "lifecycle_transitions"
+    __table_args__ = (
+        Index("ix_lifecycle_transitions_workspace_id", "workspace_id"),
+        Index("ix_lifecycle_transitions_object", "object_type", "object_id"),
+        Index("ix_lifecycle_transitions_lifecycle_name", "lifecycle_name"),
+        Index("ix_lifecycle_transitions_created_at", "created_at"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id = Column(UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=True, index=True)
+    lifecycle_name = Column(String(128), nullable=False)
+    object_type = Column(String(128), nullable=False)
+    object_id = Column(String(255), nullable=False)
+    from_state = Column(String(64), nullable=True)
+    to_state = Column(String(64), nullable=False)
+    actor = Column(String(255), nullable=True)
+    reason = Column(Text, nullable=True)
+    metadata_json = Column(JSON, nullable=False, default=dict)
+    correlation_id = Column(String(255), nullable=True)
+    run_id = Column(UUID(as_uuid=True), ForeignKey("runs.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+
+    workspace = relationship("Workspace", foreign_keys=[workspace_id])
+    run = relationship("Run", foreign_keys=[run_id])
 
 
 class RuntimeWorker(Base):

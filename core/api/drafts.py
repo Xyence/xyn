@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from core.database import get_db
+from core.lifecycle.service import LifecycleError, apply_transition, transition_model_status
 from core.models import Draft, DraftStatus, Job, JobStatus
 from core.workspaces import ensure_default_workspace, resolve_workspace_by_context, workspace_context
 
@@ -84,15 +85,31 @@ async def create_draft(
     if status not in ALLOWED_DRAFT_STATUSES:
         raise HTTPException(status_code=400, detail=f"Invalid draft status: {status}")
     row = Draft(
+        id=uuid.uuid4(),
         workspace_id=workspace.id,
         type=str(payload.type or "app_intent").strip() or "app_intent",
         title=str(payload.title or "").strip(),
         content_json=payload.content_json or {},
-        status=status,
+        status=DraftStatus.DRAFT.value,
         created_by=str(payload.created_by or "user").strip() or "user",
     )
     if not row.title:
         raise HTTPException(status_code=400, detail="title is required")
+    try:
+        apply_transition(
+            db,
+            lifecycle="draft",
+            object_type="draft",
+            object_id=str(row.id),
+            from_state=None,
+            to_state=status,
+            workspace_id=workspace.id,
+            actor=row.created_by,
+            reason="Draft created.",
+        )
+        row.status = status
+    except LifecycleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.add(row)
     db.commit()
     db.refresh(row)
@@ -167,7 +184,18 @@ async def patch_draft(
         status = str(payload.status).strip().lower()
         if status not in ALLOWED_DRAFT_STATUSES:
             raise HTTPException(status_code=400, detail=f"Invalid draft status: {status}")
-        row.status = status
+        try:
+            transition_model_status(
+                db,
+                model_obj=row,
+                lifecycle="draft",
+                object_type="draft",
+                next_state=status,
+                actor="user",
+                reason="Draft status updated via patch.",
+            )
+        except LifecycleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     row.updated_at = _utc_now()
     db.commit()
     db.refresh(row)
@@ -188,9 +216,21 @@ async def submit_draft(
     row = db.query(Draft).filter(Draft.id == draft_id, Draft.workspace_id == workspace.id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Draft not found")
-    row.status = DraftStatus.SUBMITTED.value
+    try:
+        transition_model_status(
+            db,
+            model_obj=row,
+            lifecycle="draft",
+            object_type="draft",
+            next_state=DraftStatus.SUBMITTED.value,
+            actor="user",
+            reason="Draft submitted.",
+        )
+    except LifecycleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     row.updated_at = _utc_now()
     job = Job(
+        id=uuid.uuid4(),
         workspace_id=workspace.id,
         type="generate_app_spec",
         status=JobStatus.QUEUED.value,
@@ -203,6 +243,21 @@ async def submit_draft(
         output_json={},
         logs_text="Queued from draft submit.",
     )
+    try:
+        apply_transition(
+            db,
+            lifecycle="job",
+            object_type="job",
+            object_id=str(job.id),
+            from_state=None,
+            to_state=job.status,
+            workspace_id=workspace.id,
+            actor="system",
+            reason="Job created from draft submission.",
+            metadata={"draft_id": str(row.id)},
+        )
+    except LifecycleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.add(job)
     db.commit()
     db.refresh(row)
@@ -212,4 +267,3 @@ async def submit_draft(
         job_id=job.id,
         job_status=job.status,
     )
-

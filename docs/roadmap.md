@@ -98,3 +98,9 @@ Epic H is complete enough to close. The items below are explicit follow-on work,
 - Add CI/runtime smoke coverage that asserts PostGIS remains available/installed after compose/database image changes, so spatial primitives do not silently regress to non-PostGIS runtimes.
 - Add a small non-Django consumer example (service/repository usage from FastAPI-side code) to keep the geospatial primitive framework-neutral in practice, not just in type contracts.
 - Add optional nearest-neighbor and advanced reprojection helpers after current PostGIS-backed bbox/polygon/distance baseline is stable in operator workflows.
+
+## Lifecycle Primitive Follow-ons
+
+- Integrate additional lifecycle-heavy models (for example pack installations and connector-like objects) onto the shared lifecycle service instead of ad hoc status writes.
+- Add optional policy-driven transition hooks for notifications/escalations while preserving deterministic guard checks in the lifecycle service.
+- Add lightweight operator UI affordances for object transition history filtering and manual transition actions where safe.
