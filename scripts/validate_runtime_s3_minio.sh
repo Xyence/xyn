@@ -10,7 +10,7 @@ docker compose -f compose.yml -f compose.minio.yml up -d --build
 echo "[runtime-s3] Waiting for xyn-core health..."
 healthy=0
 for i in {1..60}; do
-  if docker exec xyn-core python - <<'PY' >/dev/null 2>&1
+  if docker exec -i xyn-core python - <<'PY' >/dev/null 2>&1
 import urllib.request
 urllib.request.urlopen("http://localhost:8000/health", timeout=3)
 print("ok")
@@ -29,15 +29,20 @@ if [[ "$healthy" -ne 1 ]]; then
 fi
 
 echo "[runtime-s3] Ensuring runtime schema exists for integration test..."
-docker exec -e XYN_AUTO_CREATE_SCHEMA=true xyn-core python - <<'PY'
-from core.database import init_db
-init_db()
-print("schema ok")
-PY
+docker exec -i xyn-core python - <<'PY'
+from sqlalchemy import inspect
 
-echo "[runtime-s3] Verifying required runtime tables..."
-docker exec xyn-postgres psql -U xyn -d xyn -v ON_ERROR_STOP=1 -c \
-  "SELECT to_regclass('public.artifacts') AS artifacts_table;"
+from core.database import Base, engine
+from core import models  # noqa: F401 - registers ORM models on Base metadata
+
+Base.metadata.create_all(bind=engine)
+tables = set(inspect(engine).get_table_names())
+required = {"artifacts", "runs", "steps", "events"}
+missing = sorted(required - tables)
+print(f"tables={sorted(tables)}")
+if missing:
+    raise SystemExit(f"Missing required runtime tables after bootstrap: {missing}")
+PY
 
 echo "[runtime-s3] Running runtime S3 integration tests..."
 docker exec \
