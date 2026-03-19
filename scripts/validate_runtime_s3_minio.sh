@@ -28,6 +28,17 @@ if [[ "$healthy" -ne 1 ]]; then
   exit 1
 fi
 
+echo "[runtime-s3] Ensuring runtime schema exists for integration test..."
+docker exec -e XYN_AUTO_CREATE_SCHEMA=true xyn-core python - <<'PY'
+from core.database import init_db
+init_db()
+print("schema ok")
+PY
+
+echo "[runtime-s3] Verifying required runtime tables..."
+docker exec xyn-postgres psql -U xyn -d xyn -v ON_ERROR_STOP=1 -c \
+  "SELECT to_regclass('public.artifacts') AS artifacts_table;"
+
 echo "[runtime-s3] Running runtime S3 integration tests..."
 docker exec \
   -e XYN_RUNTIME_ARTIFACT_PROVIDER=s3 \
