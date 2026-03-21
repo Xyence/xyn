@@ -49,6 +49,13 @@ for table in Base.metadata.sorted_tables:
             if "already exists" not in msg:
                 raise
 
+# Guard critical runtime tables explicitly; SQLAlchemy may skip some cyclic
+# FK-related DDL on initial passes when legacy partial schemas exist.
+for name in ("workspaces", "runs", "steps", "artifacts", "events"):
+    table = Base.metadata.tables.get(name)
+    if table is not None:
+        table.create(bind=engine, checkfirst=True)
+
 tables = set(inspect(engine).get_table_names())
 required = {"artifacts", "runs", "steps", "events"}
 missing = sorted(required - tables)
