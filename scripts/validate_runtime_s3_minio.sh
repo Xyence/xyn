@@ -15,31 +15,22 @@ mkdir -p \
   "$SIBLING_ROOT/xyn-contracts"
 
 echo "[runtime-s3] Starting stack with MinIO overlay..."
-docker compose -f compose.yml -f compose.minio.yml up -d --build
+docker compose -f compose.yml -f compose.minio.yml up -d --build traefik postgres redis minio minio-init
 
-echo "[runtime-s3] Waiting for xyn-core health..."
-healthy=0
-for i in {1..180}; do
-  if docker exec -i xyn-core python - <<'PY' >/dev/null 2>&1
-import urllib.request
-urllib.request.urlopen("http://localhost:8000/health", timeout=3)
-print("ok")
-PY
-  then
-    healthy=1
-    break
-  fi
-  sleep 2
-done
-if [[ "$healthy" -ne 1 ]]; then
-  echo "[runtime-s3] ERROR: xyn-core did not become healthy in time."
-  docker compose -f compose.yml -f compose.minio.yml ps || true
-  docker compose -f compose.yml -f compose.minio.yml logs --tail=200 core minio minio-init postgres redis || true
-  exit 1
-fi
-
-echo "[runtime-s3] Ensuring runtime schema exists for integration test..."
-docker exec -i xyn-core python - <<'PY'
+echo "[runtime-s3] Bootstrapping schema and running runtime S3 integration tests..."
+docker compose -f compose.yml -f compose.minio.yml run --rm \
+  -e XYN_AUTO_CREATE_SCHEMA=true \
+  -e XYN_RUNTIME_ARTIFACT_PROVIDER=s3 \
+  -e XYN_RUNTIME_ARTIFACT_S3_BUCKET="${XYN_RUNTIME_ARTIFACT_S3_BUCKET:-xyn-runtime-artifacts}" \
+  -e XYN_RUNTIME_ARTIFACT_S3_REGION="${XYN_RUNTIME_ARTIFACT_S3_REGION:-us-east-1}" \
+  -e XYN_RUNTIME_ARTIFACT_S3_PREFIX="${XYN_RUNTIME_ARTIFACT_S3_PREFIX:-xyn/runtime}" \
+  -e XYN_RUNTIME_ARTIFACT_S3_ENDPOINT_URL="${XYN_RUNTIME_ARTIFACT_S3_ENDPOINT_URL:-http://minio:9000}" \
+  -e XYN_RUNTIME_ARTIFACT_S3_ACCESS_KEY_ID="${XYN_RUNTIME_ARTIFACT_S3_ACCESS_KEY_ID:-${XYN_MINIO_ROOT_USER:-xynminio}}" \
+  -e XYN_RUNTIME_ARTIFACT_S3_SECRET_ACCESS_KEY="${XYN_RUNTIME_ARTIFACT_S3_SECRET_ACCESS_KEY:-${XYN_MINIO_ROOT_PASSWORD:-xynminio123}}" \
+  -e XYN_RUNTIME_ARTIFACT_S3_FORCE_PATH_STYLE="${XYN_RUNTIME_ARTIFACT_S3_FORCE_PATH_STYLE:-true}" \
+  core \
+  /bin/sh -lc '
+    python - <<'"'"'PY'"'"'
 from sqlalchemy import inspect
 
 from core.database import Base, engine
@@ -53,19 +44,8 @@ print(f"tables={sorted(tables)}")
 if missing:
     raise SystemExit(f"Missing required runtime tables after bootstrap: {missing}")
 PY
-
-echo "[runtime-s3] Running runtime S3 integration tests..."
-docker exec \
-  -e XYN_RUNTIME_ARTIFACT_PROVIDER=s3 \
-  -e XYN_RUNTIME_ARTIFACT_S3_BUCKET="${XYN_RUNTIME_ARTIFACT_S3_BUCKET:-xyn-runtime-artifacts}" \
-  -e XYN_RUNTIME_ARTIFACT_S3_REGION="${XYN_RUNTIME_ARTIFACT_S3_REGION:-us-east-1}" \
-  -e XYN_RUNTIME_ARTIFACT_S3_PREFIX="${XYN_RUNTIME_ARTIFACT_S3_PREFIX:-xyn/runtime}" \
-  -e XYN_RUNTIME_ARTIFACT_S3_ENDPOINT_URL="${XYN_RUNTIME_ARTIFACT_S3_ENDPOINT_URL:-http://minio:9000}" \
-  -e XYN_RUNTIME_ARTIFACT_S3_ACCESS_KEY_ID="${XYN_RUNTIME_ARTIFACT_S3_ACCESS_KEY_ID:-${XYN_MINIO_ROOT_USER:-xynminio}}" \
-  -e XYN_RUNTIME_ARTIFACT_S3_SECRET_ACCESS_KEY="${XYN_RUNTIME_ARTIFACT_S3_SECRET_ACCESS_KEY:-${XYN_MINIO_ROOT_PASSWORD:-xynminio123}}" \
-  -e XYN_RUNTIME_ARTIFACT_S3_FORCE_PATH_STYLE="${XYN_RUNTIME_ARTIFACT_S3_FORCE_PATH_STYLE:-true}" \
-  xyn-core \
-  python -m unittest -v core.tests.test_runtime_s3_minio_integration
+    python -m unittest -v core.tests.test_runtime_s3_minio_integration
+  '
 
 echo "[runtime-s3] Listing MinIO objects under configured prefix..."
 docker run --rm --network xyn_default --entrypoint /bin/sh \
