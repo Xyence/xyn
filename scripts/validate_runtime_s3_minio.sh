@@ -4,6 +4,16 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# The compose stack mounts sibling repos/dirs from ${ROOT_DIR}/.. in local dev.
+# CI checkouts often include only xyn, so create empty placeholders to avoid
+# mount/startup failures while keeping runtime validation focused on artifact IO.
+SIBLING_ROOT="$(dirname "$ROOT_DIR")"
+mkdir -p \
+  "$SIBLING_ROOT/xyn-platform" \
+  "$SIBLING_ROOT/xyn-api" \
+  "$SIBLING_ROOT/xyn-ui" \
+  "$SIBLING_ROOT/xyn-contracts"
+
 echo "[runtime-s3] Starting stack with MinIO overlay..."
 docker compose -f compose.yml -f compose.minio.yml up -d --build
 
