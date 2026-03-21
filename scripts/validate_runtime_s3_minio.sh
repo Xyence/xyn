@@ -30,12 +30,25 @@ docker compose -f compose.yml -f compose.minio.yml run --rm \
   -e XYN_RUNTIME_ARTIFACT_S3_FORCE_PATH_STYLE="${XYN_RUNTIME_ARTIFACT_S3_FORCE_PATH_STYLE:-true}" \
   core \
   /bin/sh -lc '
+    set -e
     python - <<'"'"'PY'"'"'
 from sqlalchemy import inspect
 
-from core.database import engine, init_db
+from core.database import Base, engine
+from core import models  # noqa: F401 - register SQLAlchemy metadata
 
-init_db()
+for table in Base.metadata.sorted_tables:
+    with engine.connect() as conn:
+        tx = conn.begin()
+        try:
+            table.create(bind=conn, checkfirst=True)
+            tx.commit()
+        except Exception as exc:  # pragma: no cover - defensive CI guard
+            tx.rollback()
+            msg = str(exc).lower()
+            if "already exists" not in msg:
+                raise
+
 tables = set(inspect(engine).get_table_names())
 required = {"artifacts", "runs", "steps", "events"}
 missing = sorted(required - tables)
