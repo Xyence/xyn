@@ -33,10 +33,9 @@ docker compose -f compose.yml -f compose.minio.yml run --rm \
     python - <<'"'"'PY'"'"'
 from sqlalchemy import inspect
 
-from core.database import Base, engine
-from core import models  # noqa: F401 - registers ORM models on Base metadata
+from core.database import engine, init_db
 
-Base.metadata.create_all(bind=engine)
+init_db()
 tables = set(inspect(engine).get_table_names())
 required = {"artifacts", "runs", "steps", "events"}
 missing = sorted(required - tables)
