@@ -9,7 +9,7 @@ docker compose -f compose.yml -f compose.minio.yml up -d --build
 
 echo "[runtime-s3] Waiting for xyn-core health..."
 healthy=0
-for i in {1..60}; do
+for i in {1..180}; do
   if docker exec -i xyn-core python - <<'PY' >/dev/null 2>&1
 import urllib.request
 urllib.request.urlopen("http://localhost:8000/health", timeout=3)
