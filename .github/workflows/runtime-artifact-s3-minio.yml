@@ -52,7 +52,18 @@ jobs:
       - name: Run MinIO/S3 runtime artifact validation
         run: |
           chmod +x scripts/validate_runtime_s3_minio.sh
-          scripts/validate_runtime_s3_minio.sh
+          attempt=1
+          max_attempts=2
+          until scripts/validate_runtime_s3_minio.sh; do
+            if [[ "$attempt" -ge "$max_attempts" ]]; then
+              echo "MinIO/S3 runtime artifact validation failed after ${attempt} attempt(s)."
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            echo "Retrying MinIO/S3 runtime artifact validation (attempt ${attempt}/${max_attempts})..."
+            docker compose -f compose.yml -f compose.minio.yml down -v --remove-orphans || true
+            sleep 5
+          done
 
       - name: Tear down stack
         if: always()
