@@ -27,11 +27,15 @@ def _is_duplicate_schema_error(exc: ProgrammingError) -> bool:
 def _create_tables_best_effort() -> None:
     """Create tables individually when metadata-wide create_all races in dev/CI."""
     for table in Base.metadata.sorted_tables:
-        try:
-            table.create(bind=engine, checkfirst=True)
-        except ProgrammingError as exc:
-            if not _is_duplicate_schema_error(exc):
-                raise
+        with engine.connect() as conn:
+            tx = conn.begin()
+            try:
+                table.create(bind=conn, checkfirst=True)
+                tx.commit()
+            except ProgrammingError as exc:
+                tx.rollback()
+                if not _is_duplicate_schema_error(exc):
+                    raise
 
 
 def get_db():
