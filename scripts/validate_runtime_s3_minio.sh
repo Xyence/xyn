@@ -32,29 +32,18 @@ docker compose -f compose.yml -f compose.minio.yml run --rm \
   /bin/sh -lc '
     set -e
     python - <<'"'"'PY'"'"'
+import sys
 from sqlalchemy import inspect
 
 from core.database import Base, engine
 from core import models  # noqa: F401 - register SQLAlchemy metadata
 
 for table in Base.metadata.sorted_tables:
-    with engine.connect() as conn:
-        tx = conn.begin()
-        try:
-            table.create(bind=conn, checkfirst=True)
-            tx.commit()
-        except Exception as exc:  # pragma: no cover - defensive CI guard
-            tx.rollback()
-            msg = str(exc).lower()
-            if "already exists" not in msg:
-                raise
-
-# Guard critical runtime tables explicitly; SQLAlchemy may skip some cyclic
-# FK-related DDL on initial passes when legacy partial schemas exist.
-for name in ("workspaces", "runs", "steps", "artifacts", "events"):
-    table = Base.metadata.tables.get(name)
-    if table is not None:
+    try:
         table.create(bind=engine, checkfirst=True)
+    except Exception as exc:  # pragma: no cover - defensive CI guard
+        print(f"[runtime-s3/bootstrap] failed creating table {table.name}: {exc!r}", file=sys.stderr)
+        raise
 
 tables = set(inspect(engine).get_table_names())
 required = {"artifacts", "runs", "steps", "events"}

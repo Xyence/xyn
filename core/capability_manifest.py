@@ -241,6 +241,34 @@ def _entity_contract_specs() -> dict[str, dict[str, Any]]:
     }
 
 
+def _generic_entity_spec(entity_key: str) -> dict[str, Any]:
+    normalized_key = str(entity_key or "").strip().lower() or "records"
+    singular = normalized_key[:-1] if normalized_key.endswith("s") and len(normalized_key) > 1 else normalized_key
+    singular_label = singular.replace("_", " ")
+    plural_label = normalized_key.replace("_", " ")
+    title_candidate = "name"
+    return {
+        "singular_label": singular_label,
+        "plural_label": plural_label,
+        "collection_path": f"/{normalized_key}",
+        "item_path_template": f"/{normalized_key}" + "/{id}",
+        "default_list_fields": ["name", "status"],
+        "default_detail_fields": ["id", "name", "status", "workspace_id", "created_at", "updated_at"],
+        "title_field": title_candidate,
+        "fields": [
+            {"name": "id", "type": "uuid", "required": True, "readable": True, "writable": False, "identity": True},
+            {"name": "workspace_id", "type": "uuid", "required": True, "readable": True, "writable": True, "identity": False},
+            {"name": "name", "type": "string", "required": True, "readable": True, "writable": True, "identity": True},
+            {"name": "status", "type": "string", "required": False, "readable": True, "writable": True, "identity": False},
+            {"name": "created_at", "type": "datetime", "required": True, "readable": True, "writable": False, "identity": False},
+            {"name": "updated_at", "type": "datetime", "required": True, "readable": True, "writable": False, "identity": False},
+        ],
+        "relationships": [],
+        "required_on_create": ["workspace_id", "name"],
+        "allowed_on_update": ["name", "status"],
+    }
+
+
 def _title_case_words(value: str) -> str:
     return " ".join(part.capitalize() for part in str(value or "").replace("_", " ").split())
 
@@ -373,7 +401,7 @@ def _build_entity_contracts(app_spec: dict[str, Any], *, enabled_keys: set[str])
     for entity_key in entities:
         spec = specs.get(entity_key)
         if not isinstance(spec, dict):
-            continue
+            spec = _generic_entity_spec(entity_key)
         collection_path = str(spec.get("collection_path") or f"/{entity_key}")
         item_path_template = str(spec.get("item_path_template") or f"/{entity_key}" + "/{id}")
         singular_label = str(spec.get("singular_label") or entity_key.rstrip("s"))
@@ -491,9 +519,9 @@ def _enabled_command_keys(app_spec: dict[str, Any]) -> set[str]:
     }
     specs = _entity_contract_specs()
     for entity_key in entities:
-        contract = explicit_map.get(entity_key) or specs.get(entity_key)
+        contract = explicit_map.get(entity_key) or specs.get(entity_key) or _generic_entity_spec(entity_key)
         if not isinstance(contract, dict):
-            continue
+            contract = _generic_entity_spec(entity_key)
         singular = str(contract.get("singular_label") or entity_key.rstrip("s")).strip() or entity_key.rstrip("s")
         plural = str(contract.get("plural_label") or entity_key).strip() or entity_key
         enabled.update(
@@ -509,6 +537,61 @@ def _enabled_command_keys(app_spec: dict[str, Any]) -> set[str]:
     if "interfaces_by_status" in reports:
         enabled.add("show interfaces by status")
     return enabled
+
+
+def _is_admin_entity_key(entity_key: str) -> bool:
+    lowered = str(entity_key or "").strip().lower()
+    return any(token in lowered for token in ("source", "connector", "mapping", "inspection", "dataset", "import"))
+
+
+def _build_manifest_views(*, app_spec: dict[str, Any], entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    views: list[dict[str, Any]] = [
+        {"id": "workbench-manage", "label": "Workbench", "path": "/app/workbench", "surface": "manage"},
+        {"id": "workbench-docs", "label": "Workbench", "path": "/app/workbench", "surface": "docs"},
+    ]
+    seen_ids = {str(row.get("id") or "") for row in views}
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        entity_key = str(entity.get("key") or "").strip()
+        if not entity_key:
+            continue
+        view_id = f"entity-{entity_key}"
+        if view_id in seen_ids:
+            continue
+        seen_ids.add(view_id)
+        label = str(entity.get("plural_label") or entity_key).replace("_", " ").title()
+        views.append(
+            {
+                "id": view_id,
+                "label": label,
+                "path": f"/app/{entity_key}",
+                "surface": "admin" if _is_admin_entity_key(entity_key) else "manage",
+            }
+        )
+    workflow_defs = app_spec.get("workflow_definitions") if isinstance(app_spec.get("workflow_definitions"), list) else []
+    workflow_blob = " ".join(
+        str(row.get("description") or "")
+        for row in workflow_defs
+        if isinstance(row, dict)
+    ).lower()
+    ui_surface_blob = str(app_spec.get("ui_surfaces") or "").lower()
+    requires = {
+        str(token or "").strip().lower()
+        for token in (app_spec.get("requires_primitives") if isinstance(app_spec.get("requires_primitives"), list) else [])
+        if str(token or "").strip()
+    }
+    if (
+        "map" in workflow_blob
+        or "rectangle" in workflow_blob
+        or "map" in ui_surface_blob
+        or "rectangle" in ui_surface_blob
+        or "geospatial" in requires
+    ):
+        views.append({"id": "workflow-map-selection", "label": "Map Selection", "path": "/app/map-selection", "surface": "manage"})
+    if "admin" in workflow_blob or "operator" in workflow_blob or "admin" in ui_surface_blob or "operator" in ui_surface_blob:
+        views.append({"id": "workflow-admin", "label": "Admin / Operator", "path": "/app/admin", "surface": "admin"})
+    return views
 
 
 def build_resolved_capability_manifest(app_spec: dict[str, Any]) -> dict[str, Any]:
@@ -672,10 +755,7 @@ def build_resolved_capability_manifest(app_spec: dict[str, Any]) -> dict[str, An
             "workspace_id": workspace_id,
         },
         "entities": entities,
-        "views": [
-            {"id": "workbench-manage", "label": "Workbench", "path": "/app/workbench", "surface": "manage"},
-            {"id": "workbench-docs", "label": "Workbench", "path": "/app/workbench", "surface": "docs"},
-        ],
+        "views": _build_manifest_views(app_spec=app_spec, entities=entities),
         "commands": commands,
         "routes": routes,
         "reports": reports,

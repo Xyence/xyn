@@ -28,6 +28,64 @@ TEAM_LUNCH_POLL_PROMPT = (
     "Validation / rules: - Prevent voting on polls that are not open."
 )
 
+STRUCTURED_PLAN_PROMPT = """
+Build an application named "Real Estate Deal Finder".
+
+### 1. Application Overview
+St. Louis City MVP focused on parcel-centered distress signals.
+
+### 2. Domain Model (REQUIRED DETAIL)
+- Parcel (HANDLE canonical identifier)
+- Property
+- Campaign
+- Signal
+- Data Source
+
+### 3. Workflow Definitions (REQUIRED)
+#### Campaign Workflow
+- create campaign
+- map rectangle selection
+- enable/disable campaign
+
+#### Admin Source Workflow
+- register source
+- inspect source
+- activate source
+
+### 4. Platform Primitive Composition
+Use existing canonical platform facilities for:
+- authorization / capability enforcement
+- lifecycle / transitions
+- orchestration / scheduling / job execution
+- run history / operational records
+- source connector / import lifecycle
+- source governance / readiness / activation
+- artifact persistence / raw artifact tracking
+- changed-data publication and reconciled-state semantics
+- provenance / audit
+- geospatial services and PostGIS-backed spatial handling
+- parcel identity / crosswalk
+- matching / explainable match evaluation
+- watch/subscription/campaign/notification primitives
+
+### 7. UI Surface Definition
+- campaign list view
+- campaign create/edit view
+- map selection view
+- signal feed view
+"""
+
+LABEL_STYLE_UI_PROMPT = """
+Build an application named "Example App".
+
+Purpose:
+Create a simple MVP app.
+
+UI expectations:
+- campaign list view
+- campaign detail view
+"""
+
 
 class GenericAppBuilderTests(unittest.TestCase):
     def test_team_lunch_poll_prompt_generates_non_inventory_semantics(self):
@@ -56,6 +114,45 @@ class GenericAppBuilderTests(unittest.TestCase):
         self.assertEqual(lunch_option_fields["selected"]["options"], ["yes", "no"])
         vote_fields = [field["name"] for field in contracts["votes"]["fields"]]
         self.assertEqual(vote_fields.count("created_at"), 1)
+
+    def test_structured_prompt_preserves_plan_sections_and_primitives(self):
+        spec = _build_app_spec(
+            workspace_id=uuid.uuid4(),
+            title="Real Estate Deal Finder",
+            raw_prompt=STRUCTURED_PLAN_PROMPT,
+        )
+
+        self.assertIn("structured_plan", spec)
+        structured_plan = spec["structured_plan"]
+        self.assertTrue(str(structured_plan.get("application_overview") or "").strip())
+        self.assertTrue(str(structured_plan.get("domain_model") or "").strip())
+        self.assertTrue(isinstance(spec.get("workflow_definitions"), list) and spec.get("workflow_definitions"))
+        self.assertTrue(isinstance(spec.get("platform_primitive_composition"), list) and spec.get("platform_primitive_composition"))
+        primitives = set(spec.get("requires_primitives") or [])
+        self.assertIn("access_control", primitives)
+        self.assertIn("lifecycle", primitives)
+        self.assertIn("orchestration", primitives)
+        self.assertIn("run_history", primitives)
+        self.assertIn("source_connector", primitives)
+        self.assertIn("source_governance", primitives)
+        self.assertIn("artifact_storage", primitives)
+        self.assertIn("changed_data_publication", primitives)
+        self.assertIn("provenance_audit", primitives)
+        self.assertIn("geospatial", primitives)
+        self.assertIn("parcel_identity", primitives)
+        self.assertIn("matching", primitives)
+        self.assertIn("watch_subscription", primitives)
+        self.assertIn("notifications", primitives)
+
+    def test_label_style_ui_expectations_are_captured_in_structured_plan(self):
+        spec = _build_app_spec(
+            workspace_id=uuid.uuid4(),
+            title="Example App",
+            raw_prompt=LABEL_STYLE_UI_PROMPT,
+            initial_intent={"requested_entities": ["campaigns"]},
+        )
+        self.assertTrue(str(spec.get("ui_surfaces") or "").strip())
+        self.assertIn("campaign list view", str(spec.get("ui_surfaces") or "").lower())
 
     def test_generic_builder_does_not_silently_fall_back_to_inventory(self):
         with self.assertRaisesRegex(RuntimeError, "must not silently fall back to inventory semantics"):

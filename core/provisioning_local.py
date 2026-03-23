@@ -745,6 +745,21 @@ def _resolve_images_for_provision(request: ProvisionLocalRequest) -> dict[str, A
 
     prefer_local_images = bool(request.prefer_local_images) or _as_bool(os.getenv("XYN_PROVISION_PREFER_LOCAL_IMAGES", "false"))
     if prefer_local_images:
+        # Prefer explicit local tags first so provisioning does not inherit a
+        # stale anonymous image ID from long-running containers.
+        if _docker_image_exists(DEFAULT_UI_IMAGE_NAME) and _docker_image_exists(DEFAULT_API_IMAGE_NAME):
+            operations.append(f"Using prebuilt local image {DEFAULT_API_IMAGE_NAME}")
+            operations.append(f"Using prebuilt local image {DEFAULT_UI_IMAGE_NAME}")
+            return {
+                "mode": "prebuilt_local_images",
+                "registry": defaults["registry"],
+                "ui_image": DEFAULT_UI_IMAGE_NAME,
+                "api_image": DEFAULT_API_IMAGE_NAME,
+                "registry_slug": None,
+                "registry_source": "prebuilt_local_images",
+                "channel": str(request.channel or DEFAULT_IMAGE_TAG).strip() or DEFAULT_IMAGE_TAG,
+                "operations": operations,
+            }
         local_api_image_ref = _running_container_image_ref(str(os.getenv("XYN_PLATFORM_API_CONTAINER", "xyn-local-api")).strip() or "xyn-local-api")
         local_ui_image_ref = _running_container_image_ref(str(os.getenv("XYN_PLATFORM_UI_CONTAINER", "xyn-local-ui")).strip() or "xyn-local-ui")
         if local_api_image_ref and local_ui_image_ref and _docker_image_exists(local_api_image_ref) and _docker_image_exists(local_ui_image_ref):

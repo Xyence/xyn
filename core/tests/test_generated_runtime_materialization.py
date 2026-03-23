@@ -47,11 +47,15 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
                 )
             with zipfile.ZipFile(packaged["artifact_package_path"], "r") as archive:
                 manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+                surfaces = json.loads(
+                    archive.read("artifacts/application/app.team-lunch-poll/0.0.1-dev/surfaces.json").decode("utf-8")
+                )
 
         refs = {(row["type"], row["slug"]) for row in manifest["artifacts"]}
         self.assertIn(("application", "app.team-lunch-poll"), refs)
         self.assertIn(("policy_bundle", "policy.team-lunch-poll"), refs)
         self.assertEqual(packaged["policy_bundle_slug"], "policy.team-lunch-poll")
+        self.assertTrue(isinstance(surfaces, list) and surfaces)
 
     def test_compose_injects_manifest_entity_contracts(self):
         app_spec = {
@@ -76,6 +80,10 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
 
         self.assertIn("GENERATED_ENTITY_CONTRACTS_JSON", text)
         self.assertIn("GENERATED_ENTITY_CONTRACTS_ALLOW_DEFAULTS", text)
+        self.assertIn("GENERATED_WORKFLOW_DEFINITIONS_JSON", text)
+        self.assertIn("GENERATED_PLATFORM_PRIMITIVE_COMPOSITION_JSON", text)
+        self.assertIn("GENERATED_REQUIRES_PRIMITIVES_JSON", text)
+        self.assertIn("GENERATED_UI_SURFACES_TEXT", text)
         self.assertIn('"key":"devices"', text)
         self.assertIn('"key":"locations"', text)
 
@@ -121,6 +129,32 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         self.assertIn("at_least_one_matching_child_per_parent", text)
         self.assertIn("related_count", text)
         self.assertIn("post_write_related_update", text)
+
+    def test_compose_injects_generic_contracts_for_unknown_entities(self):
+        app_spec = {
+            "app_slug": "deal-finder",
+            "title": "Real Estate Deal Finder",
+            "workspace_id": "workspace-1",
+            "entities": ["campaigns", "properties", "signals", "sources", "watches"],
+            "reports": [],
+            "services": [
+                {"name": "deal-finder-api", "image": "deal-finder-api:local", "ports": [{"host": 0, "container": 8080, "protocol": "tcp"}]},
+                {"name": "deal-finder-db", "image": "postgres:16-alpine"},
+            ],
+            "requires_primitives": ["location"],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            compose_path = _materialize_net_inventory_compose(
+                app_spec=app_spec,
+                deployment_dir=Path(tmpdir),
+                compose_project="xyn-app-deal-finder",
+            )
+            text = compose_path.read_text(encoding="utf-8")
+        self.assertIn('"key":"campaigns"', text)
+        self.assertIn('"key":"properties"', text)
+        self.assertIn('"key":"signals"', text)
+        self.assertIn('"key":"sources"', text)
+        self.assertIn('"key":"watches"', text)
 
     def test_workspace_seed_creates_missing_workspace(self):
         class _FakeResponse:
@@ -180,7 +214,7 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
 
     @mock.patch("core.provisioning_local._docker_image_exists", return_value=True)
     @mock.patch("core.provisioning_local._running_container_image_ref")
-    def test_provision_prefers_running_local_platform_images(self, running_container_image_ref, _docker_image_exists):
+    def test_provision_prefers_prebuilt_local_tags_before_running_container_refs(self, running_container_image_ref, _docker_image_exists):
         running_container_image_ref.side_effect = [
             "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:dev",
             "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:dev",
@@ -188,9 +222,9 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
 
         result = _resolve_images_for_provision(ProvisionLocalRequest(name="smoke", prefer_local_images=True))
 
-        self.assertEqual(result["mode"], "running_local_images")
-        self.assertEqual(result["api_image"], "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:dev")
-        self.assertEqual(result["ui_image"], "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:dev")
+        self.assertEqual(result["mode"], "prebuilt_local_images")
+        self.assertEqual(result["api_image"], "xyn-api")
+        self.assertEqual(result["ui_image"], "xyn-ui")
 
     def test_provision_can_opt_into_local_images(self):
         def _run(cmd, *args, **kwargs):

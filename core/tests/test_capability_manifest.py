@@ -197,6 +197,35 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertNotIn("show devices", prompts)
         self.assertEqual({entry["key"] for entry in manifest["entities"]}, {"polls"})
 
+    def test_unknown_entities_from_app_spec_receive_generic_contracts(self):
+        manifest = build_resolved_capability_manifest(
+            {
+                "app_slug": "deal-finder",
+                "title": "Deal Finder",
+                "workspace_id": str(uuid.uuid4()),
+                "entities": ["campaigns", "properties", "signals", "sources", "watches"],
+                "reports": [],
+            }
+        )
+        entities = {entry["key"]: entry for entry in manifest["entities"]}
+        self.assertEqual(set(entities), {"campaigns", "properties", "signals", "sources", "watches"})
+        for key in ("campaigns", "properties", "signals", "sources", "watches"):
+            contract = entities[key]
+            self.assertEqual(contract["collection_path"], f"/{key}")
+            self.assertEqual(contract["item_path_template"], f"/{key}/{{id}}")
+            field_names = {field["name"] for field in contract["fields"]}
+            self.assertIn("id", field_names)
+            self.assertIn("workspace_id", field_names)
+            self.assertIn("name", field_names)
+            self.assertIn("created_at", field_names)
+            self.assertTrue(contract["operations"]["create"]["declared"])
+            self.assertTrue(contract["operations"]["update"]["declared"])
+            self.assertTrue(contract["operations"]["delete"]["declared"])
+        prompts = {entry["prompt"] for entry in manifest["commands"]}
+        self.assertIn("show campaigns", prompts)
+        self.assertIn("show properties", prompts)
+        self.assertIn("show signals", prompts)
+
 
 if __name__ == "__main__":
     unittest.main()

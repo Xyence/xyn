@@ -400,7 +400,7 @@ class LifecycleTransition(Base):
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    workspace_id = Column(UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=True, index=True)
+    workspace_id = Column(UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=True)
     lifecycle_name = Column(String(128), nullable=False)
     object_type = Column(String(128), nullable=False)
     object_id = Column(String(255), nullable=False)
