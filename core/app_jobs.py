@@ -422,10 +422,14 @@ def _build_generated_surface_definitions(*, app_spec: dict[str, Any], capability
         route: str,
         nav_section: str,
         order: int,
-        surface_kind: str = "page",
-        nav_visibility: str = "visible",
-        renderer_type: str = "html",
+        surface_kind: str = "dashboard",
+        nav_visibility: str = "always",
+        renderer_type: str = "generic_dashboard",
+        renderer_payload: dict[str, Any] | None = None,
     ) -> None:
+        renderer: dict[str, Any] = {"type": renderer_type}
+        if isinstance(renderer_payload, dict) and renderer_payload:
+            renderer["payload"] = copy.deepcopy(renderer_payload)
         rows.append(
             {
                 "key": key,
@@ -435,7 +439,7 @@ def _build_generated_surface_definitions(*, app_spec: dict[str, Any], capability
                 "nav_visibility": nav_visibility,
                 "nav_section": nav_section,
                 "order": order,
-                "renderer": {"type": renderer_type},
+                "renderer": renderer,
             }
         )
 
@@ -452,11 +456,29 @@ def _build_generated_surface_definitions(*, app_spec: dict[str, Any], capability
         section = "admin" if _is_admin_surface_token(entity_key) else "manage"
         _add_surface(
             key=f"entity-{entity_key}-list",
-            title=f"{plural_label.title()} List",
+            title=plural_label.title(),
             route=f"/app/{entity_key}",
             nav_section=section,
             order=100 + (idx * 10),
-            renderer_type="entity_list",
+            renderer_type="generic_dashboard",
+        )
+        _add_surface(
+            key=f"entity-{entity_key}-detail",
+            title=f"{singular_label.title()} Detail",
+            route=f"/app/{entity_key}/:id",
+            nav_section=section,
+            order=102 + (idx * 10),
+            nav_visibility="hidden",
+            renderer_type="generic_dashboard",
+            renderer_payload=(
+                {
+                    "shell_renderer_key": "campaign_map_workflow",
+                    "mode": "detail",
+                    "campaign_id_param": "id",
+                }
+                if entity_key == "campaigns"
+                else None
+            ),
         )
         _add_surface(
             key=f"entity-{entity_key}-create",
@@ -464,7 +486,16 @@ def _build_generated_surface_definitions(*, app_spec: dict[str, Any], capability
             route=f"/app/{entity_key}/new",
             nav_section=section,
             order=101 + (idx * 10),
-            renderer_type="entity_form",
+            surface_kind="editor",
+            renderer_type="generic_editor",
+            renderer_payload=(
+                {
+                    "shell_renderer_key": "campaign_map_workflow",
+                    "mode": "create",
+                }
+                if entity_key == "campaigns"
+                else None
+            ),
         )
 
     if admin_required:
@@ -491,34 +522,46 @@ def _build_generated_surface_definitions(*, app_spec: dict[str, Any], capability
         nav_section="docs",
         order=1000,
         nav_visibility="hidden",
+        surface_kind="docs",
     )
     rows.sort(key=lambda row: (str(row.get("nav_section") or ""), int(row.get("order") or 1000), str(row.get("key") or "")))
     return rows
 
 
 def _surface_manifest_summary(surface_rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    grouped: dict[str, list[dict[str, Any]]] = {"manage": [], "admin": [], "docs": []}
+    grouped: dict[str, list[dict[str, Any]]] = {"nav": [], "manage": [], "docs": []}
     for row in surface_rows:
         if not isinstance(row, dict):
             continue
         section = str(row.get("nav_section") or "manage").strip().lower()
-        if section not in grouped:
+        if section not in {"manage", "admin", "docs"}:
             section = "manage"
-        grouped[section].append(
-            {
-                "label": str(row.get("title") or "").strip(),
-                "path": str(row.get("route") or "").strip(),
-                "order": int(row.get("order") or 1000),
-            }
-        )
-    for section in list(grouped.keys()):
+        label = str(row.get("title") or "").strip()
+        path = str(row.get("route") or "").strip()
+        order = int(row.get("order") or 1000)
+        if not label or not path:
+            continue
+        if str(row.get("nav_visibility") or "").strip().lower() == "always":
+            grouped["nav"].append(
+                {
+                    "label": label,
+                    "path": path,
+                    "order": order,
+                    "group": "apps_admin" if section == "admin" else "apps",
+                }
+            )
+        if section in {"manage", "admin"}:
+            grouped["manage"].append({"label": label, "path": path, "order": order})
+        if section == "docs":
+            grouped["docs"].append({"label": label, "path": path, "order": order})
+    for section in ("nav", "manage", "docs"):
         grouped[section].sort(key=lambda row: (int(row.get("order") or 1000), str(row.get("label") or "")))
-        if not grouped[section]:
-            grouped.pop(section, None)
-    if "manage" not in grouped:
+    if not grouped["manage"]:
         grouped["manage"] = [{"label": "Workbench", "path": "/app/workbench", "order": 100}]
-    if "docs" not in grouped:
+    if not grouped["docs"]:
         grouped["docs"] = [{"label": "Workbench", "path": "/app/workbench", "order": 1000}]
+    if not grouped["nav"]:
+        grouped["nav"] = [{"label": "Workbench", "path": "/app/workbench", "order": 100, "group": "apps"}]
     return grouped
 
 
@@ -2597,6 +2640,7 @@ def _materialize_net_inventory_compose(
         sort_keys=True,
     ).replace("'", "''")
     ui_surfaces_text = " ".join(str(app_spec.get("ui_surfaces") or "").splitlines()).replace('"', '\\"')
+    shell_base_url = str(os.getenv("XYN_SHELL_BASE_URL", "http://localhost:3000") or "").strip()
     policy_bundle_json = json.dumps(policy_bundle or {}, separators=(",", ":"), sort_keys=True).replace("'", "''")
     app_image = str(app_service.get("image") or _effective_net_inventory_image())
     app_ports = _ports_yaml(list(app_service.get("ports") or [{"host": 0, "container": 8080, "protocol": "tcp"}]))
@@ -2652,6 +2696,7 @@ def _materialize_net_inventory_compose(
                 f"      GENERATED_PLATFORM_PRIMITIVE_COMPOSITION_JSON: '{primitive_composition_json}'",
                 f"      GENERATED_REQUIRES_PRIMITIVES_JSON: '{requires_primitives_json}'",
                 f"      GENERATED_UI_SURFACES_TEXT: \"{ui_surfaces_text}\"",
+                f"      SHELL_BASE_URL: \"{shell_base_url}\"",
                 "      GENERATED_ENTITY_CONTRACTS_ALLOW_DEFAULTS: \"0\"",
                 "    ports:",
                 *app_ports,

@@ -226,6 +226,29 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertIn("show properties", prompts)
         self.assertIn("show signals", prompts)
 
+    def test_generated_artifact_manifest_includes_nav_surfaces_and_surface_definitions(self):
+        workspace_id = uuid.uuid4()
+        artifact_manifest = _build_generated_artifact_manifest(
+            app_spec={
+                "schema_version": "xyn.appspec.v0",
+                "app_slug": "deal-finder",
+                "title": "Deal Finder",
+                "workspace_id": str(workspace_id),
+                "entities": ["campaigns", "signals"],
+                "reports": [],
+                "workflow_definitions": [{"workflow_key": "campaign-workflow", "description": "campaign workflow"}],
+                "ui_surfaces": "campaign list view; signal list view",
+            },
+            runtime_config={},
+        )
+        surfaces = artifact_manifest.get("surfaces") if isinstance(artifact_manifest.get("surfaces"), dict) else {}
+        self.assertTrue(isinstance(surfaces.get("nav"), list) and surfaces.get("nav"))
+        self.assertTrue(isinstance(surfaces.get("manage"), list) and surfaces.get("manage"))
+        nav_paths = {str(row.get("path") or "") for row in (surfaces.get("nav") or []) if isinstance(row, dict)}
+        self.assertIn("/app/campaigns/new", nav_paths)
+        generated_defs = ((artifact_manifest.get("content") or {}).get("generated_surface_definitions"))
+        self.assertTrue(isinstance(generated_defs, list) and generated_defs)
+
 
 if __name__ == "__main__":
     unittest.main()

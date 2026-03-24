@@ -57,6 +57,85 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         self.assertEqual(packaged["policy_bundle_slug"], "policy.team-lunch-poll")
         self.assertTrue(isinstance(surfaces, list) and surfaces)
 
+    def test_generated_package_surfaces_are_installer_compatible_and_manifest_nav_is_present(self):
+        workspace_id = uuid.uuid4()
+        app_spec = {
+            "schema_version": "xyn.appspec.v0",
+            "app_slug": "deal-finder",
+            "title": "Deal Finder",
+            "workspace_id": str(workspace_id),
+            "entities": ["campaigns", "signals", "sources"],
+            "entity_contracts": [
+                {
+                    "key": "campaigns",
+                    "singular_label": "campaign",
+                    "plural_label": "campaigns",
+                    "collection_path": "/campaigns",
+                    "item_path_template": "/campaigns/{id}",
+                    "operations": {
+                        "list": {"declared": True, "method": "GET", "path": "/campaigns"},
+                        "get": {"declared": True, "method": "GET", "path": "/campaigns/{id}"},
+                        "create": {"declared": True, "method": "POST", "path": "/campaigns"},
+                    },
+                    "fields": [
+                        {"name": "id", "type": "uuid", "required": True, "readable": True, "writable": False, "identity": True},
+                        {"name": "workspace_id", "type": "uuid", "required": True, "readable": True, "writable": True, "identity": False},
+                        {"name": "name", "type": "string", "required": True, "readable": True, "writable": True, "identity": True},
+                    ],
+                    "presentation": {"default_list_fields": ["name"], "default_detail_fields": ["id", "name"], "title_field": "name"},
+                    "validation": {"required_on_create": ["workspace_id", "name"], "allowed_on_update": ["name"]},
+                    "relationships": [],
+                }
+            ],
+            "workflow_definitions": [{"workflow_key": "campaign-workflow", "description": "campaign map selection"}],
+            "platform_primitive_composition": [{"workflow_key": "campaign-workflow", "primitives": ["campaigns"]}],
+            "ui_surfaces": "campaign list view; campaign detail view",
+            "services": [],
+            "reports": [],
+            "requires_primitives": ["location"],
+        }
+        policy_bundle = {"workspace_id": str(workspace_id), "title": "Deal Finder Policies", "policy_families": []}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch("core.app_jobs._generated_artifacts_root", return_value=Path(tmpdir)):
+                packaged = _package_generated_app(
+                    workspace_id=workspace_id,
+                    source_job_id="job-1",
+                    app_spec=app_spec,
+                    policy_bundle=policy_bundle,
+                    runtime_config={},
+                )
+            with zipfile.ZipFile(packaged["artifact_package_path"], "r") as archive:
+                manifest_payload = json.loads(
+                    archive.read("artifacts/application/app.deal-finder/0.0.1-dev/artifact.json").decode("utf-8")
+                )
+                surfaces = json.loads(
+                    archive.read("artifacts/application/app.deal-finder/0.0.1-dev/surfaces.json").decode("utf-8")
+                )
+
+        self.assertTrue(surfaces)
+        allowed_surface_kinds = {"config", "editor", "dashboard", "visualizer", "docs"}
+        allowed_renderer_types = {"ui_component_ref", "generic_editor", "generic_dashboard", "workflow_visualizer", "article_editor"}
+        for row in surfaces:
+            self.assertIn(row.get("surface_kind"), allowed_surface_kinds)
+            self.assertIn((row.get("renderer") or {}).get("type"), allowed_renderer_types)
+        self.assertTrue(all(str(row.get("nav_visibility") or "") in {"always", "hidden"} for row in surfaces))
+        self.assertTrue(any(str(row.get("route") or "").endswith("/:id") for row in surfaces))
+        campaigns_create = next((row for row in surfaces if row.get("route") == "/app/campaigns/new"), {})
+        campaigns_detail = next((row for row in surfaces if row.get("route") == "/app/campaigns/:id"), {})
+        self.assertEqual(
+            ((campaigns_create.get("renderer") or {}).get("payload") or {}).get("shell_renderer_key"),
+            "campaign_map_workflow",
+        )
+        self.assertEqual(
+            ((campaigns_detail.get("renderer") or {}).get("payload") or {}).get("campaign_id_param"),
+            "id",
+        )
+        nav = ((manifest_payload.get("surfaces") or {}).get("nav")) if isinstance(manifest_payload.get("surfaces"), dict) else []
+        self.assertTrue(isinstance(nav, list) and nav)
+        nav_paths = {str(row.get("path") or "") for row in nav if isinstance(row, dict)}
+        self.assertIn("/app/campaigns", nav_paths)
+        self.assertIn("/app/campaigns/new", nav_paths)
+
     def test_compose_injects_manifest_entity_contracts(self):
         app_spec = {
             "app_slug": "net-inventory",
@@ -84,6 +163,7 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         self.assertIn("GENERATED_PLATFORM_PRIMITIVE_COMPOSITION_JSON", text)
         self.assertIn("GENERATED_REQUIRES_PRIMITIVES_JSON", text)
         self.assertIn("GENERATED_UI_SURFACES_TEXT", text)
+        self.assertIn("SHELL_BASE_URL", text)
         self.assertIn('"key":"devices"', text)
         self.assertIn('"key":"locations"', text)
 
