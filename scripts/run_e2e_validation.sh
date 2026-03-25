@@ -3,7 +3,7 @@ set -euo pipefail
 
 BASE_URL="${XYN_BASE_URL:-http://seed.localhost}"
 UI_URL="${XYN_UI_URL:-http://localhost}"
-WORKSPACE_SLUG="${XYN_WORKSPACE_SLUG:-default}"
+WORKSPACE_SLUG="${XYN_WORKSPACE_SLUG:-development}"
 TIMEOUT_SECONDS="${XYN_E2E_TIMEOUT_SECONDS:-240}"
 
 PASS_COUNT=0

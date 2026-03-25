@@ -30,6 +30,7 @@ DEFAULT_ARTIFACT_REGISTRY = "public.ecr.aws/i0h0h0n4/xyn/artifacts"
 DEFAULT_UI_IMAGE_NAME = "xyn-ui"
 DEFAULT_API_IMAGE_NAME = "xyn-api"
 DEFAULT_IMAGE_TAG = "dev"
+DEFAULT_USER_WORKSPACE_SLUG = "development"
 
 
 def _utc_now() -> datetime:
@@ -57,6 +58,14 @@ def _sanitize_slug(value: str) -> str:
 
 def _as_bool(value: str) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _default_workspace_slug(value: Optional[str] = None) -> str:
+    explicit = str(value or "").strip().lower()
+    if explicit:
+        return explicit
+    env_value = str(os.getenv("XYN_WORKSPACE_SLUG", DEFAULT_USER_WORKSPACE_SLUG)).strip().lower()
+    return env_value or DEFAULT_USER_WORKSPACE_SLUG
 
 
 def _is_remote_image_ref(value: str) -> bool:
@@ -827,7 +836,7 @@ def _resolve_images_for_provision(request: ProvisionLocalRequest) -> dict[str, A
         resolved = resolve_registry_images(
             db,
             explicit_registry_slug=str(request.registry_slug or "").strip() or None,
-            workspace_slug=str(request.workspace_slug or "default").strip() or "default",
+            workspace_slug=_default_workspace_slug(request.workspace_slug),
             channel=str(request.channel or "").strip() or None,
             ensure_local=True,
         )

@@ -786,6 +786,7 @@ def _import_generated_artifact_package_into_registry(
     artifact_slug: str,
     package_path: Path,
     port: int = 8000,
+    workspace_slug: str = "",
 ) -> dict[str, Any]:
     if not package_path.exists():
         raise RuntimeError(f"Generated artifact package not found: {package_path}")
@@ -793,10 +794,14 @@ def _import_generated_artifact_package_into_registry(
         raise RuntimeError(f"Generated artifact slug must use app.* namespace: {artifact_slug}")
     if not _docker_container_running(container_name):
         raise RuntimeError(f"Platform API container is not running: {container_name}")
+    workspace_query = str(workspace_slug or "").strip()
+    upload_path = "/xyn/api/artifacts/import"
+    if workspace_query:
+        upload_path = f"{upload_path}?workspace_slug={workspace_query}"
     code, body, text = _container_http_session_upload_json(
         container_name,
         port=port,
-        upload_path="/xyn/api/artifacts/import",
+        upload_path=upload_path,
         file_field="file",
         filename=package_path.name,
         file_bytes=package_path.read_bytes(),
@@ -819,12 +824,14 @@ def _import_generated_artifact_package(
     *,
     artifact_slug: str,
     package_path: Path,
+    workspace_slug: str = "",
 ) -> dict[str, Any]:
     return _import_generated_artifact_package_into_registry(
         container_name=ROOT_PLATFORM_API_CONTAINER,
         artifact_slug=artifact_slug,
         package_path=package_path,
         port=8000,
+        workspace_slug=workspace_slug,
     )
 
 
@@ -2878,10 +2885,13 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
     )
     registry_artifact: dict[str, Any] = {}
     registry_import_error = ""
+    workspace = db.query(Workspace).filter(Workspace.id == job.workspace_id).first()
+    workspace_slug = str(getattr(workspace, "slug", "development") or "development")
     try:
         registry_artifact = _import_generated_artifact_package(
             artifact_slug=str(packaged_artifact["artifact_slug"]),
             package_path=Path(str(packaged_artifact["artifact_package_path"])),
+            workspace_slug=workspace_slug,
         )
         _append_job_log(
             logs,
@@ -3079,6 +3089,7 @@ def _handle_provision_sibling_xyn(db: Session, job: Job, logs: list[str]) -> tup
             artifact_slug=preferred_artifact_slug,
             package_path=preferred_artifact_package_path,
             port=8000,
+            workspace_slug=workspace_slug,
         )
         _append_job_log(
             logs,
