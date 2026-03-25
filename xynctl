@@ -51,10 +51,15 @@ DEFAULT_UI_IMAGE_NAME = "xyn-ui"
 DEFAULT_API_IMAGE_NAME = "xyn-api"
 DEFAULT_IMAGE_TAG = "dev"
 DEFAULT_CONTEXT_PACK_MANIFEST = ".xyn/sync/context-packs.manifest.json"
+DEFAULT_USER_WORKSPACE_SLUG = "development"
 
 
 def _as_bool(value: str) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _default_workspace_slug(env: dict[str, str]) -> str:
+    return str(env.get("XYN_WORKSPACE_SLUG", DEFAULT_USER_WORKSPACE_SLUG)).strip() or DEFAULT_USER_WORKSPACE_SLUG
 
 
 def _build_default_seed_url(runtime: dict[str, str]) -> str:
@@ -597,7 +602,7 @@ def _resolve_artifacts(env: dict[str, str]) -> tuple[bool, dict[str, str]]:
 
 def _resolve_artifacts_via_seed(seed_url: str, env: dict[str, str]) -> tuple[bool, dict[str, Any]]:
     params: dict[str, str] = {
-        "workspace_slug": str(env.get("XYN_WORKSPACE_SLUG", "default")).strip() or "default",
+        "workspace_slug": _default_workspace_slug(env),
         "ensure_local": "true",
     }
     registry_slug = str(env.get("XYN_ARTIFACT_REGISTRY_SLUG", "")).strip()
@@ -732,7 +737,7 @@ def start_with_provision(env: dict[str, str], *, force: bool, name: Optional[str
         api_image=str(images.get("api_image") or ""),
         registry_slug=reg_slug,
         channel=eff_channel,
-        workspace_slug=str(env.get("XYN_WORKSPACE_SLUG", "default")).strip() or "default",
+        workspace_slug=_default_workspace_slug(env),
     )
     if not ok:
         print_error(f"Provisioning failed: {payload.get('error')}")
@@ -1055,7 +1060,7 @@ def main() -> None:
             api_image=str(images.get("api_image") or ""),
             registry_slug=str(resolved.get("registry_slug") or ""),
             channel=str(images.get("channel") or DEFAULT_IMAGE_TAG),
-            workspace_slug=str(env.get("XYN_WORKSPACE_SLUG", "default")).strip() or "default",
+            workspace_slug=_default_workspace_slug(env),
         )
         if not ok:
             print_error(f"Provisioning failed: {payload.get('error')}")

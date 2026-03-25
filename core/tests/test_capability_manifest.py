@@ -197,6 +197,58 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertNotIn("show devices", prompts)
         self.assertEqual({entry["key"] for entry in manifest["entities"]}, {"polls"})
 
+    def test_unknown_entities_from_app_spec_receive_generic_contracts(self):
+        manifest = build_resolved_capability_manifest(
+            {
+                "app_slug": "deal-finder",
+                "title": "Deal Finder",
+                "workspace_id": str(uuid.uuid4()),
+                "entities": ["campaigns", "properties", "signals", "sources", "watches"],
+                "reports": [],
+            }
+        )
+        entities = {entry["key"]: entry for entry in manifest["entities"]}
+        self.assertEqual(set(entities), {"campaigns", "properties", "signals", "sources", "watches"})
+        for key in ("campaigns", "properties", "signals", "sources", "watches"):
+            contract = entities[key]
+            self.assertEqual(contract["collection_path"], f"/{key}")
+            self.assertEqual(contract["item_path_template"], f"/{key}/{{id}}")
+            field_names = {field["name"] for field in contract["fields"]}
+            self.assertIn("id", field_names)
+            self.assertIn("workspace_id", field_names)
+            self.assertIn("name", field_names)
+            self.assertIn("created_at", field_names)
+            self.assertTrue(contract["operations"]["create"]["declared"])
+            self.assertTrue(contract["operations"]["update"]["declared"])
+            self.assertTrue(contract["operations"]["delete"]["declared"])
+        prompts = {entry["prompt"] for entry in manifest["commands"]}
+        self.assertIn("show campaigns", prompts)
+        self.assertIn("show properties", prompts)
+        self.assertIn("show signals", prompts)
+
+    def test_generated_artifact_manifest_includes_nav_surfaces_and_surface_definitions(self):
+        workspace_id = uuid.uuid4()
+        artifact_manifest = _build_generated_artifact_manifest(
+            app_spec={
+                "schema_version": "xyn.appspec.v0",
+                "app_slug": "deal-finder",
+                "title": "Deal Finder",
+                "workspace_id": str(workspace_id),
+                "entities": ["campaigns", "signals"],
+                "reports": [],
+                "workflow_definitions": [{"workflow_key": "campaign-workflow", "description": "campaign workflow"}],
+                "ui_surfaces": "campaign list view; signal list view",
+            },
+            runtime_config={},
+        )
+        surfaces = artifact_manifest.get("surfaces") if isinstance(artifact_manifest.get("surfaces"), dict) else {}
+        self.assertTrue(isinstance(surfaces.get("nav"), list) and surfaces.get("nav"))
+        self.assertTrue(isinstance(surfaces.get("manage"), list) and surfaces.get("manage"))
+        nav_paths = {str(row.get("path") or "") for row in (surfaces.get("nav") or []) if isinstance(row, dict)}
+        self.assertIn("/app/campaigns/new", nav_paths)
+        generated_defs = ((artifact_manifest.get("content") or {}).get("generated_surface_definitions"))
+        self.assertTrue(isinstance(generated_defs, list) and generated_defs)
+
 
 if __name__ == "__main__":
     unittest.main()

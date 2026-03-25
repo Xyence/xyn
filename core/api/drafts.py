@@ -105,18 +105,30 @@ async def create_draft(
     if not row.title:
         raise HTTPException(status_code=400, detail="title is required")
     try:
+        # Enter the lifecycle through its declared initial state first; callers
+        # may request a subsequent valid state like "ready".
         apply_transition(
             db,
             lifecycle="draft",
             object_type="draft",
             object_id=str(row.id),
             from_state=None,
-            to_state=status,
+            to_state=DraftStatus.DRAFT.value,
             workspace_id=workspace.id,
             actor=row.created_by,
             reason="Draft created.",
         )
-        row.status = status
+        row.status = DraftStatus.DRAFT.value
+        if status != row.status:
+            transition_model_status(
+                db,
+                model_obj=row,
+                lifecycle="draft",
+                object_type="draft",
+                next_state=status,
+                actor=row.created_by,
+                reason="Draft created with initial status override.",
+            )
     except LifecycleError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.add(row)

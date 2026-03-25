@@ -30,6 +30,7 @@ DEFAULT_ARTIFACT_REGISTRY = "public.ecr.aws/i0h0h0n4/xyn/artifacts"
 DEFAULT_UI_IMAGE_NAME = "xyn-ui"
 DEFAULT_API_IMAGE_NAME = "xyn-api"
 DEFAULT_IMAGE_TAG = "dev"
+DEFAULT_USER_WORKSPACE_SLUG = "development"
 
 
 def _utc_now() -> datetime:
@@ -57,6 +58,14 @@ def _sanitize_slug(value: str) -> str:
 
 def _as_bool(value: str) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _default_workspace_slug(value: Optional[str] = None) -> str:
+    explicit = str(value or "").strip().lower()
+    if explicit:
+        return explicit
+    env_value = str(os.getenv("XYN_WORKSPACE_SLUG", DEFAULT_USER_WORKSPACE_SLUG)).strip().lower()
+    return env_value or DEFAULT_USER_WORKSPACE_SLUG
 
 
 def _is_remote_image_ref(value: str) -> bool:
@@ -745,6 +754,21 @@ def _resolve_images_for_provision(request: ProvisionLocalRequest) -> dict[str, A
 
     prefer_local_images = bool(request.prefer_local_images) or _as_bool(os.getenv("XYN_PROVISION_PREFER_LOCAL_IMAGES", "false"))
     if prefer_local_images:
+        # Prefer explicit local tags first so provisioning does not inherit a
+        # stale anonymous image ID from long-running containers.
+        if _docker_image_exists(DEFAULT_UI_IMAGE_NAME) and _docker_image_exists(DEFAULT_API_IMAGE_NAME):
+            operations.append(f"Using prebuilt local image {DEFAULT_API_IMAGE_NAME}")
+            operations.append(f"Using prebuilt local image {DEFAULT_UI_IMAGE_NAME}")
+            return {
+                "mode": "prebuilt_local_images",
+                "registry": defaults["registry"],
+                "ui_image": DEFAULT_UI_IMAGE_NAME,
+                "api_image": DEFAULT_API_IMAGE_NAME,
+                "registry_slug": None,
+                "registry_source": "prebuilt_local_images",
+                "channel": str(request.channel or DEFAULT_IMAGE_TAG).strip() or DEFAULT_IMAGE_TAG,
+                "operations": operations,
+            }
         local_api_image_ref = _running_container_image_ref(str(os.getenv("XYN_PLATFORM_API_CONTAINER", "xyn-local-api")).strip() or "xyn-local-api")
         local_ui_image_ref = _running_container_image_ref(str(os.getenv("XYN_PLATFORM_UI_CONTAINER", "xyn-local-ui")).strip() or "xyn-local-ui")
         if local_api_image_ref and local_ui_image_ref and _docker_image_exists(local_api_image_ref) and _docker_image_exists(local_ui_image_ref):
@@ -812,7 +836,7 @@ def _resolve_images_for_provision(request: ProvisionLocalRequest) -> dict[str, A
         resolved = resolve_registry_images(
             db,
             explicit_registry_slug=str(request.registry_slug or "").strip() or None,
-            workspace_slug=str(request.workspace_slug or "default").strip() or "default",
+            workspace_slug=_default_workspace_slug(request.workspace_slug),
             channel=str(request.channel or "").strip() or None,
             ensure_local=True,
         )

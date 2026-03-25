@@ -344,12 +344,235 @@ print(json.dumps({{"code": int(resp.status_code), "body": resp.text}}))
     return code, body_json, raw_body
 
 
+def _extract_ui_surface_lines(app_spec: dict[str, Any]) -> list[str]:
+    ui_text = str(app_spec.get("ui_surfaces") or "").strip()
+    if not ui_text:
+        structured_plan = app_spec.get("structured_plan") if isinstance(app_spec.get("structured_plan"), dict) else {}
+        ui_text = str(structured_plan.get("ui_surfaces") or "").strip()
+    lines: list[str] = []
+    for raw_line in ui_text.splitlines():
+        token = str(raw_line or "").strip().lstrip("-").strip()
+        if token:
+            lines.append(token)
+    return lines
+
+
+def _is_admin_surface_token(token: str) -> bool:
+    lowered = str(token or "").lower()
+    admin_keywords = ("admin", "operator", "source", "connector", "mapping", "readiness", "activation", "inspection")
+    return any(word in lowered for word in admin_keywords)
+
+
+def _is_map_surface_token(token: str) -> bool:
+    lowered = str(token or "").lower()
+    map_keywords = ("map", "rectangle", "box selection", "area selection", "bounding")
+    return any(word in lowered for word in map_keywords)
+
+
+def _infer_admin_surface_required(app_spec: dict[str, Any], ui_lines: list[str]) -> bool:
+    if any(_is_admin_surface_token(line) for line in ui_lines):
+        return True
+    workflow_defs = app_spec.get("workflow_definitions") if isinstance(app_spec.get("workflow_definitions"), list) else []
+    for row in workflow_defs:
+        if not isinstance(row, dict):
+            continue
+        joined = " ".join(
+            [
+                str(row.get("workflow_key") or ""),
+                str(row.get("workflow_label") or ""),
+                str(row.get("description") or ""),
+            ]
+        ).lower()
+        if "admin" in joined or "operator" in joined or "source" in joined:
+            return True
+    return False
+
+
+def _infer_map_surface_required(app_spec: dict[str, Any], ui_lines: list[str]) -> bool:
+    if any(_is_map_surface_token(line) for line in ui_lines):
+        return True
+    requires_primitives = {
+        str(value or "").strip().lower()
+        for value in (app_spec.get("requires_primitives") if isinstance(app_spec.get("requires_primitives"), list) else [])
+        if str(value or "").strip()
+    }
+    if "geospatial" in requires_primitives:
+        return True
+    workflow_defs = app_spec.get("workflow_definitions") if isinstance(app_spec.get("workflow_definitions"), list) else []
+    for row in workflow_defs:
+        if not isinstance(row, dict):
+            continue
+        description = str(row.get("description") or "").lower()
+        if _is_map_surface_token(description):
+            return True
+    return False
+
+
+def _build_generated_surface_definitions(*, app_spec: dict[str, Any], capability_manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    entities = capability_manifest.get("entities") if isinstance(capability_manifest.get("entities"), list) else []
+    ui_lines = _extract_ui_surface_lines(app_spec)
+    admin_required = _infer_admin_surface_required(app_spec, ui_lines)
+    map_required = _infer_map_surface_required(app_spec, ui_lines)
+
+    def _add_surface(
+        *,
+        key: str,
+        title: str,
+        route: str,
+        nav_section: str,
+        order: int,
+        surface_kind: str = "dashboard",
+        nav_visibility: str = "always",
+        renderer_type: str = "generic_dashboard",
+        renderer_payload: dict[str, Any] | None = None,
+    ) -> None:
+        renderer: dict[str, Any] = {"type": renderer_type}
+        if isinstance(renderer_payload, dict) and renderer_payload:
+            renderer["payload"] = copy.deepcopy(renderer_payload)
+        rows.append(
+            {
+                "key": key,
+                "title": title,
+                "route": route,
+                "surface_kind": surface_kind,
+                "nav_visibility": nav_visibility,
+                "nav_section": nav_section,
+                "order": order,
+                "renderer": renderer,
+            }
+        )
+
+    _add_surface(key="app-home", title="Application Home", route="/app", nav_section="manage", order=10)
+
+    for idx, entity in enumerate(entities):
+        if not isinstance(entity, dict):
+            continue
+        entity_key = str(entity.get("key") or "").strip()
+        if not entity_key:
+            continue
+        plural_label = str(entity.get("plural_label") or entity_key).strip() or entity_key
+        singular_label = str(entity.get("singular_label") or entity_key.rstrip("s")).strip() or entity_key.rstrip("s")
+        section = "admin" if _is_admin_surface_token(entity_key) else "manage"
+        _add_surface(
+            key=f"entity-{entity_key}-list",
+            title=plural_label.title(),
+            route=f"/app/{entity_key}",
+            nav_section=section,
+            order=100 + (idx * 10),
+            renderer_type="generic_dashboard",
+        )
+        _add_surface(
+            key=f"entity-{entity_key}-detail",
+            title=f"{singular_label.title()} Detail",
+            route=f"/app/{entity_key}/:id",
+            nav_section=section,
+            order=102 + (idx * 10),
+            nav_visibility="hidden",
+            renderer_type="generic_dashboard",
+            renderer_payload=(
+                {
+                    "shell_renderer_key": "campaign_map_workflow",
+                    "mode": "detail",
+                    "campaign_id_param": "id",
+                }
+                if entity_key == "campaigns"
+                else None
+            ),
+        )
+        _add_surface(
+            key=f"entity-{entity_key}-create",
+            title=f"Create {singular_label.title()}",
+            route=f"/app/{entity_key}/new",
+            nav_section=section,
+            order=101 + (idx * 10),
+            surface_kind="editor",
+            renderer_type="generic_editor",
+            renderer_payload=(
+                {
+                    "shell_renderer_key": "campaign_map_workflow",
+                    "mode": "create",
+                }
+                if entity_key == "campaigns"
+                else None
+            ),
+        )
+
+    if admin_required:
+        _add_surface(
+            key="admin-operator",
+            title="Admin / Operator",
+            route="/app/admin",
+            nav_section="admin",
+            order=50,
+        )
+    if map_required:
+        _add_surface(
+            key="map-selection",
+            title="Map Selection",
+            route="/app/map-selection",
+            nav_section="manage",
+            order=60,
+        )
+
+    _add_surface(
+        key="workbench",
+        title="Workbench",
+        route="/app/workbench",
+        nav_section="docs",
+        order=1000,
+        nav_visibility="hidden",
+        surface_kind="docs",
+    )
+    rows.sort(key=lambda row: (str(row.get("nav_section") or ""), int(row.get("order") or 1000), str(row.get("key") or "")))
+    return rows
+
+
+def _surface_manifest_summary(surface_rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {"nav": [], "manage": [], "docs": []}
+    for row in surface_rows:
+        if not isinstance(row, dict):
+            continue
+        section = str(row.get("nav_section") or "manage").strip().lower()
+        if section not in {"manage", "admin", "docs"}:
+            section = "manage"
+        label = str(row.get("title") or "").strip()
+        path = str(row.get("route") or "").strip()
+        order = int(row.get("order") or 1000)
+        if not label or not path:
+            continue
+        if str(row.get("nav_visibility") or "").strip().lower() == "always":
+            grouped["nav"].append(
+                {
+                    "label": label,
+                    "path": path,
+                    "order": order,
+                    "group": "apps_admin" if section == "admin" else "apps",
+                }
+            )
+        if section in {"manage", "admin"}:
+            grouped["manage"].append({"label": label, "path": path, "order": order})
+        if section == "docs":
+            grouped["docs"].append({"label": label, "path": path, "order": order})
+    for section in ("nav", "manage", "docs"):
+        grouped[section].sort(key=lambda row: (int(row.get("order") or 1000), str(row.get("label") or "")))
+    if not grouped["manage"]:
+        grouped["manage"] = [{"label": "Workbench", "path": "/app/workbench", "order": 100}]
+    if not grouped["docs"]:
+        grouped["docs"] = [{"label": "Workbench", "path": "/app/workbench", "order": 1000}]
+    if not grouped["nav"]:
+        grouped["nav"] = [{"label": "Workbench", "path": "/app/workbench", "order": 100, "group": "apps"}]
+    return grouped
+
+
 def _build_generated_artifact_manifest(*, app_spec: dict[str, Any], runtime_config: dict[str, Any]) -> dict[str, Any]:
     app_slug = _safe_slug(str(app_spec.get("app_slug") or "generated-app"), default="generated-app")
     artifact_slug = _generated_artifact_slug(app_slug)
     title = str(app_spec.get("title") or app_slug).strip() or app_slug
     capability_manifest = build_resolved_capability_manifest(app_spec)
     suggestions = build_manifest_suggestions(artifact_slug=artifact_slug, manifest=capability_manifest)
+    generated_surface_defs = _build_generated_surface_definitions(app_spec=app_spec, capability_manifest=capability_manifest)
+    manifest_surfaces = _surface_manifest_summary(generated_surface_defs)
     return {
         "artifact": {
             "id": artifact_slug,
@@ -369,14 +592,12 @@ def _build_generated_artifact_manifest(*, app_spec: dict[str, Any], runtime_conf
         },
         "resolved_capability_manifest": capability_manifest,
         "suggestions": suggestions,
-        "surfaces": {
-            "manage": [{"label": "Workbench", "path": "/app/workbench", "order": 100}],
-            "docs": [{"label": "Workbench", "path": "/app/workbench", "order": 1000}],
-        },
+        "surfaces": manifest_surfaces,
         "content": {
             "app_spec": app_spec,
             "runtime_config": runtime_config,
             "resolved_capability_manifest": capability_manifest,
+            "generated_surface_definitions": generated_surface_defs,
         },
     }
 
@@ -506,7 +727,15 @@ def _package_generated_app(
     }
     files[artifact_zip_path] = json.dumps(artifact_manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     files[payload_zip_path] = json.dumps(combined_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    files[surfaces_zip_path] = b"[]"
+    generated_surface_defs = artifact_manifest.get("content", {}).get("generated_surface_definitions")
+    if not isinstance(generated_surface_defs, list):
+        generated_surface_defs = []
+    files[surfaces_zip_path] = json.dumps(
+        generated_surface_defs,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
     files[runtime_roles_zip_path] = b"[]"
     files[policy_artifact_zip_path] = json.dumps(policy_artifact_manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     files[policy_payload_zip_path] = json.dumps(policy_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -557,6 +786,7 @@ def _import_generated_artifact_package_into_registry(
     artifact_slug: str,
     package_path: Path,
     port: int = 8000,
+    workspace_slug: str = "",
 ) -> dict[str, Any]:
     if not package_path.exists():
         raise RuntimeError(f"Generated artifact package not found: {package_path}")
@@ -564,10 +794,14 @@ def _import_generated_artifact_package_into_registry(
         raise RuntimeError(f"Generated artifact slug must use app.* namespace: {artifact_slug}")
     if not _docker_container_running(container_name):
         raise RuntimeError(f"Platform API container is not running: {container_name}")
+    workspace_query = str(workspace_slug or "").strip()
+    upload_path = "/xyn/api/artifacts/import"
+    if workspace_query:
+        upload_path = f"{upload_path}?workspace_slug={workspace_query}"
     code, body, text = _container_http_session_upload_json(
         container_name,
         port=port,
-        upload_path="/xyn/api/artifacts/import",
+        upload_path=upload_path,
         file_field="file",
         filename=package_path.name,
         file_bytes=package_path.read_bytes(),
@@ -590,12 +824,14 @@ def _import_generated_artifact_package(
     *,
     artifact_slug: str,
     package_path: Path,
+    workspace_slug: str = "",
 ) -> dict[str, Any]:
     return _import_generated_artifact_package_into_registry(
         container_name=ROOT_PLATFORM_API_CONTAINER,
         artifact_slug=artifact_slug,
         package_path=package_path,
         port=8000,
+        workspace_slug=workspace_slug,
     )
 
 
@@ -2024,6 +2260,125 @@ def _infer_requested_visuals_from_prompt(raw_prompt: str) -> list[str]:
     return _normalize_unique_strings(visuals)
 
 
+def _extract_prompt_sections(raw_prompt: str) -> dict[str, str]:
+    text = str(raw_prompt or "").replace("\r\n", "\n")
+    if not text.strip():
+        return {}
+    lines = text.split("\n")
+    sections: dict[str, list[str]] = {}
+    current_heading = "__preamble__"
+    sections[current_heading] = []
+    heading_re = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
+    label_re = re.compile(r"^\s*([A-Z][A-Za-z0-9 /()'\"_-]{2,})\s*:\s*$")
+    for line in lines:
+        heading_match = heading_re.match(line)
+        if heading_match:
+            current_heading = str(heading_match.group(1) or "").strip().lower()
+            sections.setdefault(current_heading, [])
+            continue
+        label_match = label_re.match(line)
+        if label_match and not line.strip().startswith("-"):
+            current_heading = str(label_match.group(1) or "").strip().lower()
+            sections.setdefault(current_heading, [])
+            continue
+        sections.setdefault(current_heading, []).append(line)
+    cleaned: dict[str, str] = {}
+    for heading, body_lines in sections.items():
+        body = "\n".join(body_lines).strip()
+        if not body:
+            continue
+        cleaned[str(heading or "").strip().lower()] = body
+    return cleaned
+
+
+def _pick_prompt_section(sections: dict[str, str], *candidates: str) -> str:
+    for candidate in candidates:
+        token = str(candidate or "").strip().lower()
+        if not token:
+            continue
+        for key, value in sections.items():
+            if token in key and str(value or "").strip():
+                return str(value).strip()
+    return ""
+
+
+def _contains_phrase(text: str, *phrases: str) -> bool:
+    corpus = str(text or "").lower()
+    return any(str(phrase or "").lower() in corpus for phrase in phrases if str(phrase or "").strip())
+
+
+def _infer_primitives_from_text(text: str) -> list[str]:
+    prompt = str(text or "").lower()
+    primitives: list[str] = []
+    primitive_keyword_map: list[tuple[str, tuple[str, ...]]] = [
+        ("access_control", ("authorization", "access control", "capability enforcement", "role-based access")),
+        ("lifecycle", ("lifecycle", "transition", "stateful control")),
+        ("orchestration", ("orchestration", "scheduling", "job execution", "pipeline")),
+        ("run_history", ("run history", "operational records", "job history")),
+        ("source_connector", ("source connector", "source connector / import", "source import", "ingestion")),
+        ("source_governance", ("source governance", "readiness", "activation")),
+        ("artifact_storage", ("artifact persistence", "raw artifact", "snapshot artifact")),
+        ("changed_data_publication", ("changed-data publication", "reconciled-state", "reconciled property-level state")),
+        ("provenance_audit", ("provenance", "audit", "lineage")),
+        ("geospatial", ("postgis", "geospatial", "map", "spatial")),
+        ("parcel_identity", ("parcel identity", "crosswalk", "canonical parcel", "handle")),
+        ("matching", ("matching", "match evaluation")),
+        ("watch_subscription", ("watch", "subscription", "campaign")),
+        ("notifications", ("notification", "signal feed", "signal list")),
+    ]
+    for primitive, keywords in primitive_keyword_map:
+        if any(keyword in prompt for keyword in keywords):
+            primitives.append(primitive)
+    if _contains_phrase(prompt, "location", "locations", "address", "site", "building", "room"):
+        primitives.append("location")
+    return _normalize_unique_strings(primitives)
+
+
+def _extract_workflow_blocks_from_prompt(raw_prompt: str) -> list[dict[str, Any]]:
+    sections = _extract_prompt_sections(raw_prompt)
+    blocks: list[dict[str, Any]] = []
+    for heading, body in sections.items():
+        if "workflow" not in heading:
+            continue
+        workflow_key = _safe_slug(heading.replace("workflow", "").strip() or heading, default="workflow")
+        blocks.append(
+            {
+                "workflow_key": workflow_key,
+                "workflow_label": _title_case_words(heading.replace("workflow", "").strip() or heading),
+                "description": str(body).strip(),
+                "requires_primitives": _infer_primitives_from_text(body),
+            }
+        )
+    return blocks
+
+
+def _build_structured_plan_snapshot(raw_prompt: str) -> dict[str, Any]:
+    sections = _extract_prompt_sections(raw_prompt)
+    workflow_blocks = _extract_workflow_blocks_from_prompt(raw_prompt)
+    snapshot = {
+        "application_overview": _pick_prompt_section(sections, "application overview", "purpose"),
+        "domain_model": _pick_prompt_section(sections, "domain model", "property model", "signal model"),
+        "workflow_definitions": workflow_blocks,
+        "platform_primitive_composition": [
+            {
+                "workflow_key": str(item.get("workflow_key") or ""),
+                "workflow_label": str(item.get("workflow_label") or ""),
+                "requires_primitives": _normalize_unique_strings(item.get("requires_primitives") if isinstance(item.get("requires_primitives"), list) else []),
+            }
+            for item in workflow_blocks
+            if isinstance(item, dict)
+        ],
+        "evaluation_semantics": _pick_prompt_section(sections, "evaluation semantics", "changed-data and evaluation semantics"),
+        "admin_user_separation": _pick_prompt_section(sections, "admin vs user separation", "role separation", "admin/operator workflow", "end-user workflow"),
+        "ui_surfaces": _pick_prompt_section(sections, "ui surface", "ui expectations", "mvp ui", "ui with at least"),
+        "configurability": _pick_prompt_section(sections, "configurability", "campaign constraints"),
+        "explicit_exclusions": _pick_prompt_section(sections, "explicit exclusions"),
+    }
+    if not any(str(value or "").strip() for key, value in snapshot.items() if key != "workflow_definitions" and key != "platform_primitive_composition") and not workflow_blocks:
+        return {}
+    return snapshot
+
+
 def _infer_entities_from_app_spec(app_spec: dict[str, Any]) -> list[str]:
     contract_rows = app_spec.get("entity_contracts") if isinstance(app_spec.get("entity_contracts"), list) else []
     contract_keys = _normalize_unique_strings(
@@ -2143,10 +2498,10 @@ def _build_app_spec(
     requires_primitives = _normalize_unique_strings(
         base_spec.get("requires_primitives") if isinstance(base_spec.get("requires_primitives"), list) else []
     )
-    if any(token in prompt for token in ("location", "locations", "address", "site", "rack", "closet", "building", "room")):
-        requires_primitives.append("location")
+    requires_primitives.extend(_infer_primitives_from_text(raw_prompt))
     if "locations" in entities and "location" not in requires_primitives:
         requires_primitives.append("location")
+    structured_plan = _build_structured_plan_snapshot(raw_prompt)
 
     phase_1_scope = _normalize_unique_strings(
         (
@@ -2171,6 +2526,16 @@ def _build_app_spec(
     spec["reports"] = reports
     if entity_contracts:
         spec["entity_contracts"] = entity_contracts
+    if structured_plan:
+        spec["structured_plan"] = structured_plan
+        if structured_plan.get("workflow_definitions"):
+            spec["workflow_definitions"] = copy.deepcopy(structured_plan.get("workflow_definitions"))
+        if structured_plan.get("platform_primitive_composition"):
+            spec["platform_primitive_composition"] = copy.deepcopy(structured_plan.get("platform_primitive_composition"))
+        if str(structured_plan.get("ui_surfaces") or "").strip():
+            spec["ui_surfaces"] = str(structured_plan.get("ui_surfaces") or "").strip()
+        if str(structured_plan.get("domain_model") or "").strip():
+            spec["domain_model"] = str(structured_plan.get("domain_model") or "").strip()
     spec["services"] = [
         {
             "name": app_service_name,
@@ -2266,6 +2631,23 @@ def _materialize_net_inventory_compose(
         separators=(",", ":"),
         sort_keys=True,
     ).replace("'", "''")
+    workflow_definitions_json = json.dumps(
+        app_spec.get("workflow_definitions") if isinstance(app_spec.get("workflow_definitions"), list) else [],
+        separators=(",", ":"),
+        sort_keys=True,
+    ).replace("'", "''")
+    primitive_composition_json = json.dumps(
+        app_spec.get("platform_primitive_composition") if isinstance(app_spec.get("platform_primitive_composition"), list) else [],
+        separators=(",", ":"),
+        sort_keys=True,
+    ).replace("'", "''")
+    requires_primitives_json = json.dumps(
+        app_spec.get("requires_primitives") if isinstance(app_spec.get("requires_primitives"), list) else [],
+        separators=(",", ":"),
+        sort_keys=True,
+    ).replace("'", "''")
+    ui_surfaces_text = " ".join(str(app_spec.get("ui_surfaces") or "").splitlines()).replace('"', '\\"')
+    shell_base_url = str(os.getenv("XYN_SHELL_BASE_URL", "http://localhost:3000") or "").strip()
     policy_bundle_json = json.dumps(policy_bundle or {}, separators=(",", ":"), sort_keys=True).replace("'", "''")
     app_image = str(app_service.get("image") or _effective_net_inventory_image())
     app_ports = _ports_yaml(list(app_service.get("ports") or [{"host": 0, "container": 8080, "protocol": "tcp"}]))
@@ -2317,6 +2699,11 @@ def _materialize_net_inventory_compose(
                 f"      DATABASE_URL: \"{str(app_env.get('DATABASE_URL') or f'postgresql://{db_user}:{db_password}@{db_service_name}:5432/{db_name}')}\"",
                 f"      GENERATED_ENTITY_CONTRACTS_JSON: '{entity_contracts_json}'",
                 f"      GENERATED_POLICY_BUNDLE_JSON: '{policy_bundle_json}'",
+                f"      GENERATED_WORKFLOW_DEFINITIONS_JSON: '{workflow_definitions_json}'",
+                f"      GENERATED_PLATFORM_PRIMITIVE_COMPOSITION_JSON: '{primitive_composition_json}'",
+                f"      GENERATED_REQUIRES_PRIMITIVES_JSON: '{requires_primitives_json}'",
+                f"      GENERATED_UI_SURFACES_TEXT: \"{ui_surfaces_text}\"",
+                f"      SHELL_BASE_URL: \"{shell_base_url}\"",
                 "      GENERATED_ENTITY_CONTRACTS_ALLOW_DEFAULTS: \"0\"",
                 "    ports:",
                 *app_ports,
@@ -2498,10 +2885,13 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
     )
     registry_artifact: dict[str, Any] = {}
     registry_import_error = ""
+    workspace = db.query(Workspace).filter(Workspace.id == job.workspace_id).first()
+    workspace_slug = str(getattr(workspace, "slug", "development") or "development")
     try:
         registry_artifact = _import_generated_artifact_package(
             artifact_slug=str(packaged_artifact["artifact_slug"]),
             package_path=Path(str(packaged_artifact["artifact_package_path"])),
+            workspace_slug=workspace_slug,
         )
         _append_job_log(
             logs,
@@ -2699,6 +3089,7 @@ def _handle_provision_sibling_xyn(db: Session, job: Job, logs: list[str]) -> tup
             artifact_slug=preferred_artifact_slug,
             package_path=preferred_artifact_package_path,
             port=8000,
+            workspace_slug=workspace_slug,
         )
         _append_job_log(
             logs,
@@ -3062,15 +3453,17 @@ def _exercise_runtime_contracts(
     while pending:
         progressed = False
         for contract in pending[:]:
+            entity_key = str(contract.get("key") or "").strip()
             relationships = contract.get("relationships") if isinstance(contract.get("relationships"), list) else []
             deps = {
                 str(rel.get("target_entity") or "").strip()
                 for rel in relationships
-                if isinstance(rel, dict) and str(rel.get("target_entity") or "").strip()
+                if isinstance(rel, dict)
+                and str(rel.get("target_entity") or "").strip()
+                and str(rel.get("target_entity") or "").strip() != entity_key
             }
             if any(dep not in created_records for dep in deps):
                 continue
-            entity_key = str(contract.get("key") or "").strip()
             collection_path = str(contract.get("collection_path") or f"/{entity_key}").strip()
             _ensure_parent_status_gate_prerequisites(
                 container_name=container_name,
@@ -3211,11 +3604,29 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
             ),
             None,
         )
-        if not isinstance(registry_match, dict):
-            raise RuntimeError(
-                f"Generated artifact {generated_artifact_slug}@{generated_artifact_version} not found in registry catalog"
-            )
-        registry_catalog = registry_match
+        if isinstance(registry_match, dict):
+            registry_catalog = registry_match
+        else:
+            # Generated app artifacts may be installed successfully even when they do not
+            # appear in the platform catalog endpoint immediately (or at all).
+            installed_artifact = sibling.get("installed_artifact") if isinstance(sibling.get("installed_artifact"), dict) else {}
+            installed_slug = str(installed_artifact.get("artifact_slug") or "").strip()
+            installed_id = str(installed_artifact.get("artifact_id") or "").strip()
+            if installed_slug == generated_artifact_slug and installed_id:
+                registry_catalog = {
+                    "source": "installed_artifact_fallback",
+                    "artifact_slug": installed_slug,
+                    "artifact_id": installed_id,
+                    "artifact_version": generated_artifact_version,
+                }
+                _append_job_log(
+                    logs,
+                    "Generated artifact not present in catalog; using installed artifact evidence from provisioning output.",
+                )
+            else:
+                raise RuntimeError(
+                    f"Generated artifact {generated_artifact_slug}@{generated_artifact_version} not found in registry catalog"
+                )
 
     sibling_project = str(sibling.get("compose_project") or "").strip()
     sibling_api_container = f"{sibling_project}-api" if sibling_project else ""
