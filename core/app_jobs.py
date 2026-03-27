@@ -35,6 +35,10 @@ from core.context_packs import default_instance_workspace_root
 from core.capability_manifest import build_manifest_suggestions, build_resolved_capability_manifest
 from core.execution_notes import create_execution_note, update_execution_note
 from core.models import Artifact, Job, JobStatus, Workspace
+from core.appspec import entity_inference as appspec_entity_inference
+from core.appspec import normalization as appspec_normalization
+from core.appspec import primitive_inference as appspec_primitive_inference
+from core.appspec import prompt_sections as appspec_prompt_sections
 from core.palette_engine import execute_palette_prompt
 from core.primitives import get_primitive_catalog
 from core.provisioning_local import ProvisionLocalRequest, provision_local_instance
@@ -2424,7 +2428,10 @@ def _build_app_spec(
         "reports": [],
     }
 
-    extracted_title = _extract_app_name_from_prompt(raw_prompt, fallback=title or str(base_spec.get("title") or "Generated App"))
+    extracted_title = appspec_entity_inference._extract_app_name_from_prompt(
+        raw_prompt,
+        fallback=title or str(base_spec.get("title") or "Generated App"),
+    )
     app_slug = str(base_spec.get("app_slug") or "").strip() or (
         "net-inventory" if mentions_inventory else _safe_slug(extracted_title, default=_safe_slug(title, default="generated-app"))
     )
@@ -2432,54 +2439,60 @@ def _build_app_spec(
     db_name = _safe_slug(app_slug, default="generated-app").replace("-", "_")
     app_service_name = f"{app_slug}-api"
     db_service_name = f"{app_slug}-db"
-    requested_entities = _normalize_unique_strings(
+    requested_entities = appspec_normalization._normalize_unique_strings(
         (
             (initial_intent or {}).get("requested_entities")
             if isinstance((initial_intent or {}).get("requested_entities"), list)
             else []
         )
     )
-    requested_visuals = _normalize_unique_strings(
+    requested_visuals = appspec_normalization._normalize_unique_strings(
         (
             (initial_intent or {}).get("requested_visuals")
             if isinstance((initial_intent or {}).get("requested_visuals"), list)
             else []
         )
     )
-    inferred_entities = _infer_entities_from_prompt(raw_prompt)
-    inferred_visuals = _infer_requested_visuals_from_prompt(raw_prompt)
-    existing_entities = _infer_entities_from_app_spec(base_spec)
-    summary_entities = _normalize_unique_strings(
+    inferred_entities = appspec_entity_inference._infer_entities_from_prompt(raw_prompt)
+    inferred_visuals = appspec_entity_inference._infer_requested_visuals_from_prompt(raw_prompt)
+    existing_entities = appspec_entity_inference._infer_entities_from_app_spec(base_spec)
+    summary_entities = appspec_normalization._normalize_unique_strings(
         (
             (current_app_summary or {}).get("entities")
             if isinstance((current_app_summary or {}).get("entities"), list)
             else []
         )
     )
-    generated_contracts = _build_entity_contracts_from_prompt(raw_prompt)
+    generated_contracts = appspec_entity_inference._build_entity_contracts_from_prompt(raw_prompt)
     current_contracts = (
         copy.deepcopy(base_spec.get("entity_contracts"))
         if isinstance(base_spec.get("entity_contracts"), list)
         else []
     )
     entity_contracts = copy.deepcopy(current_contracts or generated_contracts)
-    entities = _normalize_unique_strings(existing_entities + summary_entities + requested_entities + inferred_entities)
+    entities = appspec_normalization._normalize_unique_strings(
+        existing_entities + summary_entities + requested_entities + inferred_entities
+    )
     if entity_contracts:
-        contract_keys = _normalize_unique_strings(
+        contract_keys = appspec_normalization._normalize_unique_strings(
             [str(row.get("key") or "").strip() for row in entity_contracts if isinstance(row, dict)]
         )
-        entities = _normalize_unique_strings(contract_keys + entities)
+        entities = appspec_normalization._normalize_unique_strings(contract_keys + entities)
     if not entities:
         raise RuntimeError(
             "AppSpec generation could not derive any entity contracts from the request. "
             "The generic builder must not silently fall back to inventory semantics."
         )
 
-    existing_reports = _normalize_unique_strings(base_spec.get("reports") if isinstance(base_spec.get("reports"), list) else [])
+    existing_reports = appspec_normalization._normalize_unique_strings(
+        base_spec.get("reports") if isinstance(base_spec.get("reports"), list) else []
+    )
     reports = existing_reports[:]
-    visuals = _normalize_unique_strings(
+    visuals = appspec_normalization._normalize_unique_strings(
         (
-            _normalize_unique_strings(base_spec.get("requested_visuals") if isinstance(base_spec.get("requested_visuals"), list) else [])
+            appspec_normalization._normalize_unique_strings(
+                base_spec.get("requested_visuals") if isinstance(base_spec.get("requested_visuals"), list) else []
+            )
             + requested_visuals
             + inferred_visuals
         )
@@ -2495,15 +2508,15 @@ def _build_app_spec(
         if report and report not in reports:
             reports.append(report)
 
-    requires_primitives = _normalize_unique_strings(
+    requires_primitives = appspec_normalization._normalize_unique_strings(
         base_spec.get("requires_primitives") if isinstance(base_spec.get("requires_primitives"), list) else []
     )
-    requires_primitives.extend(_infer_primitives_from_text(raw_prompt))
+    requires_primitives.extend(appspec_primitive_inference._infer_primitives_from_text(raw_prompt))
     if "locations" in entities and "location" not in requires_primitives:
         requires_primitives.append("location")
-    structured_plan = _build_structured_plan_snapshot(raw_prompt)
+    structured_plan = appspec_prompt_sections._build_structured_plan_snapshot(raw_prompt)
 
-    phase_1_scope = _normalize_unique_strings(
+    phase_1_scope = appspec_normalization._normalize_unique_strings(
         (
             (initial_intent or {}).get("phase_1_scope")
             if isinstance((initial_intent or {}).get("phase_1_scope"), list)
@@ -2570,7 +2583,7 @@ def _build_app_spec(
     spec["data"]["postgres"]["required"] = True
     spec["data"]["postgres"]["service"] = db_service_name
     if requires_primitives:
-        spec["requires_primitives"] = _normalize_unique_strings(requires_primitives)
+        spec["requires_primitives"] = appspec_normalization._normalize_unique_strings(requires_primitives)
     if revision_anchor:
         spec["revision_anchor"] = copy.deepcopy(revision_anchor)
     return spec
@@ -3975,3 +3988,32 @@ def stop_app_job_worker(handle: Optional[AppJobWorkerHandle]) -> None:
         return
     handle.stop_event.set()
     handle.thread.join(timeout=5)
+
+
+# AppSpec extraction compatibility shims:
+# Preserve existing private symbol names for callers/tests while delegating
+# to extracted modules without changing behavior.
+_safe_slug = appspec_normalization._safe_slug
+_normalize_unique_strings = appspec_normalization._normalize_unique_strings
+_title_case_words = appspec_normalization._title_case_words
+_pluralize_label = appspec_normalization._pluralize_label
+_contains_phrase = appspec_primitive_inference._contains_phrase
+_infer_primitives_from_text = appspec_primitive_inference._infer_primitives_from_text
+_extract_objective_sections = appspec_prompt_sections._extract_objective_sections
+_extract_prompt_sections = appspec_prompt_sections._extract_prompt_sections
+_pick_prompt_section = appspec_prompt_sections._pick_prompt_section
+_extract_workflow_blocks_from_prompt = appspec_prompt_sections._extract_workflow_blocks_from_prompt
+_build_structured_plan_snapshot = appspec_prompt_sections._build_structured_plan_snapshot
+_extract_app_name_from_prompt = appspec_entity_inference._extract_app_name_from_prompt
+_extract_objective_entities = appspec_entity_inference._extract_objective_entities
+_field_options_from_token = appspec_entity_inference._field_options_from_token
+_sanitize_field_label = appspec_entity_inference._sanitize_field_label
+_field_key = appspec_entity_inference._field_key
+_field_type_for_token = appspec_entity_inference._field_type_for_token
+_build_entity_contracts_from_prompt = appspec_entity_inference._build_entity_contracts_from_prompt
+_infer_entities_from_prompt = appspec_entity_inference._infer_entities_from_prompt
+_infer_requested_visuals_from_prompt = appspec_entity_inference._infer_requested_visuals_from_prompt
+_infer_entities_from_app_spec = appspec_entity_inference._infer_entities_from_app_spec
+_augment_contracts_with_inferred_selection_flags = (
+    appspec_entity_inference._augment_contracts_with_inferred_selection_flags
+)
