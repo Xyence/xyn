@@ -24,7 +24,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import HTTPException
 from jsonschema import ValidationError, validate
 from sqlalchemy.orm import Session
 
@@ -43,7 +42,7 @@ from core.appspec import prompt_sections as appspec_prompt_sections
 from core.appspec import semantic_extractor as appspec_semantic_extractor
 from core.palette_engine import execute_palette_prompt
 from core.primitives import get_primitive_catalog
-from core.provisioning_local import ProvisionLocalRequest, provision_local_instance
+from core.provisioning_local import provision_local_instance
 from core.job_pipeline.stage_contracts import build_follow_up, build_stage_output, parse_stage_input
 from core.job_pipeline.execution_note_coordinator import (
     begin_stage_note,
@@ -61,6 +60,7 @@ from core.generated_artifacts.persistence import (
 from core.policy_bundle import compiler as policy_bundle_compiler
 from core.runtime import adapters as runtime_adapters
 from core.runtime import deploy_local as runtime_deploy_local
+from core.runtime import provision_sibling as runtime_provision_sibling
 
 POLL_SECONDS = float(os.getenv("XYN_APP_JOB_POLL_SECONDS", "2.0"))
 HTTP_TIMEOUT_SECONDS = int(os.getenv("XYN_APP_JOB_HTTP_TIMEOUT", "10"))
@@ -1955,194 +1955,30 @@ def _handle_deploy_app_local(db: Session, job: Job, logs: list[str]) -> tuple[di
 
 
 def _handle_provision_sibling_xyn(db: Session, job: Job, logs: list[str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    payload = parse_stage_input(job.input_json).to_dict()
-    execution_note_artifact_id = str(payload.get("execution_note_artifact_id") or "").strip()
-    deployment = payload.get("deployment") if isinstance(payload.get("deployment"), dict) else {}
-    app_spec = payload.get("app_spec") if isinstance(payload.get("app_spec"), dict) else {}
-    app_slug = _safe_slug(str(app_spec.get("app_slug") or "net-inventory"), default="net-inventory")
-    revision_anchor = app_spec.get("revision_anchor") if isinstance(app_spec.get("revision_anchor"), dict) else {}
-    workspace = db.query(Workspace).filter(Workspace.id == job.workspace_id).first()
-    workspace_slug = str(getattr(workspace, "slug", "default") or "default")
-    sibling: dict[str, Any]
-    reused_sibling = _find_revision_sibling_target(
-        db,
-        root_workspace_id=job.workspace_id,
-        revision_anchor=revision_anchor,
-        app_slug=app_slug,
-    )
-    if reused_sibling:
-        sibling = {
-            "deployment_id": reused_sibling.get("deployment_id"),
-            "compose_project": reused_sibling.get("compose_project"),
-            "ui_url": reused_sibling.get("ui_url"),
-            "api_url": reused_sibling.get("api_url"),
-        }
-        _append_job_log(
-            logs,
-            "Reusing anchored sibling Xyn deployment "
-            f"deployment_id={sibling.get('deployment_id')} ui_url={sibling.get('ui_url')}",
-        )
-    else:
-        sibling_name = _safe_slug(f"smoke-{deployment.get('app_slug') or 'app'}-{str(job.id)[:6]}", default="smoke-app")
-        ui_host = f"{sibling_name}.localhost"
-        api_host = f"api.{sibling_name}.localhost"
-        _append_job_log(logs, f"Provisioning sibling Xyn: name={sibling_name} ui_host={ui_host} api_host={api_host}")
-        try:
-            sibling = provision_local_instance(
-                ProvisionLocalRequest(
-                    name=sibling_name,
-                    force=True,
-                    workspace_slug=workspace_slug,
-                    ui_host=ui_host,
-                    api_host=api_host,
-                    prefer_local_images=_prefer_local_platform_images_for_smoke(),
-                )
-            )
-        except HTTPException as exc:
-            detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
-            raise RuntimeError(f"Sibling provisioning failed: {detail}") from exc
-
-    sibling_output = {
-        "deployment_id": sibling.get("deployment_id"),
-        "compose_project": sibling.get("compose_project"),
-        "ui_url": sibling.get("ui_url"),
-        "api_url": sibling.get("api_url"),
-    }
-    sibling_project = str(sibling.get("compose_project") or "").strip()
-    sibling_api_container = f"{sibling_project}-api" if sibling_project else ""
-    sibling_network = f"{sibling_project}_default" if sibling_project else ""
-    installed_artifact: dict[str, Any] | None = None
-    sibling_runtime: dict[str, Any] | None = None
-    sibling_registry_import: dict[str, Any] = {}
-    generated_artifact = payload.get("generated_artifact") if isinstance(payload.get("generated_artifact"), dict) else {}
-    if sibling_api_container and _docker_container_running(sibling_api_container):
-        preferred_artifact_slug = str(generated_artifact.get("artifact_slug") or "").strip()
-        preferred_artifact_version = str(generated_artifact.get("artifact_version") or "").strip()
-        preferred_artifact_package_path = Path(str(generated_artifact.get("artifact_package_path") or "")).expanduser()
-        if not preferred_artifact_slug or not preferred_artifact_package_path.exists():
-            raise RuntimeError(
-                f"Generated artifact package is missing for sibling install: "
-                f"slug={preferred_artifact_slug or '<empty>'} path={preferred_artifact_package_path}"
-            )
-        sibling_registry_import = _import_generated_artifact_package_into_registry(
-            container_name=sibling_api_container,
-            artifact_slug=preferred_artifact_slug,
-            package_path=preferred_artifact_package_path,
-            port=8000,
-            workspace_slug=workspace_slug,
-        )
-        _append_job_log(
-            logs,
-            f"Imported generated artifact {preferred_artifact_slug}@{preferred_artifact_version or GENERATED_ARTIFACT_VERSION} into sibling registry",
-        )
-        installed_artifact = _install_generated_artifact_in_sibling(
-            sibling_api_container=sibling_api_container,
-            workspace_slug=workspace_slug,
-            artifact_slug=preferred_artifact_slug,
-            artifact_version=preferred_artifact_version,
-        )
-        _append_job_log(
-            logs,
-            f"Installed generated artifact {preferred_artifact_slug}@{preferred_artifact_version or 'latest'} into sibling workspace",
-        )
-    sibling_output["installed_artifact"] = installed_artifact
-    sibling_output["installed_artifact_source"] = "generated"
-    if sibling_registry_import:
-        sibling_output["generated_artifact_registry_import"] = sibling_registry_import
-    _append_job_log(
-        logs,
-        "Installed sibling artifact "
-        f"workspace={installed_artifact.get('workspace_slug')} artifact={installed_artifact.get('artifact_slug')} "
-        "source=generated",
-    )
-    if not sibling_network or not _docker_network_exists(sibling_network):
-        raise RuntimeError(f"Sibling network not available for runtime target registration: {sibling_network or '<empty>'}")
-    sibling_stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    reused_runtime_target = reused_sibling.get("runtime_target") if isinstance(reused_sibling, dict) and isinstance(reused_sibling.get("runtime_target"), dict) else {}
-    sibling_runtime_project = str(reused_runtime_target.get("compose_project") or "").strip() or _safe_slug(
-        f"xyn-sibling-{app_slug}-{str(job.id)[:6]}",
-        default="xyn-sibling-app",
-    )
-    sibling_runtime_dir = _deployments_root() / app_slug / f"sibling-{sibling_stamp}-{str(job.id)[:6]}"
-    sibling_runtime_dir.mkdir(parents=True, exist_ok=True)
-    sibling_runtime = _deploy_generated_runtime(
-        app_spec=app_spec,
-        policy_bundle=payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {},
-        deployment_dir=sibling_runtime_dir,
-        compose_project=sibling_runtime_project,
+    return runtime_provision_sibling.handle_provision_sibling_xyn(
+        db=db,
+        job=job,
         logs=logs,
-        external_network_name=str(reused_runtime_target.get("external_network") or sibling_network),
-        external_network_alias=str(reused_runtime_target.get("network_alias") or f"{sibling_runtime_project}-api"),
+        parse_stage_input_fn=parse_stage_input,
+        safe_slug_fn=_safe_slug,
+        workspace_model=Workspace,
+        find_revision_sibling_target_fn=_find_revision_sibling_target,
+        append_job_log_fn=_append_job_log,
+        provision_local_instance_fn=provision_local_instance,
+        prefer_local_platform_images_for_smoke_fn=_prefer_local_platform_images_for_smoke,
+        docker_container_running_fn=_docker_container_running,
+        import_generated_artifact_package_into_registry_fn=_import_generated_artifact_package_into_registry,
+        install_generated_artifact_in_sibling_fn=_install_generated_artifact_in_sibling,
+        generated_artifact_version=GENERATED_ARTIFACT_VERSION,
+        docker_network_exists_fn=_docker_network_exists,
+        deployments_root_fn=_deployments_root,
+        deploy_generated_runtime_fn=_deploy_generated_runtime,
+        register_sibling_runtime_target_fn=_register_sibling_runtime_target,
+        record_stage_metadata_fn=record_stage_metadata,
+        update_execution_note_fn=update_execution_note,
+        build_stage_output_fn=build_stage_output,
+        build_follow_up_fn=build_follow_up,
     )
-    sibling_runtime.update(
-        {
-            "app_slug": app_slug,
-            "runtime_owner": "sibling",
-            "source_build_job_id": str(payload.get("source_job_id") or ""),
-            "source_workspace_id": str(job.workspace_id),
-        }
-    )
-    registration = _register_sibling_runtime_target(
-        sibling_api_container=sibling_api_container,
-        workspace_id=str(installed_artifact.get("workspace_id") or ""),
-        app_slug=app_slug,
-        artifact_slug=str(installed_artifact.get("artifact_slug") or generated_artifact.get("artifact_slug") or f"app.{app_slug}"),
-        title=str(app_spec.get("title") or app_slug),
-        runtime_target=sibling_runtime,
-    )
-    sibling_output["runtime_target"] = sibling_runtime
-    sibling_output["runtime_registration"] = registration
-    _append_job_log(
-        logs,
-        "Registered sibling-owned runtime target "
-        f"base_url={sibling_runtime.get('runtime_base_url')} workspace={installed_artifact.get('workspace_slug')}",
-    )
-    if execution_note_artifact_id:
-        record_stage_metadata(
-            db,
-            artifact_id=uuid.UUID(execution_note_artifact_id),
-            implementation_summary="Provisioned a sibling Xyn instance as the next validation environment for the generated application.",
-            append_validation=[
-                f"Sibling Xyn provisioned with ui_url={sibling_output.get('ui_url')}",
-                f"Sibling Xyn provisioned with api_url={sibling_output.get('api_url')}",
-                (
-                    f"Installed generated artifact {installed_artifact.get('artifact_slug')} into sibling workspace "
-                    f"{installed_artifact.get('workspace_slug')}"
-                    if installed_artifact
-                    else "No sibling artifact installation was recorded."
-                ),
-                (
-                    f"Registered sibling-owned runtime target {sibling_runtime.get('runtime_base_url')}"
-                    if sibling_runtime
-                    else "No sibling-owned runtime target was registered."
-                ),
-            ],
-            extra_metadata_updates={
-                "sibling_ui_url": sibling_output.get("ui_url"),
-                "sibling_api_url": sibling_output.get("api_url"),
-                "sibling_installed_artifact_slug": installed_artifact.get("artifact_slug") if installed_artifact else None,
-                "sibling_runtime_base_url": sibling_runtime.get("runtime_base_url") if sibling_runtime else None,
-            },
-            update_note=update_execution_note,
-        )
-    stage_output = build_stage_output(
-        output_json=sibling_output,
-        follow_up=[
-            build_follow_up(
-                job_type="smoke_test",
-                input_json={
-                    "deployment": deployment,
-                    "sibling": sibling_output,
-                    "app_spec": app_spec,
-                    "policy_bundle": payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {},
-                    "generated_artifact": generated_artifact,
-                    "execution_note_artifact_id": execution_note_artifact_id,
-                    "source_job_id": str(job.id),
-                },
-            )
-        ],
-    )
-    return stage_output.output_json, [item.to_dict() for item in stage_output.follow_up]
 
 
 def _field_map_from_contract(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
