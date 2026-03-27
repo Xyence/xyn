@@ -1,0 +1,41 @@
+{
+  "schema_version": "xyn.appspec.v0",
+  "app_slug": "invalid-mixed-relationship-aliases",
+  "title": "Invalid Mixed Relationship Aliases",
+  "workspace_id": "b1111111-1111-1111-1111-111111111111",
+  "services": [
+    {
+      "name": "invalid-mixed-api",
+      "image": "xyn-api:latest",
+      "env": {},
+      "ports": [{"container": 8080, "host": 0, "protocol": "tcp"}],
+      "depends_on": []
+    }
+  ],
+  "data": {"postgres": {}},
+  "reports": [],
+  "entity_contracts": [
+    {
+      "key": "votes",
+      "fields": [
+        {
+          "name": "poll_id",
+          "type": "uuid",
+          "relation": {
+            "relation_kind": 12,
+            "target_entity": false,
+            "target_field": "id"
+          }
+        }
+      ],
+      "relationships": [
+        {
+          "field": "poll_id",
+          "target_entity": "polls",
+          "target_field": "id",
+          "relation_kind": true
+        }
+      ]
+    }
+  ]
+}

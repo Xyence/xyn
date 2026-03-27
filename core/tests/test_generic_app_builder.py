@@ -12,6 +12,10 @@ from core.app_jobs import (
     _ensure_parent_status_gate_prerequisites,
     _materialize_net_inventory_compose,
 )
+from core.appspec.schema_profiles import (
+    validate_appspec_default_schema,
+    validate_generated_appspec_strict_profile,
+)
 
 
 TEAM_LUNCH_POLL_PROMPT = (
@@ -114,6 +118,8 @@ class GenericAppBuilderTests(unittest.TestCase):
         self.assertEqual(lunch_option_fields["selected"]["options"], ["yes", "no"])
         vote_fields = [field["name"] for field in contracts["votes"]["fields"]]
         self.assertEqual(vote_fields.count("created_at"), 1)
+        strict_result = validate_generated_appspec_strict_profile(spec)
+        self.assertTrue(strict_result.ok, strict_result.errors)
 
     def test_structured_prompt_preserves_plan_sections_and_primitives(self):
         spec = _build_app_spec(
@@ -143,6 +149,35 @@ class GenericAppBuilderTests(unittest.TestCase):
         self.assertIn("matching", primitives)
         self.assertIn("watch_subscription", primitives)
         self.assertIn("notifications", primitives)
+        strict_result = validate_generated_appspec_strict_profile(spec)
+        self.assertTrue(strict_result.ok, strict_result.errors)
+
+    def test_generated_appspec_strict_profile_fails_for_malformed_generated_contract(self):
+        spec = _build_app_spec(
+            workspace_id=uuid.uuid4(),
+            title="Team Lunch Poll",
+            raw_prompt=TEAM_LUNCH_POLL_PROMPT,
+        )
+        # Default schema remains permissive enough for backward compatibility.
+        validate_appspec_default_schema(spec)
+
+        malformed = dict(spec)
+        malformed_contracts = [dict(row) for row in (spec.get("entity_contracts") or []) if isinstance(row, dict)]
+        self.assertTrue(malformed_contracts)
+        malformed_contracts[0] = dict(malformed_contracts[0])
+        malformed_contracts[0]["future_nested"] = {"not": "allowed_in_strict_generated_profile"}
+        malformed_fields = [dict(row) for row in (malformed_contracts[0].get("fields") or []) if isinstance(row, dict)]
+        self.assertTrue(malformed_fields)
+        malformed_fields[0] = dict(malformed_fields[0])
+        malformed_fields[0].pop("type", None)
+        malformed_contracts[0]["fields"] = malformed_fields
+        malformed["entity_contracts"] = malformed_contracts
+
+        # Compatibility mode still accepts this shape by design.
+        validate_appspec_default_schema(malformed)
+        strict_result = validate_generated_appspec_strict_profile(malformed)
+        self.assertFalse(strict_result.ok)
+        self.assertTrue(any("strict profile" in row.lower() for row in strict_result.errors))
 
     def test_label_style_ui_expectations_are_captured_in_structured_plan(self):
         spec = _build_app_spec(

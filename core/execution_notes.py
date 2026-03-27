@@ -65,6 +65,7 @@ def create_execution_note(
             "Validation",
             "Recorded Debt or Transitional Behavior",
         ],
+        "extra_metadata": dict(extra_metadata or {}),
     }
     text, byte_length = _serialize_payload(payload)
     path = _notes_root() / f"{artifact_id}.json"
@@ -156,6 +157,10 @@ def update_execution_note(
         current["related_artifact_ids"] = list(related_artifact_ids)
     if status is not None:
         current["status"] = status
+    if extra_metadata_updates:
+        payload_extra = dict(current.get("extra_metadata") or {}) if isinstance(current.get("extra_metadata"), dict) else {}
+        payload_extra.update(extra_metadata_updates)
+        current["extra_metadata"] = payload_extra
     current["updated_at"] = _utc_now().isoformat()
     text, byte_length = _serialize_payload(current)
     path.write_text(text, encoding="utf-8")

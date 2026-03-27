@@ -1,0 +1,28 @@
+{
+  "schema_version": "xyn.appspec.v0",
+  "app_slug": "invalid-contract-shapes",
+  "title": "Invalid Contract Shapes",
+  "workspace_id": "44444444-4444-4444-4444-444444444444",
+  "services": [
+    {
+      "name": "invalid-api",
+      "image": "xyn-api:latest",
+      "env": {},
+      "ports": [{"container": 8080, "host": 0, "protocol": "tcp"}],
+      "depends_on": []
+    }
+  ],
+  "data": {"postgres": {}},
+  "reports": [],
+  "entity_contracts": [
+    {
+      "key": 123,
+      "singular_label": true,
+      "fields": "not-an-array",
+      "relationships": "not-an-array",
+      "operations": [],
+      "presentation": [],
+      "validation": []
+    }
+  ]
+}
