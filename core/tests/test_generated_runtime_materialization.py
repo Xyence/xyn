@@ -9,7 +9,12 @@ from pathlib import Path
 from unittest import mock
 
 from core.app_jobs import _build_app_spec, _build_policy_bundle, _materialize_net_inventory_compose, _package_generated_app, _prefer_local_platform_images_for_smoke
-from core.provisioning_local import ProvisionLocalRequest, _ensure_remote_workspace, _resolve_images_for_provision
+from core.provisioning_local import (
+    ProvisionLocalRequest,
+    _compose_down_cmd,
+    _ensure_remote_workspace,
+    _resolve_images_for_provision,
+)
 
 
 class GeneratedRuntimeMaterializationTests(unittest.TestCase):
@@ -342,6 +347,20 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
     def test_app_smoke_can_opt_out_of_local_platform_images(self):
         with mock.patch.dict("os.environ", {"XYN_APP_SMOKE_PREFER_LOCAL_IMAGES": "false"}, clear=False):
             self.assertFalse(_prefer_local_platform_images_for_smoke())
+
+    def test_compose_down_cmd_is_non_destructive_by_default(self):
+        cmd = _compose_down_cmd(project="xyn-local", compose_path=Path("/tmp/compose.yaml"))
+        self.assertEqual(
+            cmd,
+            ["docker", "compose", "-p", "xyn-local", "-f", "/tmp/compose.yaml", "down", "--remove-orphans"],
+        )
+
+    def test_compose_down_cmd_includes_volumes_only_for_explicit_reset(self):
+        cmd = _compose_down_cmd(project="xyn-local", compose_path=Path("/tmp/compose.yaml"), reset_state=True)
+        self.assertEqual(
+            cmd,
+            ["docker", "compose", "-p", "xyn-local", "-f", "/tmp/compose.yaml", "down", "--remove-orphans", "--volumes"],
+        )
 
 
 if __name__ == "__main__":
