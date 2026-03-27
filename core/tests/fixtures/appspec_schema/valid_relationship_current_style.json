@@ -1,0 +1,44 @@
+{
+  "schema_version": "xyn.appspec.v0",
+  "app_slug": "relationship-current",
+  "title": "Relationship Current",
+  "workspace_id": "88888888-8888-8888-8888-888888888888",
+  "services": [
+    {
+      "name": "relationship-api",
+      "image": "xyn-api:latest",
+      "env": {},
+      "ports": [{"container": 8080, "host": 0, "protocol": "tcp"}],
+      "depends_on": []
+    }
+  ],
+  "data": {"postgres": {}},
+  "reports": [],
+  "entity_contracts": [
+    {
+      "key": "votes",
+      "fields": [
+        {"name": "id", "type": "uuid"},
+        {
+          "name": "poll_id",
+          "type": "uuid",
+          "relation": {
+            "relation_kind": "belongs_to",
+            "target_entity": "polls",
+            "target_field": "id",
+            "required": true
+          }
+        }
+      ],
+      "relationships": [
+        {
+          "field": "poll_id",
+          "target_entity": "polls",
+          "target_field": "id",
+          "relation_kind": "belongs_to",
+          "required": true
+        }
+      ]
+    }
+  ]
+}

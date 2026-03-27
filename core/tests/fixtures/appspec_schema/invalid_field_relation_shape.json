@@ -1,0 +1,26 @@
+{
+  "schema_version": "xyn.appspec.v0",
+  "app_slug": "invalid-field-relation",
+  "title": "Invalid Field Relation",
+  "workspace_id": "99999999-9999-9999-9999-999999999999",
+  "services": [
+    {
+      "name": "invalid-rel-api",
+      "image": "xyn-api:latest",
+      "env": {},
+      "ports": [{"container": 8080, "host": 0, "protocol": "tcp"}],
+      "depends_on": []
+    }
+  ],
+  "data": {"postgres": {}},
+  "reports": [],
+  "entity_contracts": [
+    {
+      "key": "votes",
+      "fields": [
+        {"name": "poll_id", "type": "uuid", "relation": "belongs_to"}
+      ],
+      "relationships": []
+    }
+  ]
+}

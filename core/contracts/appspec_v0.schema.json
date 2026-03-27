@@ -110,8 +110,22 @@
                 "default": {},
                 "references_entity": {"type": "string"},
                 "references_field": {"type": "string"},
-                "options": {"type": "array", "items": {"type": "string"}}
-              }
+                "options": {"type": "array", "items": {"type": "string"}},
+                "relation": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {"type": "string"},
+                    "relation_kind": {"type": "string"},
+                    "related_entity": {"type": "string"},
+                    "target_entity": {"type": "string"},
+                    "source_field": {"type": "string"},
+                    "field": {"type": "string"},
+                    "target_field": {"type": "string"},
+                    "required": {"type": "boolean"}
+                  }
+                }
+              },
+              "additionalProperties": true
             }
           },
           "relationships": {
@@ -120,14 +134,19 @@
               "type": "object",
               "properties": {
                 "kind": {"type": "string"},
+                "relation_kind": {"type": "string"},
                 "related_entity": {"type": "string"},
+                "target_entity": {"type": "string"},
                 "source_field": {"type": "string"},
+                "field": {"type": "string"},
                 "target_field": {"type": "string"},
                 "required": {"type": "boolean"}
-              }
+              },
+              "additionalProperties": true
             }
           }
-        }
+        },
+        "additionalProperties": true
       }
     }
   }
