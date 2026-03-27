@@ -478,6 +478,8 @@ def _run(cmd: list[str], cwd: Optional[Path] = None) -> tuple[int, str, str]:
 
 
 def _compose_cmd() -> list[str]:
+    if shutil.which("docker"):
+        return ["docker", "compose"]
     if shutil.which("docker-compose"):
         return ["docker-compose"]
     return ["docker", "compose"]
