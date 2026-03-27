@@ -12,11 +12,9 @@ import copy
 import json
 import os
 import re
-import subprocess
 import threading
 import time
 import uuid
-import base64
 import hashlib
 import io
 import zipfile
@@ -61,6 +59,8 @@ from core.generated_artifacts.persistence import (
     persist_policy_artifact as _persist_policy_artifact,
 )
 from core.policy_bundle import compiler as policy_bundle_compiler
+from core.runtime import adapters as runtime_adapters
+from core.runtime import deploy_local as runtime_deploy_local
 
 POLL_SECONDS = float(os.getenv("XYN_APP_JOB_POLL_SECONDS", "2.0"))
 HTTP_TIMEOUT_SECONDS = int(os.getenv("XYN_APP_JOB_HTTP_TIMEOUT", "10"))
@@ -143,20 +143,7 @@ def _policy_bundle_slug(app_slug: str) -> str:
 
 
 def _run(cmd: list[str], *, cwd: Optional[Path] = None) -> tuple[int, str, str]:
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(cwd) if cwd else None,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=COMMAND_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired as exc:
-        stdout = (exc.stdout or "").strip() if isinstance(exc.stdout, str) else ""
-        stderr = (exc.stderr or "").strip() if isinstance(exc.stderr, str) else ""
-        return 124, stdout, stderr or f"command timed out after {COMMAND_TIMEOUT_SECONDS}s"
-    return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
+    return runtime_adapters.run_command(cmd, cwd=cwd, timeout_seconds=COMMAND_TIMEOUT_SECONDS)
 
 
 def _container_http_json(
@@ -167,55 +154,14 @@ def _container_http_json(
     port: int,
     payload: Optional[dict[str, Any]] = None,
 ) -> tuple[int, dict[str, Any], str]:
-    script = f"""
-import json
-import urllib.error
-import urllib.request
-
-method = {method!r}
-path = {path!r}
-payload = {payload or {}!r}
-url = "http://localhost:{port}" + path
-data = None
-headers = {{"Content-Type": "application/json"}}
-if method in ("POST", "PUT", "PATCH"):
-    data = json.dumps(payload).encode("utf-8")
-req = urllib.request.Request(url, method=method, headers=headers, data=data)
-try:
-    with urllib.request.urlopen(req, timeout={HTTP_TIMEOUT_SECONDS}) as resp:
-        body = resp.read().decode("utf-8", errors="ignore")
-        print(json.dumps({{"code": int(resp.status), "body": body}}))
-except urllib.error.HTTPError as exc:
-    body = exc.read().decode("utf-8", errors="ignore")
-    print(json.dumps({{"code": int(exc.code), "body": body}}))
-except Exception as exc:
-    print(json.dumps({{"code": 0, "body": str(exc)}}))
-"""
-    proc = subprocess.run(
-        ["docker", "exec", "-i", container_name, "python", "-"],
-        input=script,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=HTTP_TIMEOUT_SECONDS + 5,
+    return runtime_adapters.container_http_json(
+        container_name,
+        method,
+        path,
+        port=port,
+        payload=payload,
+        http_timeout_seconds=HTTP_TIMEOUT_SECONDS,
     )
-    if proc.returncode != 0:
-        return 0, {}, proc.stderr.strip() or proc.stdout.strip()
-    out = (proc.stdout or "").strip().splitlines()
-    if not out:
-        return 0, {}, "empty container response"
-    line = out[-1].strip()
-    try:
-        payload_json = json.loads(line)
-    except json.JSONDecodeError:
-        return 0, {}, line
-    code = int(payload_json.get("code") or 0)
-    raw_body = str(payload_json.get("body") or "")
-    try:
-        body_json = json.loads(raw_body) if raw_body else {}
-    except json.JSONDecodeError:
-        body_json = {}
-    return code, body_json, raw_body
 
 
 def _container_http_session_json(
@@ -224,84 +170,12 @@ def _container_http_session_json(
     steps: list[dict[str, Any]],
     port: int,
 ) -> tuple[int, dict[str, Any], str]:
-    script = f"""
-import http.cookiejar
-import json
-import urllib.error
-import urllib.parse
-import urllib.request
-
-steps = {steps!r}
-
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-opener = urllib.request.build_opener(
-    urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
-    NoRedirect(),
-)
-last = {{"code": 0, "body": "", "json": {{}}}}
-
-for step in steps:
-    method = str(step.get("method") or "GET").upper()
-    path = str(step.get("path") or "/")
-    body = step.get("body")
-    form = step.get("form")
-    headers = dict(step.get("headers") or {{}})
-    data = None
-    if form is not None:
-        headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
-        data = urllib.parse.urlencode(form).encode("utf-8")
-    elif body is not None:
-        headers.setdefault("Content-Type", "application/json")
-        data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(f"http://localhost:{port}" + path, method=method, headers=headers, data=data)
-    try:
-        with opener.open(req, timeout={HTTP_TIMEOUT_SECONDS}) as resp:
-            raw = resp.read().decode("utf-8", errors="ignore")
-            try:
-                payload = json.loads(raw) if raw else {{}}
-            except json.JSONDecodeError:
-                payload = {{}}
-            last = {{"code": int(resp.status), "body": raw, "json": payload}}
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="ignore")
-        try:
-            payload = json.loads(raw) if raw else {{}}
-        except json.JSONDecodeError:
-                payload = {{}}
-        last = {{"code": int(exc.code), "body": raw, "json": payload}}
-        if int(exc.code) not in {{301, 302, 303, 307, 308}}:
-            break
-    except Exception as exc:
-        last = {{"code": 0, "body": str(exc), "json": {{}}}}
-        break
-
-print(json.dumps(last))
-"""
-    proc = subprocess.run(
-        ["docker", "exec", "-i", container_name, "python", "-"],
-        input=script,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=HTTP_TIMEOUT_SECONDS + 10,
+    return runtime_adapters.container_http_session_json(
+        container_name,
+        steps=steps,
+        port=port,
+        http_timeout_seconds=HTTP_TIMEOUT_SECONDS,
     )
-    if proc.returncode != 0:
-        return 0, {}, proc.stderr.strip() or proc.stdout.strip()
-    out = (proc.stdout or "").strip().splitlines()
-    if not out:
-        return 0, {}, "empty container response"
-    line = out[-1].strip()
-    try:
-        payload_json = json.loads(line)
-    except json.JSONDecodeError:
-        return 0, {}, line
-    code = int(payload_json.get("code") or 0)
-    raw_body = str(payload_json.get("body") or "")
-    body_json = payload_json.get("json") if isinstance(payload_json.get("json"), dict) else {}
-    return code, body_json, raw_body
 
 
 def _container_http_session_upload_json(
@@ -314,57 +188,16 @@ def _container_http_session_upload_json(
     file_bytes: bytes,
     extra_form: Optional[dict[str, Any]] = None,
 ) -> tuple[int, dict[str, Any], str]:
-    blob_b64 = base64.b64encode(file_bytes).decode("ascii")
-    script = f"""
-import base64
-import json
-import requests
-
-session = requests.Session()
-login = session.post(
-    "http://localhost:{port}/auth/dev-login",
-    data={{"appId": "xyn-ui", "returnTo": "/app"}},
-    allow_redirects=False,
-    timeout={HTTP_TIMEOUT_SECONDS},
-)
-if login.status_code not in (200, 302, 303):
-    print(json.dumps({{"code": int(login.status_code), "body": login.text}}))
-    raise SystemExit(0)
-session.get("http://localhost:{port}/xyn/api/me", timeout={HTTP_TIMEOUT_SECONDS})
-blob = base64.b64decode({blob_b64!r})
-resp = session.post(
-    "http://localhost:{port}" + {upload_path!r},
-    data={extra_form or {}!r},
-    files={{{file_field!r}: ({filename!r}, blob, "application/zip")}},
-    timeout={HTTP_TIMEOUT_SECONDS},
-)
-print(json.dumps({{"code": int(resp.status_code), "body": resp.text}}))
-"""
-    proc = subprocess.run(
-        ["docker", "exec", "-i", container_name, "python", "-"],
-        input=script,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=HTTP_TIMEOUT_SECONDS + 15,
+    return runtime_adapters.container_http_session_upload_json(
+        container_name,
+        port=port,
+        upload_path=upload_path,
+        file_field=file_field,
+        filename=filename,
+        file_bytes=file_bytes,
+        extra_form=extra_form,
+        http_timeout_seconds=HTTP_TIMEOUT_SECONDS,
     )
-    if proc.returncode != 0:
-        return 0, {}, proc.stderr.strip() or proc.stdout.strip()
-    out = (proc.stdout or "").strip().splitlines()
-    if not out:
-        return 0, {}, "empty container response"
-    line = out[-1].strip()
-    try:
-        payload_json = json.loads(line)
-    except json.JSONDecodeError:
-        return 0, {}, line
-    code = int(payload_json.get("code") or 0)
-    raw_body = str(payload_json.get("body") or "")
-    try:
-        body_json = json.loads(raw_body) if raw_body else {}
-    except json.JSONDecodeError:
-        body_json = {}
-    return code, body_json, raw_body
 
 
 def _extract_ui_surface_lines(app_spec: dict[str, Any]) -> list[str]:
@@ -1044,13 +877,13 @@ def _execute_sibling_palette_prompt(
 
 
 def _wait_for_container_http_ok(container_name: str, path: str, *, port: int, timeout_seconds: int = 60) -> bool:
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
-        code, _, _ = _container_http_json(container_name, "GET", path, port=port)
-        if code == 200:
-            return True
-        time.sleep(2)
-    return False
+    return runtime_adapters.wait_for_container_http_ok(
+        container_name,
+        path,
+        port=port,
+        timeout_seconds=timeout_seconds,
+        http_timeout_seconds=HTTP_TIMEOUT_SECONDS,
+    )
 
 
 def _append_job_log(log_lines: list[str], message: str) -> None:
@@ -1845,34 +1678,18 @@ def _build_app_spec(
 
 
 def _ports_yaml(ports: list[dict[str, Any]]) -> list[str]:
-    lines: list[str] = []
-    for port in ports:
-        host_port = int(port.get("host") or 0)
-        container_port = int(port.get("container") or 0)
-        protocol = str(port.get("protocol") or "tcp").strip().lower()
-        if protocol not in {"tcp", "udp"}:
-            protocol = "tcp"
-        lines.append(f'      - "{host_port}:{container_port}/{protocol}"')
-    return lines
+    return runtime_deploy_local.ports_yaml(ports)
 
 
 def _resolve_published_port(container_name: str, target: str) -> int:
-    code, stdout, stderr = _run(["docker", "port", container_name, target])
-    if code != 0:
-        raise RuntimeError(f"Failed to resolve published port for {container_name} {target}: {stderr or stdout}")
-    first = (stdout.splitlines() or [""])[0].strip()
-    if ":" not in first:
-        raise RuntimeError(f"Unexpected docker port output: {first}")
-    return int(first.rsplit(":", 1)[1])
+    return runtime_adapters.resolve_published_port(container_name, target)
 
 
 def _docker_container_running(container_name: str) -> bool:
-    code, stdout, _ = _run(["docker", "inspect", "-f", "{{.State.Running}}", container_name])
-    return code == 0 and stdout.strip().lower() == "true"
+    return runtime_adapters.docker_container_running(container_name)
 
 def _docker_network_exists(network_name: str) -> bool:
-    code, stdout, _ = _run(["docker", "network", "inspect", network_name])
-    return code == 0 and bool(stdout.strip())
+    return runtime_adapters.docker_network_exists(network_name)
 
 
 def _materialize_net_inventory_compose(
@@ -1884,109 +1701,17 @@ def _materialize_net_inventory_compose(
     external_network_name: str | None = None,
     external_network_alias: str | None = None,
 ) -> Path:
-    services = [row for row in app_spec.get("services", []) if isinstance(row, dict)]
-    db_service = next((row for row in services if "postgres" in str(row.get("image") or "").lower()), {})
-    app_service = next((row for row in services if row is not db_service), {})
-    app_service_name = str(app_service.get("name") or "generated-app-api").strip() or "generated-app-api"
-    db_service_name = str(db_service.get("name") or "generated-app-db").strip() or "generated-app-db"
-    db_env = db_service.get("env") if isinstance(db_service.get("env"), dict) else {}
-    app_env = app_service.get("env") if isinstance(app_service.get("env"), dict) else {}
-    db_name = str(db_env.get("POSTGRES_DB") or "generated_app").strip() or "generated_app"
-    db_user = str(db_env.get("POSTGRES_USER") or "xyn").strip() or "xyn"
-    db_password = str(db_env.get("POSTGRES_PASSWORD") or "xyn_dev_password").strip() or "xyn_dev_password"
-    entity_contracts_json = json.dumps(
-        build_resolved_capability_manifest(app_spec).get("entities") or [],
-        separators=(",", ":"),
-        sort_keys=True,
-    ).replace("'", "''")
-    workflow_definitions_json = json.dumps(
-        app_spec.get("workflow_definitions") if isinstance(app_spec.get("workflow_definitions"), list) else [],
-        separators=(",", ":"),
-        sort_keys=True,
-    ).replace("'", "''")
-    primitive_composition_json = json.dumps(
-        app_spec.get("platform_primitive_composition") if isinstance(app_spec.get("platform_primitive_composition"), list) else [],
-        separators=(",", ":"),
-        sort_keys=True,
-    ).replace("'", "''")
-    requires_primitives_json = json.dumps(
-        app_spec.get("requires_primitives") if isinstance(app_spec.get("requires_primitives"), list) else [],
-        separators=(",", ":"),
-        sort_keys=True,
-    ).replace("'", "''")
-    ui_surfaces_text = " ".join(str(app_spec.get("ui_surfaces") or "").splitlines()).replace('"', '\\"')
-    shell_base_url = str(os.getenv("XYN_SHELL_BASE_URL", "http://localhost:3000") or "").strip()
-    policy_bundle_json = json.dumps(policy_bundle or {}, separators=(",", ":"), sort_keys=True).replace("'", "''")
-    app_image = str(app_service.get("image") or _effective_net_inventory_image())
-    app_ports = _ports_yaml(list(app_service.get("ports") or [{"host": 0, "container": 8080, "protocol": "tcp"}]))
-    app_network_lines: list[str] = []
-    trailer_lines: list[str] = []
-    if external_network_name:
-        alias = str(external_network_alias or f"{compose_project}-api").strip() or f"{compose_project}-api"
-        app_network_lines = [
-            "    networks:",
-            "      default:",
-            "      sibling-runtime:",
-            "        aliases:",
-            f"          - {alias}",
-        ]
-        trailer_lines = [
-            "",
-            "networks:",
-            "  sibling-runtime:",
-            "    external: true",
-            f"    name: {external_network_name}",
-        ]
-    compose = deployment_dir / "docker-compose.yml"
-    compose.write_text(
-        "\n".join(
-            [
-                "services:",
-                f"  {db_service_name}:",
-                f"    image: {db_service.get('image') or 'postgres:16-alpine'}",
-                f"    container_name: {compose_project}-db",
-                "    restart: unless-stopped",
-                "    environment:",
-                f"      POSTGRES_DB: \"{db_name}\"",
-                f"      POSTGRES_USER: \"{db_user}\"",
-                f"      POSTGRES_PASSWORD: \"{db_password}\"",
-                "    healthcheck:",
-                f"      test: [\"CMD-SHELL\", \"pg_isready -U {db_user} -d {db_name}\"]",
-                "      interval: 5s",
-                "      timeout: 5s",
-                "      retries: 20",
-                "",
-                f"  {app_service_name}:",
-                f"    image: {app_image}",
-                f"    container_name: {compose_project}-api",
-                "    restart: unless-stopped",
-                "    environment:",
-                f"      PORT: \"{str(app_env.get('PORT') or '8080')}\"",
-                f"      SERVICE_NAME: \"{str(app_env.get('SERVICE_NAME') or app_service_name)}\"",
-                f"      APP_TITLE: \"{str(app_env.get('APP_TITLE') or app_spec.get('title') or app_service_name)}\"",
-                f"      DATABASE_URL: \"{str(app_env.get('DATABASE_URL') or f'postgresql://{db_user}:{db_password}@{db_service_name}:5432/{db_name}')}\"",
-                f"      GENERATED_ENTITY_CONTRACTS_JSON: '{entity_contracts_json}'",
-                f"      GENERATED_POLICY_BUNDLE_JSON: '{policy_bundle_json}'",
-                f"      GENERATED_WORKFLOW_DEFINITIONS_JSON: '{workflow_definitions_json}'",
-                f"      GENERATED_PLATFORM_PRIMITIVE_COMPOSITION_JSON: '{primitive_composition_json}'",
-                f"      GENERATED_REQUIRES_PRIMITIVES_JSON: '{requires_primitives_json}'",
-                f"      GENERATED_UI_SURFACES_TEXT: \"{ui_surfaces_text}\"",
-                f"      SHELL_BASE_URL: \"{shell_base_url}\"",
-                "      GENERATED_ENTITY_CONTRACTS_ALLOW_DEFAULTS: \"0\"",
-                "    ports:",
-                *app_ports,
-                *app_network_lines,
-                "    depends_on:",
-                f"      {db_service_name}:",
-                "        condition: service_healthy",
-                "",
-                *trailer_lines,
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
+    return runtime_deploy_local.materialize_net_inventory_compose(
+        app_spec=app_spec,
+        policy_bundle=policy_bundle,
+        deployment_dir=deployment_dir,
+        compose_project=compose_project,
+        external_network_name=external_network_name,
+        external_network_alias=external_network_alias,
+        build_resolved_capability_manifest_fn=build_resolved_capability_manifest,
+        effective_net_inventory_image_fn=_effective_net_inventory_image,
+        ports_yaml_fn=_ports_yaml,
     )
-    return compose
 
 
 def _deploy_generated_runtime(
@@ -1999,47 +1724,19 @@ def _deploy_generated_runtime(
     external_network_name: str | None = None,
     external_network_alias: str | None = None,
 ) -> dict[str, Any]:
-    compose_path = _materialize_net_inventory_compose(
+    return runtime_deploy_local.deploy_generated_runtime(
         app_spec=app_spec,
         policy_bundle=policy_bundle,
         deployment_dir=deployment_dir,
         compose_project=compose_project,
+        logs=logs,
         external_network_name=external_network_name,
         external_network_alias=external_network_alias,
+        materialize_compose_fn=_materialize_net_inventory_compose,
+        append_job_log_fn=_append_job_log,
+        run_fn=_run,
+        resolve_published_port_fn=_resolve_published_port,
     )
-    _append_job_log(logs, f"Wrote compose: {compose_path}")
-
-    down_cmd = ["docker", "compose", "-p", compose_project, "-f", str(compose_path), "down", "--remove-orphans", "--volumes"]
-    up_cmd = ["docker", "compose", "-p", compose_project, "-f", str(compose_path), "up", "-d"]
-    down_code, down_stdout, down_stderr = _run(down_cmd, cwd=deployment_dir)
-    _append_job_log(logs, f"Executed: {' '.join(down_cmd)}")
-    if down_stdout:
-        _append_job_log(logs, f"compose down stdout: {down_stdout[-600:]}")
-    if down_stderr:
-        _append_job_log(logs, f"compose down stderr: {down_stderr[-600:]}")
-    code, stdout, stderr = _run(up_cmd, cwd=deployment_dir)
-    _append_job_log(logs, f"Executed: {' '.join(up_cmd)}")
-    if stdout:
-        _append_job_log(logs, f"compose stdout: {stdout[-600:]}")
-    if code != 0:
-        _run(["docker", "compose", "-p", compose_project, "-f", str(compose_path), "down", "--remove-orphans"], cwd=deployment_dir)
-        raise RuntimeError(f"docker compose up failed: {stderr or stdout}")
-    app_port = _resolve_published_port(f"{compose_project}-api", "8080/tcp")
-    alias = str(external_network_alias or f"{compose_project}-api").strip() or f"{compose_project}-api"
-    output = {
-        "compose_project": compose_project,
-        "deployment_dir": str(deployment_dir),
-        "compose_path": str(compose_path),
-        "app_container_name": f"{compose_project}-api",
-        "app_url": f"http://localhost:{app_port}",
-        "ports": {"app_tcp": app_port},
-    }
-    if external_network_name:
-        output["runtime_base_url"] = f"http://{alias}:8080"
-        output["runtime_owner"] = "sibling"
-        output["external_network"] = external_network_name
-        output["network_alias"] = alias
-    return output
 
 
 def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -2240,60 +1937,21 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
 
 
 def _handle_deploy_app_local(db: Session, job: Job, logs: list[str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    payload = parse_stage_input(job.input_json).to_dict()
-    execution_note_artifact_id = str(payload.get("execution_note_artifact_id") or "").strip()
-    generated_artifact = payload.get("generated_artifact") if isinstance(payload.get("generated_artifact"), dict) else {}
-    app_spec = payload.get("app_spec") if isinstance(payload.get("app_spec"), dict) else {}
-    policy_bundle = payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {}
-    app_slug = _safe_slug(str(app_spec.get("app_slug") or "net-inventory"), default="net-inventory")
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    deployment_dir = _deployments_root() / app_slug / stamp
-    deployment_dir.mkdir(parents=True, exist_ok=True)
-    compose_project = _safe_slug(f"xyn-app-{app_slug}", default="xyn-app")
-    app_output = {
-        "app_slug": app_slug,
-        **_deploy_generated_runtime(
-            app_spec=app_spec,
-            policy_bundle=policy_bundle,
-            deployment_dir=deployment_dir,
-            compose_project=compose_project,
-            logs=logs,
-        ),
-    }
-    if execution_note_artifact_id:
-        record_stage_metadata(
-            db,
-            artifact_id=uuid.UUID(execution_note_artifact_id),
-            implementation_summary="Materialized local docker-compose deployment for the generated app and resolved a running app URL.",
-            append_validation=[
-                f"Compose written: {app_output['compose_path']}",
-                f"Local deployment started successfully at {app_output['app_url']}.",
-            ],
-            related_artifact_ids=[
-                *[str(item) for item in (payload.get('app_spec_artifact_id'), execution_note_artifact_id) if item],
-            ],
-            extra_metadata_updates={"app_url": app_output["app_url"], "compose_project": compose_project},
-            update_note=update_execution_note,
-        )
-    _append_job_log(logs, f"Local app URL: {app_output['app_url']}")
-    _append_job_log(logs, "Queued sibling provisioning stage")
-    stage_output = build_stage_output(
-        output_json=app_output,
-        follow_up=[
-            build_follow_up(
-                job_type="provision_sibling_xyn",
-                input_json={
-                    "deployment": app_output,
-                    "app_spec": app_spec,
-                    "policy_bundle": policy_bundle,
-                    "generated_artifact": generated_artifact,
-                    "execution_note_artifact_id": execution_note_artifact_id,
-                    "source_job_id": str(job.id),
-                },
-            )
-        ],
+    return runtime_deploy_local.handle_deploy_app_local(
+        db=db,
+        job=job,
+        logs=logs,
+        parse_stage_input_fn=parse_stage_input,
+        safe_slug_fn=_safe_slug,
+        deployments_root_fn=_deployments_root,
+        utc_now_fn=_utc_now,
+        deploy_generated_runtime_fn=_deploy_generated_runtime,
+        record_stage_metadata_fn=record_stage_metadata,
+        update_execution_note_fn=update_execution_note,
+        append_job_log_fn=_append_job_log,
+        build_stage_output_fn=build_stage_output,
+        build_follow_up_fn=build_follow_up,
     )
-    return stage_output.output_json, [item.to_dict() for item in stage_output.follow_up]
 
 
 def _handle_provision_sibling_xyn(db: Session, job: Job, logs: list[str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
