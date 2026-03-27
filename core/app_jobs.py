@@ -38,6 +38,7 @@ from core.models import Artifact, Job, JobStatus, Workspace
 from core.appspec import entity_inference as appspec_entity_inference
 from core.appspec import canonicalize as appspec_canonicalize
 from core.appspec import consistency as appspec_consistency
+from core.appspec import contract_validation as appspec_contract_validation
 from core.appspec import normalization as appspec_normalization
 from core.appspec import primitive_inference as appspec_primitive_inference
 from core.appspec import prompt_sections as appspec_prompt_sections
@@ -2412,7 +2413,42 @@ def _infer_entities_from_app_spec(app_spec: dict[str, Any]) -> list[str]:
     return _normalize_unique_strings(inferred)
 
 
-def _build_app_spec(
+def _score_prompt_structure(raw_prompt: str) -> float:
+    sections = appspec_prompt_sections._extract_objective_sections(raw_prompt)
+    prompt_sections = appspec_prompt_sections._extract_prompt_sections(raw_prompt)
+    objective_entities = appspec_entity_inference._extract_objective_entities(raw_prompt)
+    contracts = appspec_entity_inference._build_entity_contracts_from_prompt(raw_prompt)
+    section_presence = sum(
+        1
+        for key in ("core_entities", "behavior", "views", "validation")
+        if isinstance(sections.get(key), list) and len(sections.get(key) or []) > 0
+    )
+    heading_presence = len(prompt_sections)
+    field_total = 0
+    for row in objective_entities:
+        fields = row.get("fields") if isinstance(row.get("fields"), list) else []
+        field_total += len(fields)
+    score = 0.0
+    if section_presence >= 2:
+        score += 0.4
+    elif section_presence == 1:
+        score += 0.2
+    if heading_presence >= 3:
+        score += 0.2
+    elif heading_presence >= 1:
+        score += 0.1
+    if len(objective_entities) >= 3 or len(contracts) >= 3:
+        score += 0.25
+    elif objective_entities or contracts:
+        score += 0.15
+    if field_total >= 4:
+        score += 0.15
+    elif field_total > 0:
+        score += 0.05
+    return max(0.0, min(1.0, score))
+
+
+def _build_app_spec_with_diagnostics(
     *,
     workspace_id: uuid.UUID,
     title: str,
@@ -2421,41 +2457,7 @@ def _build_app_spec(
     current_app_spec: Optional[dict[str, Any]] = None,
     current_app_summary: Optional[dict[str, Any]] = None,
     revision_anchor: Optional[dict[str, Any]] = None,
-) -> dict[str, Any]:
-    def _score_prompt_structure(raw: str) -> float:
-        sections = appspec_prompt_sections._extract_objective_sections(raw)
-        prompt_sections = appspec_prompt_sections._extract_prompt_sections(raw)
-        objective_entities = appspec_entity_inference._extract_objective_entities(raw)
-        contracts = appspec_entity_inference._build_entity_contracts_from_prompt(raw)
-        section_presence = sum(
-            1
-            for key in ("core_entities", "behavior", "views", "validation")
-            if isinstance(sections.get(key), list) and len(sections.get(key) or []) > 0
-        )
-        heading_presence = len(prompt_sections)
-        field_total = 0
-        for row in objective_entities:
-            fields = row.get("fields") if isinstance(row.get("fields"), list) else []
-            field_total += len(fields)
-        score = 0.0
-        if section_presence >= 2:
-            score += 0.4
-        elif section_presence == 1:
-            score += 0.2
-        if heading_presence >= 3:
-            score += 0.2
-        elif heading_presence >= 1:
-            score += 0.1
-        if len(objective_entities) >= 3 or len(contracts) >= 3:
-            score += 0.25
-        elif objective_entities or contracts:
-            score += 0.15
-        if field_total >= 4:
-            score += 0.15
-        elif field_total > 0:
-            score += 0.05
-        return max(0.0, min(1.0, score))
-
+) -> tuple[dict[str, Any], dict[str, Any]]:
     prompt = raw_prompt.lower()
     mentions_inventory = any(token in prompt for token in ("inventory", "device", "devices", "network"))
     base_spec = copy.deepcopy(current_app_spec) if isinstance(current_app_spec, dict) else {
@@ -2494,8 +2496,13 @@ def _build_app_spec(
     route = "A" if structure_score >= 0.8 else "B" if structure_score >= 0.4 else "C"
     semantic_used = route in {"B", "C"}
     semantic_payload: dict[str, Any] = {"entities": [], "entity_contracts": [], "requested_visuals": []}
+    semantic_diagnostics: dict[str, Any] = {
+        "llm_used": False,
+        "fallback_used": False,
+        "repair_used": False,
+    }
     if semantic_used:
-        semantic_payload = appspec_semantic_extractor.extract_semantic_inference(
+        semantic_payload, semantic_diagnostics = appspec_semantic_extractor.extract_semantic_inference_with_diagnostics(
             raw_prompt,
             prefer_llm=(route in {"B", "C"}),
         )
@@ -2556,6 +2563,8 @@ def _build_app_spec(
     entity_contracts = [copy.deepcopy(row.contract) for row in interpretation.entity_contracts]
     if not entity_contracts and merged_contract_candidates:
         entity_contracts = [copy.deepcopy(row) for row in merged_contract_candidates if isinstance(row, dict)]
+    contract_validation = appspec_contract_validation.validate_and_normalize_entity_contracts(entity_contracts)
+    entity_contracts = contract_validation.contracts
     entities = appspec_normalization._normalize_unique_strings([row.key for row in interpretation.entities])
     if not entities:
         raise RuntimeError(
@@ -2661,6 +2670,38 @@ def _build_app_spec(
         spec["requires_primitives"] = appspec_normalization._normalize_unique_strings(requires_primitives)
     if revision_anchor:
         spec["revision_anchor"] = copy.deepcopy(revision_anchor)
+    diagnostics = {
+        "structure_score": round(structure_score, 3),
+        "route": route,
+        "llm_used": bool(semantic_diagnostics.get("llm_used")),
+        "consistency_warnings": list(consistency_result.warnings) + list(contract_validation.warnings),
+        "consistency_errors": list(consistency_result.errors) + list(contract_validation.errors),
+        "fallback_or_repair_used": bool(
+            semantic_diagnostics.get("fallback_used") or semantic_diagnostics.get("repair_used")
+        ),
+    }
+    return spec, diagnostics
+
+
+def _build_app_spec(
+    *,
+    workspace_id: uuid.UUID,
+    title: str,
+    raw_prompt: str,
+    initial_intent: Optional[dict[str, Any]] = None,
+    current_app_spec: Optional[dict[str, Any]] = None,
+    current_app_summary: Optional[dict[str, Any]] = None,
+    revision_anchor: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    spec, _ = _build_app_spec_with_diagnostics(
+        workspace_id=workspace_id,
+        title=title,
+        raw_prompt=raw_prompt,
+        initial_intent=initial_intent,
+        current_app_spec=current_app_spec,
+        current_app_summary=current_app_summary,
+        revision_anchor=revision_anchor,
+    )
     return spec
 
 
@@ -2899,7 +2940,7 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
     # AppSpec remains primarily a build intermediate. Future work may
     # consolidate AppSpec into an ArtifactSpec so prompts generate artifacts
     # directly while preserving the current packaging and install semantics.
-    app_spec = _build_app_spec(
+    app_spec, inference_diagnostics = _build_app_spec_with_diagnostics(
         workspace_id=job.workspace_id,
         title=title,
         raw_prompt=raw_prompt,
@@ -2929,7 +2970,7 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
         name=f"appspec.{app_spec['app_slug']}",
         kind="app_spec",
         payload=app_spec,
-        metadata={"job_id": str(job.id)},
+        metadata={"job_id": str(job.id), "inference_diagnostics": inference_diagnostics},
     )
     _append_job_log(logs, f"Persisted AppSpec artifact: {artifact_id}")
     policy_bundle_artifact_id = _persist_json_artifact(
@@ -3006,7 +3047,11 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
             ),
         ],
         related_artifact_ids=[artifact_id, policy_bundle_artifact_id],
-        extra_metadata_updates={"app_spec_artifact_id": artifact_id, "policy_bundle_artifact_id": policy_bundle_artifact_id},
+        extra_metadata_updates={
+            "app_spec_artifact_id": artifact_id,
+            "policy_bundle_artifact_id": policy_bundle_artifact_id,
+            "inference_diagnostics": inference_diagnostics,
+        },
     )
     follow_up = [
         {
@@ -3034,6 +3079,7 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
             "policy_bundle_artifact_id": policy_bundle_artifact_id,
             "app_spec_schema": "xyn.appspec.v0",
             "policy_bundle_schema": "xyn.policy_bundle.v0",
+            "inference_diagnostics": inference_diagnostics,
             "primitive_catalog": primitive_catalog,
             "selected_images": selected_images,
             "selected_ports": selected_ports,

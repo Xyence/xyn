@@ -188,23 +188,49 @@ def extract_semantic_inference(
     prefer_llm: bool = False,
     force_llm: bool = False,
 ) -> dict[str, Any]:
+    payload, _ = extract_semantic_inference_with_diagnostics(
+        raw_prompt,
+        prefer_llm=prefer_llm,
+        force_llm=force_llm,
+    )
+    return payload
+
+
+def extract_semantic_inference_with_diagnostics(
+    raw_prompt: str,
+    *,
+    prefer_llm: bool = False,
+    force_llm: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     llm_enabled = str(os.getenv("XYN_APPSPEC_ENABLE_LLM_FALLBACK", "")).strip().lower() in {"1", "true", "yes", "on"}
     use_llm = force_llm or (prefer_llm and llm_enabled)
     payload: dict[str, Any]
     payload_from_llm = False
+    fallback_used = False
+    repair_used = False
     if use_llm:
         try:
             payload = _extract_via_codex(raw_prompt)
             payload_from_llm = True
         except Exception:
             payload = _heuristic_semantic_extract(raw_prompt)
+            fallback_used = True
     else:
         payload = _heuristic_semantic_extract(raw_prompt)
     if payload_from_llm and not _payload_types_valid(payload):
         payload = _heuristic_semantic_extract(raw_prompt)
+        fallback_used = True
+        repair_used = True
     normalized = _normalize_semantic_payload(payload)
     try:
         validate(instance=normalized, schema=_SEMANTIC_SCHEMA)
     except ValidationError:
         normalized = _normalize_semantic_payload(_heuristic_semantic_extract(raw_prompt))
-    return normalized
+        fallback_used = True
+        repair_used = True
+    diagnostics = {
+        "llm_used": bool(payload_from_llm),
+        "fallback_used": bool(fallback_used),
+        "repair_used": bool(repair_used),
+    }
+    return normalized, diagnostics

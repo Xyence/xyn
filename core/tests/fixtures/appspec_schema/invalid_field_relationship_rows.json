@@ -1,0 +1,30 @@
+{
+  "schema_version": "xyn.appspec.v0",
+  "app_slug": "invalid-row-shapes",
+  "title": "Invalid Row Shapes",
+  "workspace_id": "55555555-5555-5555-5555-555555555555",
+  "services": [
+    {
+      "name": "invalid-rows-api",
+      "image": "xyn-api:latest",
+      "env": {},
+      "ports": [{"container": 8080, "host": 0, "protocol": "tcp"}],
+      "depends_on": []
+    }
+  ],
+  "data": {"postgres": {}},
+  "reports": [],
+  "entity_contracts": [
+    {
+      "key": "tickets",
+      "fields": [
+        "bad-row",
+        {"name": 42, "type": true}
+      ],
+      "relationships": [
+        "bad-rel",
+        {"kind": 1, "related_entity": false}
+      ]
+    }
+  ]
+}

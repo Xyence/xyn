@@ -84,7 +84,51 @@
     },
     "entity_contracts": {
       "type": "array",
-      "items": {"type": "object"}
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {"type": "string"},
+          "singular_label": {"type": "string"},
+          "plural_label": {"type": "string"},
+          "collection_path": {"type": "string"},
+          "item_path_template": {"type": "string"},
+          "operations": {"type": "object"},
+          "presentation": {"type": "object"},
+          "validation": {"type": "object"},
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {"type": "string"},
+                "type": {"type": "string"},
+                "required": {"type": "boolean"},
+                "readable": {"type": "boolean"},
+                "writable": {"type": "boolean"},
+                "identity": {"type": "boolean"},
+                "nullable": {"type": "boolean"},
+                "default": {},
+                "references_entity": {"type": "string"},
+                "references_field": {"type": "string"},
+                "options": {"type": "array", "items": {"type": "string"}}
+              }
+            }
+          },
+          "relationships": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {"type": "string"},
+                "related_entity": {"type": "string"},
+                "source_field": {"type": "string"},
+                "target_field": {"type": "string"},
+                "required": {"type": "boolean"}
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

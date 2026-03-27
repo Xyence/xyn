@@ -1,0 +1,25 @@
+{
+  "schema_version": "xyn.appspec.v0",
+  "app_slug": "unknown-keys",
+  "title": "Unknown Keys",
+  "workspace_id": "77777777-7777-7777-7777-777777777777",
+  "services": [
+    {
+      "name": "unknown-api",
+      "image": "xyn-api:latest",
+      "env": {},
+      "ports": [{"container": 8080, "host": 0, "protocol": "tcp"}],
+      "depends_on": []
+    }
+  ],
+  "data": {"postgres": {}},
+  "reports": [],
+  "future_ext": {"enabled": true},
+  "entity_contracts": [
+    {
+      "key": "signals",
+      "fields": [{"name": "name", "type": "string"}],
+      "future_nested": {"x": 1}
+    }
+  ]
+}

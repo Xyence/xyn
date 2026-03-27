@@ -1,0 +1,25 @@
+{
+  "schema_version": "xyn.appspec.v0",
+  "app_slug": "loose-compatible",
+  "title": "Loose Compatible",
+  "workspace_id": "66666666-6666-6666-6666-666666666666",
+  "services": [
+    {
+      "name": "loose-api",
+      "image": "xyn-api:latest",
+      "env": {},
+      "ports": [{"container": 8080, "host": 0, "protocol": "tcp"}],
+      "depends_on": []
+    }
+  ],
+  "data": {"postgres": {}},
+  "reports": [],
+  "entity_contracts": [
+    {
+      "key": "notes",
+      "fields": "not-a-list",
+      "relationships": "not-a-list",
+      "validation": "not-a-dict"
+    }
+  ]
+}

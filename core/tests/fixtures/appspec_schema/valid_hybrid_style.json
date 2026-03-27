@@ -1,0 +1,38 @@
+{
+  "schema_version": "xyn.appspec.v0",
+  "app_slug": "hybrid-style",
+  "title": "Hybrid Style",
+  "workspace_id": "33333333-3333-3333-3333-333333333333",
+  "source_prompt": "Create a notes tracker with document links",
+  "purpose": "Create a notes tracker with document links",
+  "entities": ["notes", "documents"],
+  "phase_1_scope": ["notes"],
+  "requested_visuals": [],
+  "services": [
+    {
+      "name": "hybrid-api",
+      "image": "xyn-api:latest",
+      "env": {"PORT": "8080"},
+      "ports": [{"container": 8080, "host": 0, "protocol": "tcp"}],
+      "depends_on": []
+    }
+  ],
+  "data": {"postgres": {}},
+  "reports": [],
+  "requires_primitives": ["notes"],
+  "entity_contracts": [
+    {
+      "key": "notes",
+      "fields": [
+        {"name": "id", "type": "uuid", "required": true, "identity": true},
+        {"name": "title", "type": "string", "required": true},
+        {"name": "body", "type": "text"}
+      ],
+      "relationships": [],
+      "custom_extension": {"retained": true}
+    }
+  ],
+  "structured_plan": {
+    "objective": "Track notes and related documents"
+  }
+}
