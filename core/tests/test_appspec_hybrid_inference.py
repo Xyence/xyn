@@ -5,10 +5,69 @@ import uuid
 from unittest import mock
 
 from core.app_jobs import _build_app_spec
+from core.appspec import canonicalize as appspec_canonicalize
+from core.appspec import consistency as appspec_consistency
 from core.appspec import semantic_extractor
 
 
 class AppSpecHybridInferenceTests(unittest.TestCase):
+    def test_duplicate_entity_normalization_in_canonicalize(self):
+        interpretation = appspec_canonicalize.canonicalize_interpretation(
+            route="B",
+            existing_entities=[],
+            summary_entities=[],
+            requested_entities=["Campaigns"],
+            deterministic_entities=["campaigns", "campaigns"],
+            semantic_entities=["campaigns", "signals"],
+            deterministic_contracts=[],
+            semantic_contracts=[],
+            requested_visuals=[],
+            deterministic_visuals=[],
+            semantic_visuals=[],
+            primitive_keys=[],
+        )
+        keys = [row.key for row in interpretation.entities]
+        self.assertEqual(keys.count("campaigns"), 1)
+        self.assertIn("signals", keys)
+
+    def test_contract_entity_consistency_adds_missing_entity(self):
+        interpretation = appspec_canonicalize.canonicalize_interpretation(
+            route="B",
+            existing_entities=[],
+            summary_entities=[],
+            requested_entities=[],
+            deterministic_entities=[],
+            semantic_entities=[],
+            deterministic_contracts=[{"key": "polls", "fields": []}],
+            semantic_contracts=[],
+            requested_visuals=[],
+            deterministic_visuals=[],
+            semantic_visuals=[],
+            primitive_keys=[],
+        )
+        validated = appspec_consistency.validate_interpretation_consistency(interpretation)
+        entity_keys = {row.key for row in validated.interpretation.entities}
+        self.assertIn("polls", entity_keys)
+        self.assertEqual(validated.warnings, [])
+
+    def test_visual_entity_consistency_warns_on_missing_entity(self):
+        interpretation = appspec_canonicalize.canonicalize_interpretation(
+            route="B",
+            existing_entities=[],
+            summary_entities=[],
+            requested_entities=[],
+            deterministic_entities=["campaigns"],
+            semantic_entities=[],
+            deterministic_contracts=[],
+            semantic_contracts=[],
+            requested_visuals=[],
+            deterministic_visuals=["interfaces_by_status_chart"],
+            semantic_visuals=[],
+            primitive_keys=[],
+        )
+        validated = appspec_consistency.validate_interpretation_consistency(interpretation)
+        self.assertTrue(any("interfaces_by_status_chart" in row for row in validated.warnings))
+
     def test_route_a_for_structured_prompt(self):
         prompt = (
             "Build a simple app called Team Lunch Poll. Requirements: Core entities: "
@@ -137,6 +196,39 @@ class AppSpecHybridInferenceTests(unittest.TestCase):
         campaign_fields = {str(field.get("name") or "") for field in contracts["campaigns"].get("fields", []) if isinstance(field, dict)}
         self.assertNotIn("should_not_apply", campaign_fields)
         self.assertIn("api", set(spec.get("entities") or []))
+
+    def test_deterministic_semantic_contract_conflict_warned(self):
+        interpretation = appspec_canonicalize.canonicalize_interpretation(
+            route="B",
+            existing_entities=[],
+            summary_entities=[],
+            requested_entities=[],
+            deterministic_entities=["campaigns"],
+            semantic_entities=["campaigns"],
+            deterministic_contracts=[{"key": "campaigns", "fields": [{"name": "name"}]}],
+            semantic_contracts=[{"key": "campaigns", "fields": [{"name": "different"}]}],
+            requested_visuals=[],
+            deterministic_visuals=[],
+            semantic_visuals=[],
+            primitive_keys=[],
+        )
+        self.assertTrue(any("deterministic contracts are authoritative" in row.lower() for row in interpretation.warnings))
+
+    def test_build_app_spec_shape_stable_after_canonicalization(self):
+        prompt = (
+            "Build a simple app called Team Lunch Poll. Requirements: Core entities: "
+            "1. Poll - title - status (draft, open, closed) "
+            "2. Vote - poll - voter_name "
+            "Behavior: - Users can vote. "
+            "Views / usability: - List polls. "
+            "Validation / rules: - Only open polls accept votes."
+        )
+        spec = _build_app_spec(workspace_id=uuid.uuid4(), title="Team Lunch Poll", raw_prompt=prompt)
+        self.assertEqual(spec.get("schema_version"), "xyn.appspec.v0")
+        self.assertTrue(isinstance(spec.get("services"), list) and spec.get("services"))
+        self.assertTrue(isinstance(spec.get("entities"), list) and spec.get("entities"))
+        self.assertTrue(isinstance(spec.get("reports"), list))
+        self.assertNotIn("inference_diagnostics", spec)
 
 
 if __name__ == "__main__":

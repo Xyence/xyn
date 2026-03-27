@@ -36,6 +36,8 @@ from core.capability_manifest import build_manifest_suggestions, build_resolved_
 from core.execution_notes import create_execution_note, update_execution_note
 from core.models import Artifact, Job, JobStatus, Workspace
 from core.appspec import entity_inference as appspec_entity_inference
+from core.appspec import canonicalize as appspec_canonicalize
+from core.appspec import consistency as appspec_consistency
 from core.appspec import normalization as appspec_normalization
 from core.appspec import primitive_inference as appspec_primitive_inference
 from core.appspec import prompt_sections as appspec_prompt_sections
@@ -2530,24 +2532,31 @@ def _build_app_spec(
         if isinstance(base_spec.get("entity_contracts"), list)
         else []
     )
-    entity_contracts = copy.deepcopy(current_contracts or generated_contracts)
-    if route == "C":
-        entities = appspec_normalization._normalize_unique_strings(
-            semantic_entities + existing_entities + summary_entities + requested_entities + inferred_entities
-        )
-    elif route == "B":
-        entities = appspec_normalization._normalize_unique_strings(
-            existing_entities + summary_entities + requested_entities + inferred_entities + semantic_entities
-        )
-    else:
-        entities = appspec_normalization._normalize_unique_strings(
-            existing_entities + summary_entities + requested_entities + inferred_entities
-        )
-    if entity_contracts:
-        contract_keys = appspec_normalization._normalize_unique_strings(
-            [str(row.get("key") or "").strip() for row in entity_contracts if isinstance(row, dict)]
-        )
-        entities = appspec_normalization._normalize_unique_strings(contract_keys + entities)
+    merged_contract_candidates = copy.deepcopy(current_contracts or generated_contracts)
+    primitive_candidates = appspec_normalization._normalize_unique_strings(
+        base_spec.get("requires_primitives") if isinstance(base_spec.get("requires_primitives"), list) else []
+    )
+    primitive_candidates.extend(appspec_primitive_inference._infer_primitives_from_text(raw_prompt))
+    interpretation = appspec_canonicalize.canonicalize_interpretation(
+        route=route,
+        existing_entities=existing_entities,
+        summary_entities=summary_entities,
+        requested_entities=requested_entities,
+        deterministic_entities=inferred_entities,
+        semantic_entities=semantic_entities,
+        deterministic_contracts=deterministic_contracts,
+        semantic_contracts=semantic_contracts,
+        requested_visuals=requested_visuals,
+        deterministic_visuals=inferred_visuals,
+        semantic_visuals=semantic_visuals,
+        primitive_keys=primitive_candidates,
+    )
+    consistency_result = appspec_consistency.validate_interpretation_consistency(interpretation)
+    interpretation = consistency_result.interpretation
+    entity_contracts = [copy.deepcopy(row.contract) for row in interpretation.entity_contracts]
+    if not entity_contracts and merged_contract_candidates:
+        entity_contracts = [copy.deepcopy(row) for row in merged_contract_candidates if isinstance(row, dict)]
+    entities = appspec_normalization._normalize_unique_strings([row.key for row in interpretation.entities])
     if not entities:
         raise RuntimeError(
             "AppSpec generation could not derive any entity contracts from the request. "
@@ -2559,14 +2568,10 @@ def _build_app_spec(
     )
     reports = existing_reports[:]
     visuals = appspec_normalization._normalize_unique_strings(
-        (
-            appspec_normalization._normalize_unique_strings(
-                base_spec.get("requested_visuals") if isinstance(base_spec.get("requested_visuals"), list) else []
-            )
-            + requested_visuals
-            + inferred_visuals
-            + (semantic_visuals if route in {"B", "C"} else [])
+        appspec_normalization._normalize_unique_strings(
+            base_spec.get("requested_visuals") if isinstance(base_spec.get("requested_visuals"), list) else []
         )
+        + [row.key for row in interpretation.visuals]
     )
     if not entity_contracts and "devices" in entities and "devices_by_status_chart" not in visuals and "devices_by_status" not in reports:
         visuals.append("devices_by_status_chart")
@@ -2580,9 +2585,8 @@ def _build_app_spec(
             reports.append(report)
 
     requires_primitives = appspec_normalization._normalize_unique_strings(
-        base_spec.get("requires_primitives") if isinstance(base_spec.get("requires_primitives"), list) else []
+        [row.key for row in interpretation.primitives]
     )
-    requires_primitives.extend(appspec_primitive_inference._infer_primitives_from_text(raw_prompt))
     if "locations" in entities and "location" not in requires_primitives:
         requires_primitives.append("location")
     structured_plan = appspec_prompt_sections._build_structured_plan_snapshot(raw_prompt)
