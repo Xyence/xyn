@@ -645,6 +645,7 @@ class LocalDevChangeInput(BaseModel):
 class ProvisionLocalRequest(BaseModel):
     name: Optional[str] = None
     force: bool = False
+    reset_state: bool = False
     job: Optional[LocalDevChangeInput] = None
     ui_image: Optional[str] = None
     api_image: Optional[str] = None
@@ -654,6 +655,13 @@ class ProvisionLocalRequest(BaseModel):
     ui_host: Optional[str] = None
     api_host: Optional[str] = None
     prefer_local_images: bool = False
+
+
+def _compose_down_cmd(*, project: str, compose_path: Path, reset_state: bool = False) -> list[str]:
+    cmd = [*_compose_cmd(), "-p", project, "-f", str(compose_path), "down", "--remove-orphans"]
+    if reset_state:
+        cmd.append("--volumes")
+    return cmd
 
 
 def _load_state(deploy_dir: Path) -> Optional[Dict[str, Any]]:
@@ -892,7 +900,11 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
     if _should_refresh_remote_image(artifact_resolution["ui_image"], force=request.force):
         remote_refresh_services.append("ui")
     up_cmd = [*_compose_cmd(), "-p", project, "-f", str(compose_path), "up", "-d"]
-    down_cmd = [*_compose_cmd(), "-p", project, "-f", str(compose_path), "down", "--remove-orphans", "--volumes"]
+    down_cmd = _compose_down_cmd(
+        project=project,
+        compose_path=compose_path,
+        reset_state=bool(request.reset_state),
+    )
     pull_cmd = [*_compose_cmd(), "-p", project, "-f", str(compose_path), "pull", *remote_refresh_services] if remote_refresh_services else []
     ui_host, api_host = _resolved_hosts(
         project,
@@ -909,7 +921,7 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
         api_host=api_host,
     )
     compose_path.write_text(compose_yaml, encoding="utf-8")
-    if request.force:
+    if request.force or request.reset_state:
         _run(down_cmd, cwd=deploy_dir)
     pull_stdout = ""
     pull_stderr = ""

@@ -84,6 +84,7 @@ def _parse_args(argv: list[str]) -> dict[str, Any]:
         "skip_ai_keys": "--skip-ai-keys" in argv,
         "provision": "--provision" in argv,
         "force": "--force" in argv,
+        "reset_state": "--reset-state" in argv,
         "name": None,
         "job_prompt": None,
         "repo_ref": None,
@@ -629,6 +630,7 @@ def _provision_local(
     *,
     name: Optional[str],
     force: bool,
+    reset_state: bool,
     job_prompt: Optional[str],
     repo_ref: Optional[str],
     ui_image: Optional[str],
@@ -642,6 +644,8 @@ def _provision_local(
         payload["name"] = name
     if force:
         payload["force"] = True
+    if reset_state:
+        payload["reset_state"] = True
     if job_prompt:
         payload["job"] = {"prompt": job_prompt, "repo_ref": repo_ref or str(Path.cwd().resolve())}
     if ui_image:
@@ -684,7 +688,16 @@ def start(detached: bool, env: dict[str, str]) -> bool:
     return True
 
 
-def start_with_provision(env: dict[str, str], *, force: bool, name: Optional[str], job_prompt: Optional[str], repo_ref: Optional[str], seed_url: str) -> int:
+def start_with_provision(
+    env: dict[str, str],
+    *,
+    force: bool,
+    reset_state: bool,
+    name: Optional[str],
+    job_prompt: Optional[str],
+    repo_ref: Optional[str],
+    seed_url: str,
+) -> int:
     if not start(detached=True, env=env):
         return 1
     print_info("Waiting for seed API health...")
@@ -731,6 +744,7 @@ def start_with_provision(env: dict[str, str], *, force: bool, name: Optional[str
         seed_url,
         name=name,
         force=force,
+        reset_state=reset_state,
         job_prompt=job_prompt,
         repo_ref=repo_ref,
         ui_image=str(images.get("ui_image") or ""),
@@ -1022,7 +1036,7 @@ def main() -> None:
         sys.exit(apply_release_plan(sys.argv[idx + 1]))
     if cmd == "provision":
         if len(sys.argv) < 3 or sys.argv[2] != "local":
-            print_error("Usage: ./xynctl provision local [--name <name>] [--force] [--job-prompt <text>] [--repo-ref <path>]")
+            print_error("Usage: ./xynctl provision local [--name <name>] [--force] [--reset-state] [--job-prompt <text>] [--repo-ref <path>]")
             sys.exit(1)
         if not preflight(args["skip_ai_keys"]):
             sys.exit(1)
@@ -1054,6 +1068,7 @@ def main() -> None:
             seed_url,
             name=args["name"],
             force=args["force"],
+            reset_state=args["reset_state"],
             job_prompt=args["job_prompt"],
             repo_ref=args["repo_ref"],
             ui_image=str(images.get("ui_image") or ""),
@@ -1076,7 +1091,7 @@ def main() -> None:
         print("  ./xynctl preflight [--skip-ai-keys]")
         print("  ./xynctl start [--attach] [--provision] [--force] [--name <name>] [--job-prompt <text>] [--repo-ref <path>]")
         print("  ./xynctl quickstart [--force] [--name <name>]    # alias for start --provision")
-        print("  ./xynctl provision local [--force] [--name <name>] [--job-prompt <text>] [--repo-ref <path>]")
+        print("  ./xynctl provision local [--force] [--reset-state] [--name <name>] [--job-prompt <text>] [--repo-ref <path>]")
         print("  ./xynctl status")
         print("  ./xynctl stop")
         print("  ./xynctl logs [service]")
@@ -1096,6 +1111,7 @@ def main() -> None:
             start_with_provision(
                 env,
                 force=args["force"],
+                reset_state=args["reset_state"],
                 name=args["name"],
                 job_prompt=args["job_prompt"],
                 repo_ref=args["repo_ref"],
