@@ -39,6 +39,7 @@ from core.appspec import entity_inference as appspec_entity_inference
 from core.appspec import normalization as appspec_normalization
 from core.appspec import primitive_inference as appspec_primitive_inference
 from core.appspec import prompt_sections as appspec_prompt_sections
+from core.appspec import semantic_extractor as appspec_semantic_extractor
 from core.palette_engine import execute_palette_prompt
 from core.primitives import get_primitive_catalog
 from core.provisioning_local import ProvisionLocalRequest, provision_local_instance
@@ -2419,6 +2420,40 @@ def _build_app_spec(
     current_app_summary: Optional[dict[str, Any]] = None,
     revision_anchor: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
+    def _score_prompt_structure(raw: str) -> float:
+        sections = appspec_prompt_sections._extract_objective_sections(raw)
+        prompt_sections = appspec_prompt_sections._extract_prompt_sections(raw)
+        objective_entities = appspec_entity_inference._extract_objective_entities(raw)
+        contracts = appspec_entity_inference._build_entity_contracts_from_prompt(raw)
+        section_presence = sum(
+            1
+            for key in ("core_entities", "behavior", "views", "validation")
+            if isinstance(sections.get(key), list) and len(sections.get(key) or []) > 0
+        )
+        heading_presence = len(prompt_sections)
+        field_total = 0
+        for row in objective_entities:
+            fields = row.get("fields") if isinstance(row.get("fields"), list) else []
+            field_total += len(fields)
+        score = 0.0
+        if section_presence >= 2:
+            score += 0.4
+        elif section_presence == 1:
+            score += 0.2
+        if heading_presence >= 3:
+            score += 0.2
+        elif heading_presence >= 1:
+            score += 0.1
+        if len(objective_entities) >= 3 or len(contracts) >= 3:
+            score += 0.25
+        elif objective_entities or contracts:
+            score += 0.15
+        if field_total >= 4:
+            score += 0.15
+        elif field_total > 0:
+            score += 0.05
+        return max(0.0, min(1.0, score))
+
     prompt = raw_prompt.lower()
     mentions_inventory = any(token in prompt for token in ("inventory", "device", "devices", "network"))
     base_spec = copy.deepcopy(current_app_spec) if isinstance(current_app_spec, dict) else {
@@ -2453,8 +2488,28 @@ def _build_app_spec(
             else []
         )
     )
+    structure_score = _score_prompt_structure(raw_prompt)
+    route = "A" if structure_score >= 0.8 else "B" if structure_score >= 0.4 else "C"
+    semantic_used = route in {"B", "C"}
+    semantic_payload: dict[str, Any] = {"entities": [], "entity_contracts": [], "requested_visuals": []}
+    if semantic_used:
+        semantic_payload = appspec_semantic_extractor.extract_semantic_inference(
+            raw_prompt,
+            prefer_llm=(route in {"B", "C"}),
+        )
     inferred_entities = appspec_entity_inference._infer_entities_from_prompt(raw_prompt)
     inferred_visuals = appspec_entity_inference._infer_requested_visuals_from_prompt(raw_prompt)
+    semantic_entities = appspec_normalization._normalize_unique_strings(
+        semantic_payload.get("entities") if isinstance(semantic_payload.get("entities"), list) else []
+    )
+    semantic_visuals = appspec_normalization._normalize_unique_strings(
+        semantic_payload.get("requested_visuals") if isinstance(semantic_payload.get("requested_visuals"), list) else []
+    )
+    semantic_contracts = [
+        row
+        for row in (semantic_payload.get("entity_contracts") if isinstance(semantic_payload.get("entity_contracts"), list) else [])
+        if isinstance(row, dict)
+    ]
     existing_entities = appspec_entity_inference._infer_entities_from_app_spec(base_spec)
     summary_entities = appspec_normalization._normalize_unique_strings(
         (
@@ -2463,16 +2518,31 @@ def _build_app_spec(
             else []
         )
     )
-    generated_contracts = appspec_entity_inference._build_entity_contracts_from_prompt(raw_prompt)
+    deterministic_contracts = appspec_entity_inference._build_entity_contracts_from_prompt(raw_prompt)
+    if route == "A":
+        generated_contracts = deterministic_contracts
+    elif route == "B":
+        generated_contracts = deterministic_contracts or semantic_contracts
+    else:
+        generated_contracts = semantic_contracts or deterministic_contracts
     current_contracts = (
         copy.deepcopy(base_spec.get("entity_contracts"))
         if isinstance(base_spec.get("entity_contracts"), list)
         else []
     )
     entity_contracts = copy.deepcopy(current_contracts or generated_contracts)
-    entities = appspec_normalization._normalize_unique_strings(
-        existing_entities + summary_entities + requested_entities + inferred_entities
-    )
+    if route == "C":
+        entities = appspec_normalization._normalize_unique_strings(
+            semantic_entities + existing_entities + summary_entities + requested_entities + inferred_entities
+        )
+    elif route == "B":
+        entities = appspec_normalization._normalize_unique_strings(
+            existing_entities + summary_entities + requested_entities + inferred_entities + semantic_entities
+        )
+    else:
+        entities = appspec_normalization._normalize_unique_strings(
+            existing_entities + summary_entities + requested_entities + inferred_entities
+        )
     if entity_contracts:
         contract_keys = appspec_normalization._normalize_unique_strings(
             [str(row.get("key") or "").strip() for row in entity_contracts if isinstance(row, dict)]
@@ -2495,6 +2565,7 @@ def _build_app_spec(
             )
             + requested_visuals
             + inferred_visuals
+            + (semantic_visuals if route in {"B", "C"} else [])
         )
     )
     if not entity_contracts and "devices" in entities and "devices_by_status_chart" not in visuals and "devices_by_status" not in reports:
