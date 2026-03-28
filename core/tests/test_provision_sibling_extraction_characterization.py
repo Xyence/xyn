@@ -74,6 +74,8 @@ class ProvisionSiblingExtractionCharacterizationTests(unittest.TestCase):
         find_mock.assert_called_once()
         self.assertEqual(output_json["ui_url"], "http://sib.localhost")
         self.assertEqual(output_json["installed_artifact"]["artifact_slug"], "app.tracker")
+        self.assertEqual((output_json.get("capability_entry") or {}).get("source_of_truth"), "installed_artifact")
+        self.assertEqual(((output_json.get("capability_entry") or {}).get("open_preference") or {}).get("mode"), "artifact_shell")
         self.assertIn("runtime_target", output_json)
         self.assertEqual(len(follow_up), 1)
         self.assertEqual(follow_up[0]["type"], "smoke_test")

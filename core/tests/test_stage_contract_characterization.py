@@ -158,6 +158,7 @@ class StageContractCharacterizationTests(unittest.TestCase):
 
         self.assertEqual(output_json["ui_url"], "http://sib.localhost")
         self.assertEqual(output_json["installed_artifact"]["artifact_slug"], "app.tracker")
+        self.assertEqual((output_json.get("capability_entry") or {}).get("source_of_truth"), "installed_artifact")
         self.assertIn("runtime_target", output_json)
         self.assertEqual(len(follow_up), 1)
         self.assertEqual(follow_up[0]["type"], "smoke_test")
@@ -231,6 +232,7 @@ class StageContractCharacterizationTests(unittest.TestCase):
 
         self.assertEqual(output_json.get("status"), "passed")
         self.assertIn("platform_plumbing", output_json)
+        self.assertIn("capability_entry", output_json.get("platform_plumbing", {}))
         self.assertIn("generated_app_contract_smoke", output_json)
         self.assertEqual(follow_up, [])
 

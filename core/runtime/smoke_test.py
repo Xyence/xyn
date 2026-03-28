@@ -356,6 +356,7 @@ def handle_smoke_test(
                     "installed_revision_id": generated_artifact_revision_id
                     or str((sibling.get("installed_artifact") or {}).get("artifact_revision_id") or "").strip(),
                 },
+                "capability_entry": sibling.get("capability_entry") if isinstance(sibling.get("capability_entry"), dict) else {},
             },
             "generated_app_contract_smoke": {
                 "local_runtime": local_contract_checks,

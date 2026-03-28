@@ -10,6 +10,7 @@ Description: `xyn-platform` remains the governance authority for context packs. 
 Why It Exists: This is the smallest safe bridge that removes indefinite independent seeding in `xyn-core` without attempting the full publish/import/install architecture.  
 Risk: Runtime consumption and governance remain connected by a local sync contract until manifest fallback is fully retired and all environments use artifact publish/import exclusively.  
 Planned Resolution: Complete migration to published/synced context-pack artifacts and retire manifest fallback once all supported environments are artifact-backed.
+Status: Partially closed. Artifact-backed distribution is primary; manifest remains compatibility fallback.
 
 DEBT-02  
 Title: Generated artifact lifecycle is still partial  
@@ -17,6 +18,7 @@ Description: Sibling Xyn instances now import and install a generated artifact (
 Why It Exists: This remains the smallest safe path while the full generated publish/import/install lifecycle is still incomplete.  
 Risk: Generated artifact identity, sibling runtime realization, and validated evolution behavior are aligned for the demo path, but versioning, promotion semantics, and broader lifecycle management remain incomplete.  
 Planned Resolution: Build the next lifecycle step around explicit generated artifact promotion/distribution semantics, then simplify the remaining generated-app import/install code paths without regressing the current in-place sibling evolution path.
+Status: Partially closed. Lifecycle identity and promotion metadata exist, but end-to-end promotion/distribution remains incomplete.
 
 DEBT-03  
 Title: Clean-baseline migrations are stronger than dirty-dev migration recovery  
@@ -24,13 +26,15 @@ Description: Migration replay is reliable on a clean database, but older drifted
 Why It Exists: The migration framework stabilized after substantial local schema drift had already accumulated.  
 Risk: Developer friction and inconsistent local recovery behavior.  
 Planned Resolution: Either add compatibility repair migrations for known dirty states or document/reset tooling more explicitly.
+Status: Still open.
 
 DEBT-04  
 Title: Legacy UI surfaces still coexist with the newer workbench path  
 Description: Parts of the system still retain legacy Django-era UI behavior and routing while the workbench/prompt-driven UI becomes the intended experience.  
 Why It Exists: The migration from legacy surfaces to the current workbench flow is incomplete.  
 Risk: Architectural inconsistency and demo-path leakage into legacy pages.  
-Planned Resolution: Continue migrating or hard-guarding demo-path entrypoints until the canonical experience is unambiguous.
+Planned Resolution: Continue migrating or hard-guarding demo-path entrypoints until the canonical experience is unambiguous. Current hardening keeps legacy `/ui/*` routes opt-in only via `XYN_ENABLE_LEGACY_UI_ROUTES`, with default redirect to the modern workbench path.
+Status: Partially closed. Direct legacy `/ui/*` leakage is now guarded by default; legacy surfaces still exist for opt-in internal workflows.
 
 DEBT-05  
 Title: Demo app runtime is still more runtime-first than artifact-first  
@@ -38,6 +42,7 @@ Description: The generated network inventory application can be deployed and rea
 Why It Exists: Runtime deploy was implemented before the artifact promotion/install path.  
 Risk: Users can reach a service without a fully coherent artifact lifecycle explanation.  
 Planned Resolution: Make the deployed app surface derive from installed artifact state and use artifact-managed entry routes.
+Status: Partially addressed. Stage outputs now emit artifact-first capability-entry semantics with runtime fallback; full shell UX consolidation is still pending.
 
 DEBT-06  
 Title: Repo-local legacy directories still exist on disk  
@@ -45,6 +50,7 @@ Description: Old repo-root `artifacts/` and `workspace/` directories are no long
 Why It Exists: Automatic destructive cleanup would be risky during active development.  
 Risk: Mistaken assumptions about canonical storage or accidental manual reuse of stale files.  
 Planned Resolution: Add a clearer cleanup command or migration helper once the runtime storage transition is fully stable.
+Status: Still open.
 
 DEBT-PROTO-01  
 Title: Execution-note protocol minimal implementation  
@@ -75,7 +81,7 @@ Description: Generated artifacts now serve as the canonical installed identity i
 Why It Exists: Demo readiness required a working artifact-native path before a broader artifact release model was designed.  
 Risk: Long-term lifecycle behavior for generated apps may remain ambiguous around revisions, releases, and promotion boundaries if this is not tightened later.  
 Planned Resolution: Define stronger generated-artifact version/update/promotion semantics that preserve the current packaging/import/install model while making revision and release behavior explicit.  
-Status: Future hardening opportunity. Not required for demo readiness.
+Status: Partially closed. Revision identity and promotion metadata are implemented; legacy package version transport compatibility remains.
 
 DEBT-10  
 Title: Dedicated revision-history UI is not yet implemented  
@@ -91,7 +97,7 @@ Description: Browser-driven regression coverage now passes for the demo path, bu
 Why It Exists: Demo-focused validation prioritized browser truth and live-system validation over deeper cleanup of the Django test DB environment.  
 Risk: Some automated regression runs may remain noisier or less reliable than desired until the test DB issue is fixed.  
 Planned Resolution: Repair the Django test DB setup so containerized regression and lower-level automated test execution can run consistently without unrelated database-trigger failures.  
-Status: Future test-hardening opportunity. Not required for demo readiness.
+Status: Partially closed. Required-vs-optional DB test policy and CI bootstrap are in place; closure depends on sustained CI stability.
 
 # Temporary Workarounds Protocol
 

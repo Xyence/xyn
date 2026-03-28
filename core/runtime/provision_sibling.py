@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+"""Sibling provisioning orchestration.
+
+DEBT-05 / DEMO-02 hardening:
+- Emits a canonical ``capability_entry`` block in stage output.
+- ``capability_entry`` is artifact-first: installed artifact identity/state is
+  the primary open/use source of truth, with runtime URL fallback retained for
+  compatibility when install evidence is unavailable.
+"""
+
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +19,50 @@ from sqlalchemy.orm import Session
 
 from core.models import Job
 from core.provisioning_local import ProvisionLocalRequest
+
+
+def _build_capability_entry(
+    *,
+    installed_artifact: dict[str, Any] | None,
+    generated_artifact: dict[str, Any] | None,
+    sibling_output: dict[str, Any],
+    sibling_runtime: dict[str, Any] | None,
+) -> dict[str, Any]:
+    installed = installed_artifact if isinstance(installed_artifact, dict) else {}
+    generated = generated_artifact if isinstance(generated_artifact, dict) else {}
+    runtime = sibling_runtime if isinstance(sibling_runtime, dict) else {}
+    installed_id = str(installed.get("artifact_id") or "").strip()
+    installed_slug = str(installed.get("artifact_slug") or "").strip()
+    generated_slug = str(generated.get("artifact_slug") or "").strip()
+    generated_revision_id = str(generated.get("revision_id") or generated.get("artifact_revision_id") or "").strip()
+    installed_revision_id = str(installed.get("artifact_revision_id") or "").strip()
+    runtime_base_url = str(runtime.get("runtime_base_url") or "").strip()
+    runtime_public_url = str(runtime.get("public_app_url") or runtime.get("app_url") or sibling_output.get("ui_url") or "").strip()
+    is_installed = bool(installed_id and installed_slug)
+
+    return {
+        "source_of_truth": "installed_artifact" if is_installed else "generated_artifact",
+        "state": "installed" if is_installed else "generated_not_installed",
+        "installed_artifact": {
+            "artifact_id": installed_id,
+            "artifact_slug": installed_slug,
+            "workspace_id": str(installed.get("workspace_id") or "").strip(),
+            "workspace_slug": str(installed.get("workspace_slug") or "").strip(),
+            "artifact_revision_id": installed_revision_id,
+            "artifact_version_label": str(installed.get("artifact_version_label") or "").strip(),
+        },
+        "generated_artifact": {
+            "artifact_slug": generated_slug,
+            "artifact_version": str(generated.get("artifact_version") or "").strip(),
+            "artifact_revision_id": generated_revision_id,
+            "artifact_version_label": str(generated.get("version_label") or generated.get("artifact_version_label") or "").strip(),
+        },
+        "open_preference": {
+            "mode": "artifact_shell" if is_installed else "runtime_url_fallback",
+            "runtime_base_url": runtime_base_url,
+            "runtime_public_url": runtime_public_url,
+        },
+    }
 
 
 def handle_provision_sibling_xyn(
@@ -190,6 +243,12 @@ def handle_provision_sibling_xyn(
     )
     sibling_output["runtime_target"] = sibling_runtime
     sibling_output["runtime_registration"] = registration
+    sibling_output["capability_entry"] = _build_capability_entry(
+        installed_artifact=installed_artifact,
+        generated_artifact=generated_artifact,
+        sibling_output=sibling_output,
+        sibling_runtime=sibling_runtime,
+    )
     append_job_log_fn(
         logs,
         "Registered sibling-owned runtime target "
