@@ -1745,11 +1745,27 @@ def _build_app_spec_with_diagnostics(
         spec["requires_primitives"] = appspec_normalization._normalize_unique_strings(requires_primitives)
     if revision_anchor:
         spec["revision_anchor"] = copy.deepcopy(revision_anchor)
+    consistency_warnings = list(consistency_result.warnings) + list(contract_validation.warnings)
+    if semantic_used and bool(semantic_diagnostics.get("limited_mode")):
+        reason = str(semantic_diagnostics.get("limited_mode_reason") or "limited mode").strip()
+        consistency_warnings.append(
+            f"Semantic extraction ran in limited heuristic mode ({reason}); deterministic inference remains authoritative."
+        )
+
     diagnostics = {
         "structure_score": round(structure_score, 3),
         "route": route,
         "llm_used": bool(semantic_diagnostics.get("llm_used")),
-        "consistency_warnings": list(consistency_result.warnings) + list(contract_validation.warnings),
+        "appspec_semantic_capability_state": (
+            str(semantic_diagnostics.get("capability_state") or "limited_no_llm")
+            if semantic_used
+            else "deterministic_only"
+        ),
+        "semantic_limited_mode": bool(semantic_diagnostics.get("limited_mode")) if semantic_used else False,
+        "semantic_limited_mode_reason": (
+            str(semantic_diagnostics.get("limited_mode_reason") or "").strip() if semantic_used else ""
+        ),
+        "consistency_warnings": consistency_warnings,
         "consistency_errors": list(consistency_result.errors) + list(contract_validation.errors),
         "fallback_or_repair_used": bool(
             semantic_diagnostics.get("fallback_used") or semantic_diagnostics.get("repair_used")

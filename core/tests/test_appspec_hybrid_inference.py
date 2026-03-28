@@ -122,6 +122,9 @@ class AppSpecHybridInferenceTests(unittest.TestCase):
                 self.assertIn("structure_score", diagnostics)
                 self.assertIn("llm_used", diagnostics)
                 self.assertIn("fallback_or_repair_used", diagnostics)
+                self.assertIn("appspec_semantic_capability_state", diagnostics)
+                self.assertIn("semantic_limited_mode", diagnostics)
+                self.assertIn("semantic_limited_mode_reason", diagnostics)
                 self.assertTrue(isinstance(diagnostics.get("consistency_warnings"), list))
                 self.assertTrue(isinstance(diagnostics.get("consistency_errors"), list))
 
@@ -138,8 +141,9 @@ class AppSpecHybridInferenceTests(unittest.TestCase):
                 self.assertNotIn("inference_diagnostics", policy_metadata)
                 self.assertIsNone(policy_metadata.get("inference_diagnostics"))
 
-                has_warnings = bool(diagnostics.get("consistency_warnings"))
-                self.assertEqual(has_warnings, case["expect_warning"])
+                warnings = diagnostics.get("consistency_warnings") if isinstance(diagnostics.get("consistency_warnings"), list) else []
+                has_non_limited_warnings = any("limited heuristic mode" not in str(row).lower() for row in warnings)
+                self.assertEqual(has_non_limited_warnings, case["expect_warning"])
 
     def test_golden_corpus_routes_and_no_diagnostics_leak(self):
         corpus = [
@@ -182,9 +186,31 @@ class AppSpecHybridInferenceTests(unittest.TestCase):
                 self.assertIn("structure_score", diagnostics)
                 self.assertIn("llm_used", diagnostics)
                 self.assertIn("fallback_or_repair_used", diagnostics)
+                self.assertIn("appspec_semantic_capability_state", diagnostics)
+                self.assertIn("semantic_limited_mode", diagnostics)
+                self.assertIn("semantic_limited_mode_reason", diagnostics)
                 self.assertIn("consistency_warnings", diagnostics)
                 self.assertIn("consistency_errors", diagnostics)
                 self.assertNotIn("inference_diagnostics", spec)
+
+    def test_route_a_reports_deterministic_only_capability_when_llm_unavailable(self):
+        prompt = (
+            "Build a simple app called Team Lunch Poll. Requirements: Core entities: "
+            "1. Poll - title - status (draft, open, closed) "
+            "2. Vote - poll - voter_name "
+            "Behavior: - Users can vote."
+        )
+        with mock.patch.dict("os.environ", {"XYN_APPSPEC_ENABLE_LLM_FALLBACK": "0"}, clear=False):
+            spec, diagnostics = _build_app_spec_with_diagnostics(
+                workspace_id=uuid.uuid4(),
+                title="Team Lunch Poll",
+                raw_prompt=prompt,
+            )
+        self.assertEqual(diagnostics.get("route"), "A")
+        self.assertEqual(diagnostics.get("appspec_semantic_capability_state"), "deterministic_only")
+        self.assertFalse(diagnostics.get("semantic_limited_mode"))
+        self.assertEqual(diagnostics.get("semantic_limited_mode_reason"), "")
+        self.assertNotIn("inference_diagnostics", spec)
 
     def test_duplicate_entity_normalization_in_canonicalize(self):
         interpretation = appspec_canonicalize.canonicalize_interpretation(
@@ -342,6 +368,70 @@ class AppSpecHybridInferenceTests(unittest.TestCase):
         heuristic.assert_called_once()
         self.assertIn("notes", set(spec.get("entities") or []))
         self.assertIn("documents", set(spec.get("entities") or []))
+
+    def test_route_c_llm_disabled_marks_limited_mode_explicitly(self):
+        prompt = "Create a personal notes and documents tracker for myself."
+        with mock.patch.dict("os.environ", {"XYN_APPSPEC_ENABLE_LLM_FALLBACK": "0"}, clear=False):
+            spec, diagnostics = _build_app_spec_with_diagnostics(
+                workspace_id=uuid.uuid4(),
+                title="KB",
+                raw_prompt=prompt,
+            )
+        self.assertEqual(diagnostics.get("route"), "C")
+        self.assertEqual(diagnostics.get("appspec_semantic_capability_state"), "limited_no_llm")
+        self.assertTrue(diagnostics.get("semantic_limited_mode"))
+        self.assertEqual(diagnostics.get("semantic_limited_mode_reason"), "llm_fallback_disabled")
+        warnings = diagnostics.get("consistency_warnings") if isinstance(diagnostics.get("consistency_warnings"), list) else []
+        self.assertTrue(any("limited heuristic mode" in str(row).lower() for row in warnings))
+        self.assertNotIn("inference_diagnostics", spec)
+
+    def test_route_c_codex_unavailable_marks_limited_mode_explicitly(self):
+        prompt = "Create a personal notes and documents tracker for myself."
+        with mock.patch.dict("os.environ", {"XYN_APPSPEC_ENABLE_LLM_FALLBACK": "1"}, clear=False):
+            with mock.patch("core.appspec.semantic_extractor._semantic_codex_available", return_value=False):
+                spec, diagnostics = _build_app_spec_with_diagnostics(
+                    workspace_id=uuid.uuid4(),
+                    title="KB",
+                    raw_prompt=prompt,
+                )
+        self.assertEqual(diagnostics.get("route"), "C")
+        self.assertEqual(diagnostics.get("appspec_semantic_capability_state"), "limited_no_llm")
+        self.assertTrue(diagnostics.get("semantic_limited_mode"))
+        self.assertEqual(diagnostics.get("semantic_limited_mode_reason"), "codex_unavailable")
+        self.assertFalse(diagnostics.get("llm_used"))
+        self.assertNotIn("inference_diagnostics", spec)
+
+    def test_route_c_semantic_path_available_uses_hybrid_llm_available_state(self):
+        prompt = "Create a personal notes and documents tracker for myself."
+        with mock.patch.dict("os.environ", {"XYN_APPSPEC_ENABLE_LLM_FALLBACK": "1"}, clear=False):
+            with mock.patch("core.appspec.semantic_extractor._semantic_codex_available", return_value=True):
+                with mock.patch(
+                    "core.appspec.semantic_extractor._extract_via_codex",
+                    return_value={
+                        "entities": ["notes", "documents"],
+                        "entity_contracts": [],
+                        "requested_visuals": [],
+                    },
+                ):
+                    spec, diagnostics = _build_app_spec_with_diagnostics(
+                        workspace_id=uuid.uuid4(),
+                        title="KB",
+                        raw_prompt=prompt,
+                    )
+        self.assertEqual(diagnostics.get("route"), "C")
+        self.assertEqual(diagnostics.get("appspec_semantic_capability_state"), "hybrid_llm_available")
+        self.assertFalse(diagnostics.get("semantic_limited_mode"))
+        self.assertEqual(diagnostics.get("semantic_limited_mode_reason"), "")
+        self.assertTrue(diagnostics.get("llm_used"))
+        self.assertIn("notes", set(spec.get("entities") or []))
+
+    def test_force_llm_errors_when_semantic_capability_unavailable(self):
+        with mock.patch.dict("os.environ", {"XYN_APPSPEC_ENABLE_LLM_FALLBACK": "0"}, clear=False):
+            with self.assertRaises(RuntimeError):
+                semantic_extractor.extract_semantic_inference(
+                    "Create notes tracker",
+                    force_llm=True,
+                )
 
     def test_invalid_semantic_payload_falls_back_to_constrained_output(self):
         with mock.patch.dict("os.environ", {"XYN_APPSPEC_ENABLE_LLM_FALLBACK": "1"}, clear=False):
