@@ -1867,6 +1867,13 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
     revision_anchor = content.get("revision_anchor") if isinstance(content.get("revision_anchor"), dict) else None
     current_app_summary = content.get("current_app_summary") if isinstance(content.get("current_app_summary"), dict) else None
     current_app_spec = content.get("current_app_spec") if isinstance(content.get("current_app_spec"), dict) else None
+    policy_bundle_override = (
+        content.get("policy_bundle_override") if isinstance(content.get("policy_bundle_override"), dict) else None
+    )
+    policy_artifact_ref = content.get("policy_artifact_ref") if isinstance(content.get("policy_artifact_ref"), dict) else {}
+    policy_source_hint = str(content.get("policy_source") or "").strip().lower()
+    policy_compatibility = str(content.get("policy_compatibility") or "unknown").strip() or "unknown"
+    policy_compatibility_reason = str(content.get("policy_compatibility_reason") or "").strip()
     primitive_catalog = get_primitive_catalog()
     _append_job_log(logs, f"Loaded primitive catalog ({len(primitive_catalog)} entries)")
     _append_job_log(logs, f"Generating AppSpec from prompt: {raw_prompt}")
@@ -1910,11 +1917,18 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
     except ValidationError as exc:
         raise RuntimeError(f"AppSpec validation failed: {exc.message}") from exc
 
-    policy_bundle = _build_policy_bundle(
-        workspace_id=job.workspace_id,
-        app_spec=app_spec,
-        raw_prompt=raw_prompt,
-    )
+    if policy_bundle_override:
+        policy_bundle = copy.deepcopy(policy_bundle_override)
+        policy_source = "artifact"
+    else:
+        policy_bundle = _build_policy_bundle(
+            workspace_id=job.workspace_id,
+            app_spec=app_spec,
+            raw_prompt=raw_prompt,
+        )
+        policy_source = "reconstructed"
+    if policy_source_hint == "artifact" and not policy_bundle_override:
+        _append_job_log(logs, "Policy override requested but unavailable; using reconstructed policy bundle.")
     try:
         validate(instance=policy_bundle, schema=_load_policy_bundle_schema())
     except ValidationError as exc:
@@ -1978,6 +1992,10 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
         "services": app_spec.get("services") if isinstance(app_spec.get("services"), list) else [],
         "workspace_id": str(job.workspace_id),
         "source_job_id": str(job.id),
+        "policy_source": policy_source,
+        "policy_artifact_ref": policy_artifact_ref if isinstance(policy_artifact_ref, dict) else {},
+        "policy_compatibility": policy_compatibility,
+        "policy_compatibility_reason": policy_compatibility_reason,
     }
     packaged_artifact = _package_generated_app(
         workspace_id=job.workspace_id,
@@ -2016,6 +2034,8 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
             "Primitive catalog loaded successfully.",
             "AppSpec validated against xyn.appspec.v0 schema.",
             "Policy bundle validated against xyn.policy_bundle.v0 schema.",
+            f"Policy source: {policy_source}.",
+            f"Policy compatibility: {policy_compatibility}{f' ({policy_compatibility_reason})' if policy_compatibility_reason else ''}.",
             f"AppSpec artifact persisted: {artifact_id}.",
             f"Policy bundle artifact persisted: {policy_bundle_artifact_id}.",
             f"Generated artifact package created: {packaged_artifact['artifact_slug']}@{packaged_artifact['artifact_version']}.",
@@ -2030,6 +2050,10 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
             "app_spec_artifact_id": artifact_id,
             "policy_bundle_artifact_id": policy_bundle_artifact_id,
             "inference_diagnostics": inference_diagnostics,
+            "policy_source": policy_source,
+            "policy_artifact_ref": policy_artifact_ref if isinstance(policy_artifact_ref, dict) else {},
+            "policy_compatibility": policy_compatibility,
+            "policy_compatibility_reason": policy_compatibility_reason,
         },
         update_note=update_execution_note,
     )
@@ -2041,6 +2065,10 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
             "policy_bundle_artifact_id": policy_bundle_artifact_id,
             "app_spec_schema": "xyn.appspec.v0",
             "policy_bundle_schema": "xyn.policy_bundle.v0",
+            "policy_source": policy_source,
+            "policy_artifact_ref": policy_artifact_ref if isinstance(policy_artifact_ref, dict) else {},
+            "policy_compatibility": policy_compatibility,
+            "policy_compatibility_reason": policy_compatibility_reason,
             "inference_diagnostics": inference_diagnostics,
             "primitive_catalog": primitive_catalog,
             "selected_images": selected_images,
@@ -2061,6 +2089,10 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
                     "policy_bundle": policy_bundle,
                     "app_spec_artifact_id": artifact_id,
                     "policy_bundle_artifact_id": policy_bundle_artifact_id,
+                    "policy_source": policy_source,
+                    "policy_artifact_ref": policy_artifact_ref if isinstance(policy_artifact_ref, dict) else {},
+                    "policy_compatibility": policy_compatibility,
+                    "policy_compatibility_reason": policy_compatibility_reason,
                     "generated_artifact": {
                         **packaged_artifact,
                         "registry_import": registry_artifact,

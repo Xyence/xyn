@@ -62,6 +62,84 @@ class StageContractCharacterizationTests(unittest.TestCase):
         self.assertEqual(follow_up[0]["input_json"]["app_spec_artifact_id"], "appspec-art")
         self.assertEqual(follow_up[0]["input_json"]["policy_bundle_artifact_id"], "policy-art")
 
+    def test_generate_app_spec_uses_policy_override_without_rebuild(self):
+        db = self._fake_db("development")
+        supplied_policy_bundle = {"schema_version": "xyn.policy_bundle.v0", "bundle_id": "policy.override", "policies": {}}
+        job = SimpleNamespace(
+            id=uuid.uuid4(),
+            type="generate_app_spec",
+            workspace_id=uuid.uuid4(),
+            input_json={
+                "title": "Test Solution",
+                "content_json": {
+                    "raw_prompt": "build a tracker",
+                    "policy_bundle_override": supplied_policy_bundle,
+                    "policy_source": "artifact",
+                    "policy_artifact_ref": {"artifact_slug": "policy.tracker"},
+                },
+            },
+        )
+        logs = []
+
+        app_spec = {"app_slug": "tracker", "title": "Tracker", "services": [{"name": "api", "image": "img", "ports": [8080]}]}
+        diagnostics = {"structure_score": 0.9, "route": "A", "llm_used": False}
+        note = SimpleNamespace(id=uuid.uuid4())
+        packaged = {
+            "artifact_slug": "app.tracker",
+            "artifact_version": "0.0.1-dev",
+            "artifact_package_path": "/tmp/app.tracker.zip",
+        }
+
+        with mock.patch("core.app_jobs.get_primitive_catalog", return_value=[]):
+            with mock.patch("core.app_jobs.create_execution_note", return_value=note):
+                with mock.patch("core.app_jobs._build_app_spec_with_diagnostics", return_value=(app_spec, diagnostics)):
+                    with mock.patch("core.app_jobs.validate", return_value=None):
+                        with mock.patch("core.app_jobs._build_policy_bundle") as build_policy:
+                            with mock.patch("core.app_jobs._persist_json_artifact", side_effect=["appspec-art", "policy-art"]):
+                                with mock.patch("core.app_jobs._package_generated_app", return_value=packaged):
+                                    with mock.patch("core.app_jobs._import_generated_artifact_package", return_value={"id": "reg-1"}):
+                                        with mock.patch("core.app_jobs.update_execution_note", return_value=note):
+                                            output_json, _ = _handle_generate_app_spec(db, job, logs)
+
+        build_policy.assert_not_called()
+        self.assertEqual(output_json.get("policy_source"), "artifact")
+        self.assertEqual((output_json.get("policy_artifact_ref") or {}).get("artifact_slug"), "policy.tracker")
+        self.assertEqual(output_json.get("policy_bundle"), supplied_policy_bundle)
+
+    def test_generate_app_spec_reconstructs_policy_when_override_missing(self):
+        db = self._fake_db("development")
+        job = SimpleNamespace(
+            id=uuid.uuid4(),
+            type="generate_app_spec",
+            workspace_id=uuid.uuid4(),
+            input_json={"title": "Test Solution", "content_json": {"raw_prompt": "build a tracker"}},
+        )
+        logs = []
+
+        app_spec = {"app_slug": "tracker", "title": "Tracker", "services": [{"name": "api", "image": "img", "ports": [8080]}]}
+        policy_bundle = {"schema_version": "xyn.policy_bundle.v0", "bundle_id": "policy.reconstructed", "policies": {}}
+        diagnostics = {"structure_score": 0.9, "route": "A", "llm_used": False}
+        note = SimpleNamespace(id=uuid.uuid4())
+        packaged = {
+            "artifact_slug": "app.tracker",
+            "artifact_version": "0.0.1-dev",
+            "artifact_package_path": "/tmp/app.tracker.zip",
+        }
+
+        with mock.patch("core.app_jobs.get_primitive_catalog", return_value=[]):
+            with mock.patch("core.app_jobs.create_execution_note", return_value=note):
+                with mock.patch("core.app_jobs._build_app_spec_with_diagnostics", return_value=(app_spec, diagnostics)):
+                    with mock.patch("core.app_jobs.validate", return_value=None):
+                        with mock.patch("core.app_jobs._build_policy_bundle", return_value=policy_bundle) as build_policy:
+                            with mock.patch("core.app_jobs._persist_json_artifact", side_effect=["appspec-art", "policy-art"]):
+                                with mock.patch("core.app_jobs._package_generated_app", return_value=packaged):
+                                    with mock.patch("core.app_jobs._import_generated_artifact_package", return_value={"id": "reg-1"}):
+                                        with mock.patch("core.app_jobs.update_execution_note", return_value=note):
+                                            output_json, _ = _handle_generate_app_spec(db, job, logs)
+
+        build_policy.assert_called_once()
+        self.assertEqual(output_json.get("policy_source"), "reconstructed")
+
     def test_deploy_app_local_output_and_follow_up_shape(self):
         db = self._fake_db("development")
         note_id = str(uuid.uuid4())

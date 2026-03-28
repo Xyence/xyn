@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import re
 import uuid
 from typing import Any
@@ -872,6 +874,25 @@ def _build_policy_bundle(
         "simulate_policy_bundle",
         "explain_policy_bundle",
     ]
+    signature_source: dict[str, Any] = {}
+    for key in (
+        "app_slug",
+        "entities",
+        "entity_contracts",
+        "reports",
+        "requested_visuals",
+        "requires_primitives",
+        "workflow_definitions",
+        "platform_primitive_composition",
+        "ui_surfaces",
+        "domain_model",
+        "structured_plan",
+    ):
+        if key in app_spec:
+            signature_source[key] = copy.deepcopy(app_spec.get(key))
+    app_spec_signature = hashlib.sha256(
+        json.dumps(signature_source, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
     return {
         "schema_version": "xyn.policy_bundle.v0",
         "bundle_id": _policy_bundle_slug(app_slug),
@@ -887,6 +908,11 @@ def _build_policy_bundle(
             "owner_kind": "generated_application",
             "editable": True,
             "source": "generated_from_prompt",
+        },
+        "derivation": {
+            "source": "generated_from_app_spec",
+            "app_slug": app_slug,
+            "app_spec_signature": app_spec_signature,
         },
         "policy_families": [key for key, rows in families.items() if rows] or list(families.keys()),
         "policies": families,

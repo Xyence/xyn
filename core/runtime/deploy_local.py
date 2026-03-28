@@ -219,6 +219,10 @@ def handle_deploy_app_local(
     generated_artifact = payload.get("generated_artifact") if isinstance(payload.get("generated_artifact"), dict) else {}
     app_spec = payload.get("app_spec") if isinstance(payload.get("app_spec"), dict) else {}
     policy_bundle = payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {}
+    policy_source = str(payload.get("policy_source") or "reconstructed").strip() or "reconstructed"
+    policy_artifact_ref = payload.get("policy_artifact_ref") if isinstance(payload.get("policy_artifact_ref"), dict) else {}
+    policy_compatibility = str(payload.get("policy_compatibility") or "unknown").strip() or "unknown"
+    policy_compatibility_reason = str(payload.get("policy_compatibility_reason") or "").strip()
     app_slug = safe_slug_fn(str(app_spec.get("app_slug") or "net-inventory"), default="net-inventory")
     stamp = utc_now_fn().strftime("%Y%m%d%H%M%S")
     deployment_dir = deployments_root_fn() / app_slug / stamp
@@ -226,6 +230,10 @@ def handle_deploy_app_local(
     compose_project = safe_slug_fn(f"xyn-app-{app_slug}", default="xyn-app")
     app_output = {
         "app_slug": app_slug,
+        "policy_source": policy_source,
+        "policy_artifact_ref": policy_artifact_ref,
+        "policy_compatibility": policy_compatibility,
+        "policy_compatibility_reason": policy_compatibility_reason,
         **deploy_generated_runtime_fn(
             app_spec=app_spec,
             policy_bundle=policy_bundle,
@@ -260,6 +268,10 @@ def handle_deploy_app_local(
                     "deployment": app_output,
                     "app_spec": app_spec,
                     "policy_bundle": policy_bundle,
+                    "policy_source": policy_source,
+                    "policy_artifact_ref": policy_artifact_ref,
+                    "policy_compatibility": policy_compatibility,
+                    "policy_compatibility_reason": policy_compatibility_reason,
                     "generated_artifact": generated_artifact,
                     "execution_note_artifact_id": execution_note_artifact_id,
                     "source_job_id": str(job.id),
