@@ -6,10 +6,10 @@ This document records temporary architectural compromises accepted to accelerate
 
 DEBT-01  
 Title: Context-pack runtime bridge is manifest-based, not artifact-import-based  
-Description: `xyn-platform` remains the governance authority for context packs, but `xyn-core` currently consumes a synchronized runtime manifest rather than a published/imported artifact package.  
+Description: `xyn-platform` remains the governance authority for context packs. `xyn-core` now consumes an artifact-style synced distribution payload first, but still keeps synchronized manifest fallback for backward compatibility.  
 Why It Exists: This is the smallest safe bridge that removes indefinite independent seeding in `xyn-core` without attempting the full publish/import/install architecture.  
-Risk: Runtime consumption and governance remain connected by a sync contract rather than the final artifact promotion pipeline.  
-Planned Resolution: Replace the synced manifest bridge with published/synced context-pack artifacts that `xyn-core` imports explicitly.
+Risk: Runtime consumption and governance remain connected by a local sync contract until manifest fallback is fully retired and all environments use artifact publish/import exclusively.  
+Planned Resolution: Complete migration to published/synced context-pack artifacts and retire manifest fallback once all supported environments are artifact-backed.
 
 DEBT-02  
 Title: Generated artifact lifecycle is still partial  

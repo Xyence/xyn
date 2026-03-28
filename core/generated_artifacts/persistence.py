@@ -7,6 +7,7 @@ from typing import Any, Callable, Optional
 
 from sqlalchemy.orm import Session
 
+from core.generated_artifacts.lifecycle import STAGE_PROMOTED
 from core.models import Artifact
 
 
@@ -60,16 +61,32 @@ def persist_appspec_artifact(
     app_spec: dict[str, Any],
     job_id: str,
     inference_diagnostics: Optional[dict[str, Any]],
+    generated_artifact_slug: str = "",
+    revision_id: str = "",
+    version_label: str = "",
+    lineage_id: str = "",
+    lifecycle_stage: str = "",
     persist_fn: PersistJsonArtifactFn,
 ) -> str:
     app_slug = str(app_spec.get("app_slug") or "")
+    metadata: dict[str, Any] = {"job_id": job_id, "inference_diagnostics": inference_diagnostics}
+    if generated_artifact_slug:
+        metadata["generated_artifact_slug"] = generated_artifact_slug
+    if revision_id:
+        metadata["revision_id"] = revision_id
+    if version_label:
+        metadata["version_label"] = version_label
+    if lineage_id:
+        metadata["lineage_id"] = lineage_id
+    if lifecycle_stage:
+        metadata["lifecycle_stage"] = lifecycle_stage
     return persist_fn(
         db,
         workspace_id=workspace_id,
         name=f"appspec.{app_slug}",
         kind="app_spec",
         payload=app_spec,
-        metadata={"job_id": job_id, "inference_diagnostics": inference_diagnostics},
+        metadata=metadata,
     )
 
 
@@ -81,17 +98,63 @@ def persist_policy_artifact(
     policy_bundle: dict[str, Any],
     job_id: str,
     app_spec_artifact_id: str,
+    generated_artifact_slug: str = "",
+    revision_id: str = "",
+    version_label: str = "",
+    lineage_id: str = "",
+    lifecycle_stage: str = "",
     policy_slug_fn: Callable[[str], str],
     persist_fn: PersistJsonArtifactFn,
 ) -> str:
+    metadata: dict[str, Any] = {"job_id": job_id, "app_spec_artifact_id": app_spec_artifact_id}
+    if generated_artifact_slug:
+        metadata["generated_artifact_slug"] = generated_artifact_slug
+    if revision_id:
+        metadata["revision_id"] = revision_id
+    if version_label:
+        metadata["version_label"] = version_label
+    if lineage_id:
+        metadata["lineage_id"] = lineage_id
+    if lifecycle_stage:
+        metadata["lifecycle_stage"] = lifecycle_stage
     return persist_fn(
         db,
         workspace_id=workspace_id,
         name=policy_slug_fn(str(app_slug or "generated-app")),
         kind="policy_bundle",
         payload=policy_bundle,
-        metadata={"job_id": job_id, "app_spec_artifact_id": app_spec_artifact_id},
+        metadata=metadata,
     )
+
+
+def promote_artifact_revision(
+    db: Session,
+    *,
+    artifact_slug: str,
+    revision_id: str,
+    target_label: str = "stable",
+) -> int:
+    slug = str(artifact_slug or "").strip()
+    revision = str(revision_id or "").strip()
+    label = str(target_label or "stable").strip() or "stable"
+    if not slug or not revision:
+        return 0
+    rows = db.query(Artifact).filter(Artifact.workspace_id.isnot(None)).all()
+    updated = 0
+    for row in rows:
+        metadata = row.extra_metadata if isinstance(row.extra_metadata, dict) else {}
+        if str(metadata.get("generated_artifact_slug") or "").strip() != slug:
+            continue
+        if str(metadata.get("revision_id") or "").strip() != revision:
+            continue
+        next_meta = {**metadata}
+        next_meta["version_label"] = label
+        next_meta["lifecycle_stage"] = STAGE_PROMOTED
+        row.extra_metadata = next_meta
+        updated += 1
+    if updated:
+        db.flush()
+    return updated
 
 
 def link_generated_artifact_memberships(*, _db: Session, **_kwargs: Any) -> list[str]:

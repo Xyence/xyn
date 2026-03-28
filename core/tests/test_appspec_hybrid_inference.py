@@ -13,8 +13,7 @@ from core.models import Artifact, Workspace
 from core.appspec import canonicalize as appspec_canonicalize
 from core.appspec import consistency as appspec_consistency
 from core.appspec import semantic_extractor
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
+from core.tests.db_requirements import require_db_or_skip
 
 
 class AppSpecHybridInferenceTests(unittest.TestCase):
@@ -558,13 +557,11 @@ if __name__ == "__main__":
 
 class AppSpecHybridInferencePersistenceIntegrationTests(unittest.TestCase):
     def test_db_backed_diagnostics_persistence_and_readback(self):
-        preflight_db = SessionLocal()
-        try:
-            preflight_db.execute(text("SELECT 1"))
-        except OperationalError:
-            self.skipTest("Postgres test database is unavailable for DB-backed diagnostics integration test")
-        finally:
-            preflight_db.close()
+        require_db_or_skip(
+            self,
+            session_factory=SessionLocal,
+            required_tables=("workspaces", "artifacts"),
+        )
 
         cases = [
             {
@@ -655,13 +652,11 @@ class AppSpecHybridInferencePersistenceIntegrationTests(unittest.TestCase):
                     db.close()
 
     def test_execution_note_payload_and_metadata_share_inference_diagnostics(self):
-        preflight_db = SessionLocal()
-        try:
-            preflight_db.execute(text("SELECT 1"))
-        except OperationalError:
-            self.skipTest("Postgres test database is unavailable for DB-backed diagnostics integration test")
-        finally:
-            preflight_db.close()
+        require_db_or_skip(
+            self,
+            session_factory=SessionLocal,
+            required_tables=("workspaces", "artifacts"),
+        )
 
         db = SessionLocal()
         created_artifact_ids: list[uuid.UUID] = []

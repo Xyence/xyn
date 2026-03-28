@@ -5,6 +5,7 @@ xynctl - Xyn Seed bootstrap and local provisioning tool.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import subprocess
@@ -51,6 +52,7 @@ DEFAULT_UI_IMAGE_NAME = "xyn-ui"
 DEFAULT_API_IMAGE_NAME = "xyn-api"
 DEFAULT_IMAGE_TAG = "dev"
 DEFAULT_CONTEXT_PACK_MANIFEST = ".xyn/sync/context-packs.manifest.json"
+DEFAULT_CONTEXT_PACK_ARTIFACT = ".xyn/sync/context-packs.artifact.json"
 DEFAULT_USER_WORKSPACE_SLUG = "development"
 
 
@@ -278,13 +280,59 @@ def _find_xyn_platform_root() -> Optional[Path]:
     return None
 
 
+def _build_context_pack_distribution_artifact(manifest_payload: dict[str, Any]) -> dict[str, Any]:
+    serialized_manifest = json.dumps(manifest_payload, sort_keys=True, separators=(",", ":"))
+    revision_id = f"ctx-{hashlib.sha256(serialized_manifest.encode('utf-8')).hexdigest()[:16]}"
+    seed_slug = str(manifest_payload.get("source_seed_pack_slug") or "xyn-core-context-packs").strip() or "xyn-core-context-packs"
+    seed_version = str(manifest_payload.get("source_seed_pack_version") or "").strip()
+    version_label = seed_version or "dev"
+    context_packs = manifest_payload.get("context_packs") if isinstance(manifest_payload.get("context_packs"), list) else []
+    return {
+        "artifact_schema": "xyn.context-pack-artifact.v1",
+        "source_system": str(manifest_payload.get("source_system") or "xyn-platform"),
+        "source_seed_pack_slug": seed_slug,
+        "source_seed_pack_version": seed_version,
+        "artifact": {
+            "kind": "context-pack-bundle",
+            "slug": seed_slug,
+            "lineage_id": seed_slug,
+            "revision_id": revision_id,
+            "version_label": version_label,
+            "lifecycle_stage": "generated",
+        },
+        "content": {
+            "context_packs": [row for row in context_packs if isinstance(row, dict)],
+        },
+    }
+
+
+def _write_context_pack_distribution_artifact(*, manifest_path: Path, artifact_path: Path) -> bool:
+    if not manifest_path.exists():
+        return False
+    try:
+        manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(manifest_payload, dict):
+            return False
+        artifact_payload = _build_context_pack_distribution_artifact(manifest_payload)
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text(json.dumps(artifact_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
 def sync_context_pack_manifest() -> bool:
     output_path = Path(DEFAULT_CONTEXT_PACK_MANIFEST)
+    artifact_path = Path(DEFAULT_CONTEXT_PACK_ARTIFACT)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    def _ensure_artifact_from_existing_manifest() -> None:
+        if _write_context_pack_distribution_artifact(manifest_path=output_path, artifact_path=artifact_path):
+            print_success(f"Synchronized context-pack artifact distribution payload to {artifact_path}")
     platform_root = _find_xyn_platform_root()
     if platform_root is None:
         if output_path.exists():
             print_warning("xyn-platform repo not found; using existing synced context-pack manifest")
+            _ensure_artifact_from_existing_manifest()
         else:
             print_warning("xyn-platform repo not found; xyn-core will fall back to builtin context-pack definitions")
         return True
@@ -292,6 +340,7 @@ def sync_context_pack_manifest() -> bool:
     if not script_path.exists():
         if output_path.exists():
             print_warning("Context-pack export script not found in xyn-platform; using existing synced manifest")
+            _ensure_artifact_from_existing_manifest()
         else:
             print_warning("Context-pack export script not found in xyn-platform; xyn-core will fall back to builtin context-pack definitions")
         return True
@@ -306,6 +355,11 @@ def sync_context_pack_manifest() -> bool:
         if result.stderr.strip():
             print_warning(result.stderr.strip())
         return True
+    artifact_written = _write_context_pack_distribution_artifact(manifest_path=output_path, artifact_path=artifact_path)
+    if artifact_written:
+        print_success(f"Synchronized context-pack artifact distribution payload to {artifact_path}")
+    else:
+        print_warning("Context-pack artifact payload sync failed; runtime will continue using manifest bridge fallback")
     print_success(f"Synchronized context-pack manifest from xyn-platform to {output_path}")
     return True
 
@@ -322,6 +376,7 @@ def build_runtime_env() -> dict[str, str]:
     runtime.setdefault("XYN_PUBLIC_BASE_URL", "http://localhost")
     runtime.setdefault("XYN_TRUST_PROXY", "true")
     runtime.setdefault("XYN_CONTEXT_PACK_MANIFEST_PATH", "/app/.xyn/sync/context-packs.manifest.json")
+    runtime.setdefault("XYN_CONTEXT_PACK_ARTIFACT_PATH", "/app/.xyn/sync/context-packs.artifact.json")
     if not str(runtime.get("XYN_SEED_URL", "")).strip():
         runtime["XYN_SEED_URL"] = _build_default_seed_url(runtime)
     if str(runtime.get("XYN_AUTH_MODE", "")).strip().lower() == "token":

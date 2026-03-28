@@ -113,6 +113,28 @@ class GeneratedArtifactPersistenceTests(unittest.TestCase):
         self.assertEqual(kwargs["kind"], "policy_bundle")
         self.assertEqual(kwargs["metadata"], {"job_id": "job-1", "app_spec_artifact_id": "artifact-1"})
 
+    def test_persist_generated_revision_metadata_is_additive(self):
+        persist = mock.Mock(return_value="artifact-2")
+        persist_appspec_artifact(
+            mock.Mock(),
+            workspace_id=uuid.uuid4(),
+            app_spec={"app_slug": "demo"},
+            job_id="job-2",
+            inference_diagnostics=None,
+            generated_artifact_slug="app.demo",
+            revision_id="rev-1",
+            version_label="dev",
+            lineage_id="lineage:app.demo",
+            lifecycle_stage="GENERATED",
+            persist_fn=persist,
+        )
+        kwargs = persist.call_args.kwargs
+        self.assertEqual(kwargs["metadata"]["generated_artifact_slug"], "app.demo")
+        self.assertEqual(kwargs["metadata"]["revision_id"], "rev-1")
+        self.assertEqual(kwargs["metadata"]["version_label"], "dev")
+        self.assertEqual(kwargs["metadata"]["lineage_id"], "lineage:app.demo")
+        self.assertEqual(kwargs["metadata"]["lifecycle_stage"], "GENERATED")
+
     def test_link_generated_artifact_memberships_is_idempotent_noop_here(self):
         db = mock.Mock()
         self.assertEqual(link_generated_artifact_memberships(_db=db), [])

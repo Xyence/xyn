@@ -1,10 +1,15 @@
-"""Phase-2 app-intent pipeline worker.
+"""App-intent job orchestration shell.
 
-Executes queued jobs:
-- generate_app_spec
-- deploy_app_local
-- provision_sibling_xyn
-- smoke_test
+This module owns worker lifecycle and stage routing for the app-intent pipeline
+(`generate_app_spec`, `deploy_app_local`, `provision_sibling_xyn`, `smoke_test`).
+
+Most substantial logic clusters have been extracted into dedicated modules
+(AppSpec inference, runtime adapters/deploy/provision/smoke orchestration,
+runtime contract verification, policy compilation, persistence helpers).
+
+Compatibility wrappers and symbol rebinds are intentionally preserved here to
+keep existing patch points and tests stable while the orchestration shell
+remains the canonical dispatch boundary.
 """
 from __future__ import annotations
 
@@ -56,6 +61,11 @@ from core.generated_artifacts.persistence import (
     persist_generated_json_artifact as _persist_generated_json_artifact,
     persist_policy_artifact as _persist_policy_artifact,
 )
+from core.generated_artifacts.lifecycle import (
+    LEGACY_GENERATED_VERSION,
+    GeneratedArtifactIdentity,
+    generated_identity as _generated_artifact_identity,
+)
 from core.policy_bundle import compiler as policy_bundle_compiler
 from core.runtime import adapters as runtime_adapters
 from core.runtime import deploy_local as runtime_deploy_local
@@ -72,7 +82,9 @@ POLICY_BUNDLE_SCHEMA_PATH = Path(__file__).resolve().parent / "contracts" / "pol
 NET_INVENTORY_IMAGE = str(
     os.getenv("XYN_NET_INVENTORY_IMAGE", "public.ecr.aws/i0h0h0n4/xyn/artifacts/net-inventory-api:dev")
 ).strip()
-GENERATED_ARTIFACT_VERSION = "0.0.1-dev"
+# Legacy transport/package version remains accepted while revision-based lifecycle
+# metadata is rolled out incrementally.
+GENERATED_ARTIFACT_VERSION = LEGACY_GENERATED_VERSION
 ROOT_PLATFORM_API_CONTAINER = str(os.getenv("XYN_PLATFORM_API_CONTAINER", "xyn-local-api")).strip() or "xyn-local-api"
 
 
@@ -422,7 +434,12 @@ def _surface_manifest_summary(surface_rows: list[dict[str, Any]]) -> dict[str, l
     return grouped
 
 
-def _build_generated_artifact_manifest(*, app_spec: dict[str, Any], runtime_config: dict[str, Any]) -> dict[str, Any]:
+def _build_generated_artifact_manifest(
+    *,
+    app_spec: dict[str, Any],
+    runtime_config: dict[str, Any],
+    lifecycle_identity: GeneratedArtifactIdentity | None = None,
+) -> dict[str, Any]:
     app_slug = _safe_slug(str(app_spec.get("app_slug") or "generated-app"), default="generated-app")
     artifact_slug = _generated_artifact_slug(app_slug)
     title = str(app_spec.get("title") or app_slug).strip() or app_slug
@@ -430,12 +447,17 @@ def _build_generated_artifact_manifest(*, app_spec: dict[str, Any], runtime_conf
     suggestions = build_manifest_suggestions(artifact_slug=artifact_slug, manifest=capability_manifest)
     generated_surface_defs = _build_generated_surface_definitions(app_spec=app_spec, capability_manifest=capability_manifest)
     manifest_surfaces = _surface_manifest_summary(generated_surface_defs)
+    identity = lifecycle_identity or _generated_artifact_identity(artifact_slug=artifact_slug, version_label="dev")
     return {
         "artifact": {
             "id": artifact_slug,
             "type": "application",
             "slug": artifact_slug,
             "version": GENERATED_ARTIFACT_VERSION,
+            "version_label": identity.version_label,
+            "revision_id": identity.revision_id,
+            "lineage_id": identity.lineage_id,
+            "lifecycle_stage": identity.lifecycle_stage,
             "name": title,
             "generated": True,
         },
@@ -456,20 +478,34 @@ def _build_generated_artifact_manifest(*, app_spec: dict[str, Any], runtime_conf
             "resolved_capability_manifest": capability_manifest,
             "generated_surface_definitions": generated_surface_defs,
         },
+        "lifecycle": identity.to_metadata(),
     }
 
 
-def _build_generated_policy_artifact_manifest(*, app_spec: dict[str, Any], policy_bundle: dict[str, Any]) -> dict[str, Any]:
+def _build_generated_policy_artifact_manifest(
+    *,
+    app_spec: dict[str, Any],
+    policy_bundle: dict[str, Any],
+    lifecycle_identity: GeneratedArtifactIdentity | None = None,
+) -> dict[str, Any]:
     app_slug = _safe_slug(str(app_spec.get("app_slug") or "generated-app"), default="generated-app")
     artifact_slug = _policy_bundle_slug(app_slug)
     title = str(policy_bundle.get("title") or f"{str(app_spec.get('title') or app_slug).strip() or app_slug} Policy Bundle").strip()
     families = list(policy_bundle.get("policy_families") or [])
+    identity = lifecycle_identity or _generated_artifact_identity(
+        artifact_slug=_generated_artifact_slug(app_slug),
+        version_label="dev",
+    )
     return {
         "artifact": {
             "id": artifact_slug,
             "type": "policy_bundle",
             "slug": artifact_slug,
             "version": GENERATED_ARTIFACT_VERSION,
+            "version_label": identity.version_label,
+            "revision_id": identity.revision_id,
+            "lineage_id": identity.lineage_id,
+            "lifecycle_stage": identity.lifecycle_stage,
             "name": title,
             "generated": True,
         },
@@ -502,6 +538,7 @@ def _build_generated_policy_artifact_manifest(*, app_spec: dict[str, Any], polic
             "app_slug": app_slug,
             "generated_artifact_slug": _generated_artifact_slug(app_slug),
         },
+        "lifecycle": identity.to_metadata(),
     }
 
 
@@ -512,6 +549,7 @@ def _package_generated_app(
     app_spec: dict[str, Any],
     policy_bundle: dict[str, Any],
     runtime_config: dict[str, Any],
+    lifecycle_identity: GeneratedArtifactIdentity | None = None,
 ) -> dict[str, Any]:
     app_slug = _safe_slug(str(app_spec.get("app_slug") or "generated-app"), default="generated-app")
     artifact_slug = _generated_artifact_slug(app_slug)
@@ -520,13 +558,22 @@ def _package_generated_app(
     payload_root = package_root / "payload"
     payload_root.mkdir(parents=True, exist_ok=True)
 
-    artifact_manifest = _build_generated_artifact_manifest(app_spec=app_spec, runtime_config=runtime_config)
+    identity = lifecycle_identity or _generated_artifact_identity(artifact_slug=artifact_slug, version_label="dev")
+    artifact_manifest = _build_generated_artifact_manifest(
+        app_spec=app_spec,
+        runtime_config=runtime_config,
+        lifecycle_identity=identity,
+    )
     artifact_manifest["content"]["policy_bundle_summary"] = {
         "artifact_slug": policy_artifact_slug,
         "title": str(policy_bundle.get("title") or "").strip(),
         "policy_families": list(policy_bundle.get("policy_families") or []),
     }
-    policy_artifact_manifest = _build_generated_policy_artifact_manifest(app_spec=app_spec, policy_bundle=policy_bundle)
+    policy_artifact_manifest = _build_generated_policy_artifact_manifest(
+        app_spec=app_spec,
+        policy_bundle=policy_bundle,
+        lifecycle_identity=identity,
+    )
     artifact_manifest_path = package_root / "artifact.json"
     app_spec_path = payload_root / "app_spec.json"
     policy_bundle_path = payload_root / "policy_bundle.json"
@@ -540,6 +587,9 @@ def _package_generated_app(
         "type": "application",
         "slug": artifact_slug,
         "version": GENERATED_ARTIFACT_VERSION,
+        "version_label": identity.version_label,
+        "revision_id": identity.revision_id,
+        "lineage_id": identity.lineage_id,
         "artifact_id": artifact_slug,
         "title": str(app_spec.get("title") or app_slug),
         "description": "Generated application artifact package",
@@ -550,6 +600,9 @@ def _package_generated_app(
         "type": "policy_bundle",
         "slug": policy_artifact_slug,
         "version": GENERATED_ARTIFACT_VERSION,
+        "version_label": identity.version_label,
+        "revision_id": identity.revision_id,
+        "lineage_id": identity.lineage_id,
         "artifact_id": policy_artifact_slug,
         "title": str(policy_bundle.get("title") or f"{str(app_spec.get('title') or app_slug).strip() or app_slug} Policy Bundle"),
         "description": "Generated application policy bundle",
@@ -571,12 +624,14 @@ def _package_generated_app(
         "app_spec": app_spec,
         "policy_bundle": policy_bundle,
         "runtime_config": runtime_config,
+        "generated_artifact_identity": identity.to_metadata(),
         "generated": True,
         "source_job_id": source_job_id,
         "source_workspace_id": str(workspace_id),
     }
     policy_payload = {
         "policy_bundle": policy_bundle,
+        "generated_artifact_identity": identity.to_metadata(),
         "generated": True,
         "source_job_id": source_job_id,
         "source_workspace_id": str(workspace_id),
@@ -602,6 +657,9 @@ def _package_generated_app(
         "format_version": 1,
         "package_name": artifact_slug,
         "package_version": GENERATED_ARTIFACT_VERSION,
+        "version_label": identity.version_label,
+        "revision_id": identity.revision_id,
+        "lineage_id": identity.lineage_id,
         "built_at": _iso_now(),
         "platform_compatibility": {"min_version": "1.0.0", "required_features": ["artifact_packages_v1"]},
         "artifacts": [
@@ -626,6 +684,11 @@ def _package_generated_app(
     return {
         "artifact_slug": artifact_slug,
         "artifact_version": GENERATED_ARTIFACT_VERSION,
+        "revision_id": identity.revision_id,
+        "version_label": identity.version_label,
+        "lineage_id": identity.lineage_id,
+        "lifecycle_stage": identity.lifecycle_stage,
+        "legacy_version": identity.legacy_version,
         "policy_bundle_slug": policy_artifact_slug,
         "artifact_manifest_path": str(artifact_manifest_path),
         "artifact_package_path": str(package_zip_path),
@@ -698,6 +761,7 @@ def _install_generated_artifact_in_sibling(
     workspace_slug: str,
     artifact_slug: str,
     artifact_version: str = "",
+    artifact_revision_id: str = "",
 ) -> dict[str, Any]:
     code, body, text = _container_http_session_json(
         sibling_api_container,
@@ -728,6 +792,15 @@ def _install_generated_artifact_in_sibling(
     if not workspace_id:
         raise RuntimeError("Sibling workspace id missing from workspace list response")
 
+    install_body_payload = {
+        "artifact_id": artifact_slug,
+        "artifact_version": artifact_version,
+        "enabled": True,
+    }
+    requested_revision_id = str(artifact_revision_id or "").strip()
+    used_revision_fallback = False
+    if requested_revision_id:
+        install_body_payload["artifact_revision_id"] = requested_revision_id
     install_code, install_body, install_text = _container_http_session_json(
         sibling_api_container,
         port=8000,
@@ -740,23 +813,52 @@ def _install_generated_artifact_in_sibling(
             {
                 "method": "POST",
                 "path": f"/xyn/api/workspaces/{workspace_id}/artifacts",
-                "body": {
-                    "artifact_id": artifact_slug,
-                    "artifact_version": artifact_version,
-                    "enabled": True,
-                },
+                "body": install_body_payload,
             },
         ],
     )
+    if install_code not in {200, 201} and requested_revision_id:
+        used_revision_fallback = True
+        install_code, install_body, install_text = _container_http_session_json(
+            sibling_api_container,
+            port=8000,
+            steps=[
+                {
+                    "method": "POST",
+                    "path": "/auth/dev-login",
+                    "form": {"appId": "xyn-ui", "returnTo": "/app"},
+                },
+                {
+                    "method": "POST",
+                    "path": f"/xyn/api/workspaces/{workspace_id}/artifacts",
+                    "body": {
+                        "artifact_id": artifact_slug,
+                        "artifact_version": artifact_version,
+                        "enabled": True,
+                    },
+                },
+            ],
+        )
     if install_code not in {200, 201}:
         raise RuntimeError(f"Failed to install sibling artifact '{artifact_slug}' ({install_code}): {install_text}")
     artifact = install_body.get("artifact") if isinstance(install_body.get("artifact"), dict) else {}
+    resolved_revision_id = str(
+        artifact.get("artifact_revision_id")
+        or (artifact.get("metadata") or {}).get("artifact_revision_id")
+        or (artifact.get("metadata") or {}).get("revision_id")
+        or requested_revision_id
+        or ""
+    ).strip()
     return {
         "workspace_id": workspace_id,
         "workspace_slug": workspace_slug,
         "artifact_slug": str(artifact.get("slug") or artifact_slug),
         "artifact_id": str(artifact.get("artifact_id") or ""),
         "binding_id": str(artifact.get("binding_id") or ""),
+        "artifact_revision_id": resolved_revision_id,
+        "artifact_version": str(artifact.get("package_version") or artifact_version or GENERATED_ARTIFACT_VERSION),
+        "artifact_version_label": str((artifact.get("metadata") or {}).get("version_label") or "").strip(),
+        "revision_fallback_used": used_revision_fallback,
     }
 
 
@@ -1802,12 +1904,22 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
     except ValidationError as exc:
         raise RuntimeError(f"Policy bundle validation failed: {exc.message}") from exc
 
+    generated_artifact_slug = _generated_artifact_slug(str(app_spec.get("app_slug") or "generated-app"))
+    generated_lifecycle_identity = _generated_artifact_identity(
+        artifact_slug=generated_artifact_slug,
+        version_label="dev",
+    )
     artifact_id = _persist_appspec_artifact(
         db,
         workspace_id=job.workspace_id,
         app_spec=app_spec,
         job_id=str(job.id),
         inference_diagnostics=inference_diagnostics,
+        generated_artifact_slug=generated_lifecycle_identity.artifact_slug,
+        revision_id=generated_lifecycle_identity.revision_id,
+        version_label=generated_lifecycle_identity.version_label,
+        lineage_id=generated_lifecycle_identity.lineage_id,
+        lifecycle_stage=generated_lifecycle_identity.lifecycle_stage,
         persist_fn=_persist_json_artifact,
     )
     _append_job_log(logs, f"Persisted AppSpec artifact: {artifact_id}")
@@ -1818,6 +1930,11 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
         policy_bundle=policy_bundle,
         job_id=str(job.id),
         app_spec_artifact_id=artifact_id,
+        generated_artifact_slug=generated_lifecycle_identity.artifact_slug,
+        revision_id=generated_lifecycle_identity.revision_id,
+        version_label=generated_lifecycle_identity.version_label,
+        lineage_id=generated_lifecycle_identity.lineage_id,
+        lifecycle_stage=generated_lifecycle_identity.lifecycle_stage,
         policy_slug_fn=_policy_bundle_slug,
         persist_fn=_persist_json_artifact,
     )
@@ -1832,8 +1949,12 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
     }
     generated_artifact_runtime_config = {
         "app_slug": app_spec["app_slug"],
-        "artifact_slug": _generated_artifact_slug(str(app_spec.get("app_slug") or "generated-app")),
+        "artifact_slug": generated_lifecycle_identity.artifact_slug,
         "artifact_version": GENERATED_ARTIFACT_VERSION,
+        "artifact_revision_id": generated_lifecycle_identity.revision_id,
+        "artifact_version_label": generated_lifecycle_identity.version_label,
+        "artifact_lineage_id": generated_lifecycle_identity.lineage_id,
+        "artifact_lifecycle_stage": generated_lifecycle_identity.lifecycle_stage,
         "app_spec_artifact_id": artifact_id,
         "policy_bundle_artifact_id": policy_bundle_artifact_id,
         "images": selected_images,
@@ -1848,6 +1969,7 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
         app_spec=app_spec,
         policy_bundle=policy_bundle,
         runtime_config=generated_artifact_runtime_config,
+        lifecycle_identity=generated_lifecycle_identity,
     )
     _append_job_log(
         logs,
@@ -2125,6 +2247,8 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
 
 
 def _claim_next_job(db: Session) -> Optional[Job]:
+    # Queue ownership: this shell exclusively claims queued jobs and marks them
+    # RUNNING before stage dispatch.
     row = (
         db.query(Job)
         .filter(Job.status == JobStatus.QUEUED.value)
@@ -2174,6 +2298,7 @@ def _recover_running_jobs(db: Session) -> None:
 
 
 def _execute_job(job_id: uuid.UUID) -> None:
+    # Stage router: dispatch by job.type and preserve fail-fast error semantics.
     db = SessionLocal()
     try:
         job = db.query(Job).filter(Job.id == job_id).first()
@@ -2237,6 +2362,7 @@ def _execute_job(job_id: uuid.UUID) -> None:
 
 
 def _worker_loop(stop_event: threading.Event) -> None:
+    # Worker lifecycle shell: recover stale RUNNING rows, then claim/execute.
     bootstrap_db = SessionLocal()
     try:
         _recover_running_jobs(bootstrap_db)
@@ -2275,8 +2401,8 @@ def stop_app_job_worker(handle: Optional[AppJobWorkerHandle]) -> None:
 
 
 # AppSpec extraction compatibility shims:
-# Preserve existing private symbol names for callers/tests while delegating
-# to extracted modules without changing behavior.
+# Preserve existing private symbol names for callers/tests while delegating to
+# extracted modules without changing behavior.
 _safe_slug = appspec_normalization._safe_slug
 _normalize_unique_strings = appspec_normalization._normalize_unique_strings
 _title_case_words = appspec_normalization._title_case_words

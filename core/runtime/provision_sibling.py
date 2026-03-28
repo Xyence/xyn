@@ -100,6 +100,8 @@ def handle_provision_sibling_xyn(
     if sibling_api_container and docker_container_running_fn(sibling_api_container):
         preferred_artifact_slug = str(generated_artifact.get("artifact_slug") or "").strip()
         preferred_artifact_version = str(generated_artifact.get("artifact_version") or "").strip()
+        preferred_artifact_revision_id = str(generated_artifact.get("revision_id") or generated_artifact.get("artifact_revision_id") or "").strip()
+        preferred_artifact_version_label = str(generated_artifact.get("version_label") or generated_artifact.get("artifact_version_label") or "").strip()
         preferred_artifact_package_path = Path(str(generated_artifact.get("artifact_package_path") or "")).expanduser()
         if not preferred_artifact_slug or not preferred_artifact_package_path.exists():
             raise RuntimeError(
@@ -115,17 +117,26 @@ def handle_provision_sibling_xyn(
         )
         append_job_log_fn(
             logs,
-            f"Imported generated artifact {preferred_artifact_slug}@{preferred_artifact_version or generated_artifact_version} into sibling registry",
+            "Imported generated artifact "
+            f"{preferred_artifact_slug}@{preferred_artifact_version or generated_artifact_version}"
+            + (f" revision={preferred_artifact_revision_id}" if preferred_artifact_revision_id else "")
+            + " into sibling registry",
         )
         installed_artifact = install_generated_artifact_in_sibling_fn(
             sibling_api_container=sibling_api_container,
             workspace_slug=workspace_slug,
             artifact_slug=preferred_artifact_slug,
             artifact_version=preferred_artifact_version,
+            artifact_revision_id=preferred_artifact_revision_id,
         )
+        if preferred_artifact_version_label and isinstance(installed_artifact, dict) and not str(installed_artifact.get("artifact_version_label") or "").strip():
+            installed_artifact["artifact_version_label"] = preferred_artifact_version_label
         append_job_log_fn(
             logs,
-            f"Installed generated artifact {preferred_artifact_slug}@{preferred_artifact_version or 'latest'} into sibling workspace",
+            "Installed generated artifact "
+            f"{preferred_artifact_slug}@{preferred_artifact_version or 'latest'}"
+            + (f" revision={str(installed_artifact.get('artifact_revision_id') or preferred_artifact_revision_id or '')}" if (installed_artifact or preferred_artifact_revision_id) else "")
+            + " into sibling workspace",
         )
     sibling_output["installed_artifact"] = installed_artifact
     sibling_output["installed_artifact_source"] = "generated"
@@ -166,6 +177,7 @@ def handle_provision_sibling_xyn(
             "runtime_owner": "sibling",
             "source_build_job_id": str(payload.get("source_job_id") or ""),
             "source_workspace_id": str(job.workspace_id),
+            "installed_revision_id": str((installed_artifact or {}).get("artifact_revision_id") or ""),
         }
     )
     registration = register_sibling_runtime_target_fn(
