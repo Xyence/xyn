@@ -49,3 +49,36 @@ If it fails:
 - Inspect `xyn-core` logs: `docker logs xyn-core`
 - Inspect MinIO logs: `docker logs xyn-minio`
 - Confirm the runtime provider env values passed in `compose.minio.yml`.
+
+## DB-Backed Test Policy
+
+Some tests exercise real Postgres persistence paths and should not silently
+degrade in CI.
+
+- Policy control:
+  - `XYN_DB_TEST_POLICY=required|optional`
+  - `XYN_REQUIRE_DB_TESTS=true` (equivalent to `required`)
+  - `CI=true` defaults to `required` when `XYN_DB_TEST_POLICY` is unset
+- Behavior:
+  - `required`: DB-backed tests fail loudly if Postgres/schema readiness is not met
+  - `optional` (local default): DB-backed tests may skip with explicit reason
+
+Current DB-backed diagnostics integration tests use this policy helper:
+- [db_requirements.py](/home/jrestivo/src/xyn/core/tests/db_requirements.py)
+
+Recommended CI posture:
+- Ensure Postgres is reachable and schema-ready before running DB-backed suites.
+- Run with `XYN_DB_TEST_POLICY=required` so regressions are not masked by skips.
+
+Deterministic CI bootstrap path:
+- Schema bootstrap script: [bootstrap_db_for_tests.sh](/home/jrestivo/src/xyn/scripts/bootstrap_db_for_tests.sh)
+- Required-mode DB suite runner: [run_db_backed_required_tests.sh](/home/jrestivo/src/xyn/scripts/run_db_backed_required_tests.sh)
+- CI workflow: [db-backed-tests.yml](/home/jrestivo/src/xyn/.github/workflows/db-backed-tests.yml)
+
+Local equivalent (with Postgres running and `psql` available):
+```bash
+export DATABASE_URL=postgresql://xyn:xyn_dev_password@localhost:5432/xyn
+export XYN_DB_TEST_POLICY=required
+./scripts/bootstrap_db_for_tests.sh
+./scripts/run_db_backed_required_tests.sh
+```

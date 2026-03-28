@@ -42,8 +42,8 @@ DEMO-02
 Title: Installed-capability semantics need to stay consistent  
 Description: The demo must keep Xyn as the primary runtime shell and demonstrate that deployment installs a new capability into Xyn, rather than implying a separate arbitrary frontend is the main user surface.  
 Impact on Demo: Weakens the platform story if the demo appears to leave Xyn to use the generated capability.  
-Current Status: partially addressed  
-Next Action: keep the Draft Detail surface and browser rehearsal centered on installed capability visibility, palette operation, and artifacts/reports inside Xyn.
+Current Status: largely addressed, monitor for regression  
+Next Action: keep the Draft Detail surface and browser rehearsal centered on installed capability visibility, palette operation, and artifacts/reports inside Xyn. Continue wiring shell open/use affordances to the artifact-first `capability_entry` semantics.
 
 DEMO-03  
 Title: Generated sibling artifact must remain the primary capability model  
@@ -56,8 +56,8 @@ DEMO-04
 Title: Legacy UI leakage remains possible on parts of the demo path  
 Description: Some navigation flows still risk falling into legacy Django-era surfaces or behaviors instead of the intended workbench experience.  
 Impact on Demo: Creates visible inconsistency and undermines confidence.  
-Current Status: partially addressed  
-Next Action: explicitly validate the golden path routes and remove or guard remaining legacy entrypoints relevant to the demo.
+Current Status: largely addressed, monitor for regression  
+Next Action: explicitly validate the golden path routes and remove or guard remaining legacy entrypoints relevant to the demo. Legacy `/ui/*` routes now redirect to the workbench path by default unless explicitly opted in for internal workflows.
 
 DEMO-05  
 Title: Demo-path status visibility is still thin  
@@ -87,7 +87,7 @@ Task Name: Keep deployment semantics honest inside Xyn shell
 Why It Matters for Demo: The demo should show that deployment installs new capability into Xyn rather than sending the user to a disconnected frontend.  
 Owner: Codex  
 Status: in-progress  
-Notes: Build tracking should show the generated AppSpec, local runtime deployment, sibling generated-artifact install state, available palette actions, and visible report/query outcomes inside Xyn. Fresh validation on 2026-03-08 confirmed that Draft Detail no longer claims a true root-local registry install; it now distinguishes local runtime deployment from generated-artifact installation in the sibling instance.
+Notes: Build tracking should show the generated AppSpec, local runtime deployment, sibling generated-artifact install state, available palette actions, and visible report/query outcomes inside Xyn. Fresh validation on 2026-03-08 confirmed that Draft Detail no longer claims a true root-local registry install; it now distinguishes local runtime deployment from generated-artifact installation in the sibling instance. Provision/smoke stage outputs now include a canonical artifact-first `capability_entry` block that prefers installed artifact identity/state for open/use semantics, with runtime URL fallback only when installation evidence is missing.
 
 TASK-03  
 Task Name: Bridge generated app into sibling Xyn install story  
@@ -115,7 +115,7 @@ Task Name: Guard demo path against legacy UI leaks
 Why It Matters for Demo: Demo users should not see inconsistent old/new surfaces in the core path.  
 Owner: Codex  
 Status: in-progress  
-Notes: Focus on workbench, platform settings, drafts, build tracking, and app open flow. Fresh browser validation on 2026-03-08 confirmed that `Open platform settings` now stays inside the workbench panel model, palette submissions from within Platform Settings continue to navigate to the correct workbench panels, and the sibling-install browser scenario passes end-to-end.
+Notes: Focus on workbench, platform settings, drafts, build tracking, and app open flow. Fresh browser validation on 2026-03-08 confirmed that `Open platform settings` now stays inside the workbench panel model, palette submissions from within Platform Settings continue to navigate to the correct workbench panels, and the sibling-install browser scenario passes end-to-end. Legacy `/ui/*` server-rendered routes are now separately gated by `XYN_ENABLE_LEGACY_UI_ROUTES` (default `false`) and redirect to `XYN_LEGACY_UI_REDIRECT_PATH` (default `/workbench`) when not explicitly opted in for internal workflows.
 
 TASK-07  
 Task Name: Prepare repeatable golden-path validation script/checklist  

@@ -50,6 +50,10 @@ def default_context_pack_manifest_path() -> str:
     return str(os.getenv("XYN_CONTEXT_PACK_MANIFEST_PATH", ".xyn/sync/context-packs.manifest.json")).strip() or ".xyn/sync/context-packs.manifest.json"
 
 
+def default_context_pack_artifact_path() -> str:
+    return str(os.getenv("XYN_CONTEXT_PACK_ARTIFACT_PATH", ".xyn/sync/context-packs.artifact.json")).strip() or ".xyn/sync/context-packs.artifact.json"
+
+
 def normalize_context_pack_definitions(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -76,24 +80,69 @@ def normalize_context_pack_definitions(rows: list[dict[str, Any]]) -> list[dict[
     return normalized
 
 
+def _load_from_context_pack_artifact(artifact_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+    if not artifact_path.exists():
+        return None
+    try:
+        payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    content = payload.get("content") if isinstance(payload.get("content"), dict) else {}
+    rows = content.get("context_packs") if isinstance(content.get("context_packs"), list) else []
+    normalized = normalize_context_pack_definitions([row for row in rows if isinstance(row, dict)])
+    if not normalized:
+        return None
+    artifact_meta = payload.get("artifact") if isinstance(payload.get("artifact"), dict) else {}
+    return normalized, {
+        "source_system": str(payload.get("source_system") or "xyn-platform"),
+        "manifest_version": str(payload.get("artifact_schema") or "xyn.context-pack-artifact.v1"),
+        "source_seed_pack_slug": str(payload.get("source_seed_pack_slug") or artifact_meta.get("slug") or ""),
+        "source_seed_pack_version": str(payload.get("source_seed_pack_version") or artifact_meta.get("version_label") or ""),
+        "manifest_path": str(artifact_path),
+        "fallback_used": False,
+        "distribution_mode": "artifact",
+        "artifact_slug": str(artifact_meta.get("slug") or ""),
+        "artifact_revision_id": str(artifact_meta.get("revision_id") or ""),
+        "artifact_version_label": str(artifact_meta.get("version_label") or ""),
+        "artifact_lineage_id": str(artifact_meta.get("lineage_id") or ""),
+    }
+
+
+def _load_from_context_pack_manifest(manifest_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+    if not manifest_path.exists():
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    rows = payload.get("context_packs") if isinstance(payload.get("context_packs"), list) else []
+    normalized = normalize_context_pack_definitions([row for row in rows if isinstance(row, dict)])
+    if not normalized:
+        return None
+    return normalized, {
+        "source_system": str(payload.get("source_system") or "xyn-platform"),
+        "manifest_version": str(payload.get("manifest_version") or "xyn.context-pack-runtime-manifest.v1"),
+        "source_seed_pack_slug": str(payload.get("source_seed_pack_slug") or ""),
+        "source_seed_pack_version": str(payload.get("source_seed_pack_version") or ""),
+        "manifest_path": str(manifest_path),
+        "fallback_used": False,
+        "distribution_mode": "manifest",
+        "artifact_slug": "",
+        "artifact_revision_id": "",
+        "artifact_version_label": "",
+        "artifact_lineage_id": "",
+    }
+
+
 def load_authoritative_context_pack_definitions() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    artifact_path = Path(default_context_pack_artifact_path()).expanduser()
     manifest_path = Path(default_context_pack_manifest_path()).expanduser()
-    if manifest_path.exists():
-        try:
-            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-            rows = payload.get("context_packs") if isinstance(payload.get("context_packs"), list) else []
-            normalized = normalize_context_pack_definitions([row for row in rows if isinstance(row, dict)])
-            if normalized:
-                return normalized, {
-                    "source_system": str(payload.get("source_system") or "xyn-platform"),
-                    "manifest_version": str(payload.get("manifest_version") or "xyn.context-pack-runtime-manifest.v1"),
-                    "source_seed_pack_slug": str(payload.get("source_seed_pack_slug") or ""),
-                    "source_seed_pack_version": str(payload.get("source_seed_pack_version") or ""),
-                    "manifest_path": str(manifest_path),
-                    "fallback_used": False,
-                }
-        except Exception:
-            pass
+    artifact_result = _load_from_context_pack_artifact(artifact_path)
+    if artifact_result:
+        return artifact_result
+    manifest_result = _load_from_context_pack_manifest(manifest_path)
+    if manifest_result:
+        return manifest_result
     return normalize_context_pack_definitions(FALLBACK_CONTEXT_PACKS), {
         "source_system": "xyn-core-fallback",
         "manifest_version": "builtin-fallback",
@@ -101,4 +150,9 @@ def load_authoritative_context_pack_definitions() -> tuple[list[dict[str, Any]],
         "source_seed_pack_version": "",
         "manifest_path": str(manifest_path),
         "fallback_used": True,
+        "distribution_mode": "builtin-fallback",
+        "artifact_slug": "",
+        "artifact_revision_id": "",
+        "artifact_version_label": "",
+        "artifact_lineage_id": "",
     }

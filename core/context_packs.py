@@ -74,6 +74,11 @@ def ensure_runtime_context_pack_artifacts(db: Session) -> list[Artifact]:
             "source_seed_pack_version": source_info["source_seed_pack_version"],
             "source_manifest_path": source_info["manifest_path"],
             "source_fallback_used": bool(source_info["fallback_used"]),
+            "source_distribution_mode": str(source_info.get("distribution_mode") or "manifest"),
+            "source_artifact_slug": str(source_info.get("artifact_slug") or ""),
+            "source_artifact_revision_id": str(source_info.get("artifact_revision_id") or ""),
+            "source_artifact_version_label": str(source_info.get("artifact_version_label") or ""),
+            "source_artifact_lineage_id": str(source_info.get("artifact_lineage_id") or ""),
         }
         if existing is None:
             existing = Artifact(
@@ -153,9 +158,9 @@ def resolve_bound_context_pack_artifacts(
         )
         rows = [row for row in rows if bool(((row.extra_metadata or {}).get("bind_by_default")))]
         if rows:
-            warnings.append("Using synchronized default context-pack bindings from the authoritative runtime manifest.")
+            warnings.append("Using synchronized default context-pack bindings from the authoritative context-pack distribution payload.")
     if any(bool(((row.extra_metadata or {}).get("source_fallback_used"))) for row in rows):
-        warnings.append("Authoritative xyn-platform context-pack manifest not found; using xyn-core fallback definitions.")
+        warnings.append("Authoritative xyn-platform context-pack distribution not found; using xyn-core fallback definitions.")
     sync_target = get_workspace_sync_target(db, workspace_slug=workspace.slug)
     if not sync_target:
         warnings.append("No artifact sync target configured. Cross-instance portability requires published artifacts or explicit import bundles.")

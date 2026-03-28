@@ -1,0 +1,75 @@
+name: DB-Backed Tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "core/**"
+      - "scripts/apply_migrations.sh"
+      - "scripts/bootstrap_db_for_tests.sh"
+      - "scripts/run_db_backed_required_tests.sh"
+      - "requirements.txt"
+      - ".github/workflows/db-backed-tests.yml"
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - "core/**"
+      - "scripts/apply_migrations.sh"
+      - "scripts/bootstrap_db_for_tests.sh"
+      - "scripts/run_db_backed_required_tests.sh"
+      - "requirements.txt"
+      - ".github/workflows/db-backed-tests.yml"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  db-backed-required-tests:
+    name: DB-backed required-mode tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: xyn
+          POSTGRES_USER: xyn
+          POSTGRES_PASSWORD: xyn_dev_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xyn -d xyn"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://xyn:xyn_dev_password@localhost:5432/xyn
+      XYN_DB_TEST_POLICY: required
+      XYN_AUTO_CREATE_SCHEMA: "false"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Bootstrap DB schema for tests
+        run: |
+          chmod +x scripts/bootstrap_db_for_tests.sh
+          scripts/bootstrap_db_for_tests.sh
+
+      - name: Run DB-backed required-mode tests
+        run: |
+          chmod +x scripts/run_db_backed_required_tests.sh
+          scripts/run_db_backed_required_tests.sh

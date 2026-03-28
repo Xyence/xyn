@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+"""Sibling provisioning orchestration.
+
+DEBT-05 / DEMO-02 hardening:
+- Emits a canonical ``capability_entry`` block in stage output.
+- ``capability_entry`` is artifact-first: installed artifact identity/state is
+  the primary open/use source of truth, with runtime URL fallback retained for
+  compatibility when install evidence is unavailable.
+"""
+
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +19,50 @@ from sqlalchemy.orm import Session
 
 from core.models import Job
 from core.provisioning_local import ProvisionLocalRequest
+
+
+def _build_capability_entry(
+    *,
+    installed_artifact: dict[str, Any] | None,
+    generated_artifact: dict[str, Any] | None,
+    sibling_output: dict[str, Any],
+    sibling_runtime: dict[str, Any] | None,
+) -> dict[str, Any]:
+    installed = installed_artifact if isinstance(installed_artifact, dict) else {}
+    generated = generated_artifact if isinstance(generated_artifact, dict) else {}
+    runtime = sibling_runtime if isinstance(sibling_runtime, dict) else {}
+    installed_id = str(installed.get("artifact_id") or "").strip()
+    installed_slug = str(installed.get("artifact_slug") or "").strip()
+    generated_slug = str(generated.get("artifact_slug") or "").strip()
+    generated_revision_id = str(generated.get("revision_id") or generated.get("artifact_revision_id") or "").strip()
+    installed_revision_id = str(installed.get("artifact_revision_id") or "").strip()
+    runtime_base_url = str(runtime.get("runtime_base_url") or "").strip()
+    runtime_public_url = str(runtime.get("public_app_url") or runtime.get("app_url") or sibling_output.get("ui_url") or "").strip()
+    is_installed = bool(installed_id and installed_slug)
+
+    return {
+        "source_of_truth": "installed_artifact" if is_installed else "generated_artifact",
+        "state": "installed" if is_installed else "generated_not_installed",
+        "installed_artifact": {
+            "artifact_id": installed_id,
+            "artifact_slug": installed_slug,
+            "workspace_id": str(installed.get("workspace_id") or "").strip(),
+            "workspace_slug": str(installed.get("workspace_slug") or "").strip(),
+            "artifact_revision_id": installed_revision_id,
+            "artifact_version_label": str(installed.get("artifact_version_label") or "").strip(),
+        },
+        "generated_artifact": {
+            "artifact_slug": generated_slug,
+            "artifact_version": str(generated.get("artifact_version") or "").strip(),
+            "artifact_revision_id": generated_revision_id,
+            "artifact_version_label": str(generated.get("version_label") or generated.get("artifact_version_label") or "").strip(),
+        },
+        "open_preference": {
+            "mode": "artifact_shell" if is_installed else "runtime_url_fallback",
+            "runtime_base_url": runtime_base_url,
+            "runtime_public_url": runtime_public_url,
+        },
+    }
 
 
 def handle_provision_sibling_xyn(
@@ -100,6 +153,8 @@ def handle_provision_sibling_xyn(
     if sibling_api_container and docker_container_running_fn(sibling_api_container):
         preferred_artifact_slug = str(generated_artifact.get("artifact_slug") or "").strip()
         preferred_artifact_version = str(generated_artifact.get("artifact_version") or "").strip()
+        preferred_artifact_revision_id = str(generated_artifact.get("revision_id") or generated_artifact.get("artifact_revision_id") or "").strip()
+        preferred_artifact_version_label = str(generated_artifact.get("version_label") or generated_artifact.get("artifact_version_label") or "").strip()
         preferred_artifact_package_path = Path(str(generated_artifact.get("artifact_package_path") or "")).expanduser()
         if not preferred_artifact_slug or not preferred_artifact_package_path.exists():
             raise RuntimeError(
@@ -115,17 +170,26 @@ def handle_provision_sibling_xyn(
         )
         append_job_log_fn(
             logs,
-            f"Imported generated artifact {preferred_artifact_slug}@{preferred_artifact_version or generated_artifact_version} into sibling registry",
+            "Imported generated artifact "
+            f"{preferred_artifact_slug}@{preferred_artifact_version or generated_artifact_version}"
+            + (f" revision={preferred_artifact_revision_id}" if preferred_artifact_revision_id else "")
+            + " into sibling registry",
         )
         installed_artifact = install_generated_artifact_in_sibling_fn(
             sibling_api_container=sibling_api_container,
             workspace_slug=workspace_slug,
             artifact_slug=preferred_artifact_slug,
             artifact_version=preferred_artifact_version,
+            artifact_revision_id=preferred_artifact_revision_id,
         )
+        if preferred_artifact_version_label and isinstance(installed_artifact, dict) and not str(installed_artifact.get("artifact_version_label") or "").strip():
+            installed_artifact["artifact_version_label"] = preferred_artifact_version_label
         append_job_log_fn(
             logs,
-            f"Installed generated artifact {preferred_artifact_slug}@{preferred_artifact_version or 'latest'} into sibling workspace",
+            "Installed generated artifact "
+            f"{preferred_artifact_slug}@{preferred_artifact_version or 'latest'}"
+            + (f" revision={str(installed_artifact.get('artifact_revision_id') or preferred_artifact_revision_id or '')}" if (installed_artifact or preferred_artifact_revision_id) else "")
+            + " into sibling workspace",
         )
     sibling_output["installed_artifact"] = installed_artifact
     sibling_output["installed_artifact_source"] = "generated"
@@ -166,6 +230,7 @@ def handle_provision_sibling_xyn(
             "runtime_owner": "sibling",
             "source_build_job_id": str(payload.get("source_job_id") or ""),
             "source_workspace_id": str(job.workspace_id),
+            "installed_revision_id": str((installed_artifact or {}).get("artifact_revision_id") or ""),
         }
     )
     registration = register_sibling_runtime_target_fn(
@@ -178,6 +243,12 @@ def handle_provision_sibling_xyn(
     )
     sibling_output["runtime_target"] = sibling_runtime
     sibling_output["runtime_registration"] = registration
+    sibling_output["capability_entry"] = _build_capability_entry(
+        installed_artifact=installed_artifact,
+        generated_artifact=generated_artifact,
+        sibling_output=sibling_output,
+        sibling_runtime=sibling_runtime,
+    )
     append_job_log_fn(
         logs,
         "Registered sibling-owned runtime target "
