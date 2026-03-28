@@ -664,7 +664,7 @@ class AppSpecHybridInferencePersistenceIntegrationTests(unittest.TestCase):
                 "name": "consistency_warning",
                 "prompt": "Build campaign operations tooling with interfaces by status charts.",
                 "expect_warning": False,
-                "expect_limited_mode_warning": False,
+                "expect_limited_mode_warning": True,
             },
         ]
 
