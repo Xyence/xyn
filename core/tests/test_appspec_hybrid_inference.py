@@ -658,11 +658,13 @@ class AppSpecHybridInferencePersistenceIntegrationTests(unittest.TestCase):
                 "name": "free_form_semantic",
                 "prompt": "Create an internal customer ticket tracker with notes.",
                 "expect_warning": False,
+                "expect_limited_mode_warning": True,
             },
             {
                 "name": "consistency_warning",
                 "prompt": "Build campaign operations tooling with interfaces by status charts.",
                 "expect_warning": True,
+                "expect_limited_mode_warning": False,
             },
         ]
 
@@ -722,8 +724,19 @@ class AppSpecHybridInferencePersistenceIntegrationTests(unittest.TestCase):
                         self.assertEqual((app_spec_row.metadata_json or {}).get("inference_diagnostics"), diagnostics)
                         self.assertEqual((note_row.metadata_json or {}).get("inference_diagnostics"), diagnostics)
 
-                        has_warning = bool(diagnostics.get("consistency_warnings"))
-                        self.assertEqual(has_warning, case["expect_warning"])
+                        warnings = (
+                            diagnostics.get("consistency_warnings")
+                            if isinstance(diagnostics.get("consistency_warnings"), list)
+                            else []
+                        )
+                        limited_mode_warnings = [
+                            row for row in warnings if "limited heuristic mode" in str(row).lower()
+                        ]
+                        has_non_limited_warnings = any(
+                            "limited heuristic mode" not in str(row).lower() for row in warnings
+                        )
+                        self.assertEqual(has_non_limited_warnings, case["expect_warning"])
+                        self.assertEqual(bool(limited_mode_warnings), case["expect_limited_mode_warning"])
 
                         # Backward-compatible older-style read path: diagnostics may be absent.
                         self.assertTrue(isinstance(policy_row.metadata_json, dict))
