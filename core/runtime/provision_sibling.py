@@ -248,6 +248,8 @@ def handle_provision_sibling_xyn(
         artifact_slug=str(installed_artifact.get("artifact_slug") or generated_artifact.get("artifact_slug") or f"app.{app_slug}"),
         title=str(app_spec.get("title") or app_slug),
         runtime_target=sibling_runtime,
+        sibling_ui_url=str(sibling_output.get("ui_url") or ""),
+        sibling_api_url=str(sibling_output.get("api_url") or ""),
     )
     sibling_output["runtime_target"] = sibling_runtime
     sibling_output["runtime_registration"] = registration

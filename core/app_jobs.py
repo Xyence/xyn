@@ -870,7 +870,21 @@ def _register_sibling_runtime_target(
     artifact_slug: str,
     title: str,
     runtime_target: dict[str, Any],
+    sibling_ui_url: str = "",
+    sibling_api_url: str = "",
 ) -> dict[str, Any]:
+    sibling_ui = str(sibling_ui_url or "").strip()
+    sibling_api = str(sibling_api_url or "").strip()
+    registration_body: dict[str, Any] = {
+        "app_slug": app_slug,
+        "artifact_slug": artifact_slug,
+        "title": title,
+        "runtime_target": runtime_target,
+    }
+    if sibling_ui:
+        registration_body["sibling_ui_url"] = sibling_ui
+    if sibling_api:
+        registration_body["sibling_api_url"] = sibling_api
     register_code, register_body, register_text = _container_http_session_json(
         sibling_api_container,
         port=8000,
@@ -883,12 +897,7 @@ def _register_sibling_runtime_target(
             {
                 "method": "POST",
                 "path": f"/xyn/api/workspaces/{workspace_id}/app-runtime-targets",
-                "body": {
-                    "app_slug": app_slug,
-                    "artifact_slug": artifact_slug,
-                    "title": title,
-                    "runtime_target": runtime_target,
-                },
+                "body": registration_body,
             },
         ],
     )

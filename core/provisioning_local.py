@@ -325,6 +325,7 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       POSTGRES_PORT: 5432
       XYN_ENV: local
       XYN_AUTH_MODE: ${{XYN_AUTH_MODE:-dev}}
+      DJANGO_ALLOWED_HOSTS: ${{DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,backend,{ui_host},{api_host}}}
       XYN_INTENT_ENGINE_V1: ${{XYN_INTENT_ENGINE_V1:-1}}
       XYN_PUBLIC_BASE_URL: ${{XYN_PUBLIC_BASE_URL:-{ui_scheme}://{ui_host}}}
       XYN_TRUST_PROXY: ${{XYN_TRUST_PROXY:-true}}
@@ -385,6 +386,7 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       POSTGRES_PORT: 5432
       XYN_ENV: local
       XYN_AUTH_MODE: ${{XYN_AUTH_MODE:-dev}}
+      DJANGO_ALLOWED_HOSTS: ${{DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,backend,{ui_host},{api_host}}}
       XYN_INTENT_ENGINE_V1: ${{XYN_INTENT_ENGINE_V1:-1}}
       XYN_PUBLIC_BASE_URL: ${{XYN_PUBLIC_BASE_URL:-{ui_scheme}://{ui_host}}}
       XYN_TRUST_PROXY: ${{XYN_TRUST_PROXY:-true}}
