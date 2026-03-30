@@ -29,6 +29,11 @@ Production deployments should inject env via seed/compose and should not depend 
 - Optional purpose-specific bootstrap overlays:
   - `XYN_AI_PLANNING_PROVIDER` / `XYN_AI_PLANNING_MODEL` / `XYN_AI_PLANNING_API_KEY`
   - `XYN_AI_CODING_PROVIDER` / `XYN_AI_CODING_MODEL` / `XYN_AI_CODING_API_KEY`
+- Optional deterministic routing overrides (agent slugs):
+  - `XYN_AI_ROUTING_DEFAULT_AGENT_SLUG`
+  - `XYN_AI_ROUTING_PLANNING_AGENT_SLUG`
+  - `XYN_AI_ROUTING_CODING_AGENT_SLUG`
+  - `XYN_AI_ROUTING_PALETTE_AGENT_SLUG`
 - Secret encryption key (for encrypted credential storage fallback):
   - `XYN_SECRET_KEY` (or `XYN_CREDENTIALS_ENCRYPTION_KEY`)
 
