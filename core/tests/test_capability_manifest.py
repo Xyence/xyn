@@ -252,6 +252,25 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertIn("/app/campaigns/new", routes)
         self.assertNotIn("/app/signals", routes)
 
+    def test_resolved_manifest_views_only_include_modern_campaign_routes(self):
+        manifest = build_resolved_capability_manifest(
+            {
+                "app_slug": "deal-finder",
+                "title": "Deal Finder",
+                "workspace_id": str(uuid.uuid4()),
+                "entities": ["campaigns", "properties", "signals", "sources", "watches"],
+                "reports": [],
+                "workflow_definitions": [{"workflow_key": "map-selection", "description": "Map rectangle selection workflow"}],
+                "ui_surfaces": "admin dashboards and map selection",
+            }
+        )
+        view_paths = {str(row.get("path") or "") for row in (manifest.get("views") or []) if isinstance(row, dict)}
+        self.assertEqual(view_paths, {"/app/campaigns", "/app/campaigns/new"})
+        self.assertNotIn("/app/workbench", view_paths)
+        self.assertNotIn("/app/admin", view_paths)
+        self.assertNotIn("/app/map-selection", view_paths)
+        self.assertNotIn("/app/properties", view_paths)
+
 
 if __name__ == "__main__":
     unittest.main()

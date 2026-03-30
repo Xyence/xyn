@@ -545,52 +545,14 @@ def _is_admin_entity_key(entity_key: str) -> bool:
 
 
 def _build_manifest_views(*, app_spec: dict[str, Any], entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    views: list[dict[str, Any]] = [
-        {"id": "workbench-manage", "label": "Workbench", "path": "/app/workbench", "surface": "manage"},
-        {"id": "workbench-docs", "label": "Workbench", "path": "/app/workbench", "surface": "docs"},
-    ]
-    seen_ids = {str(row.get("id") or "") for row in views}
-    for entity in entities:
-        if not isinstance(entity, dict):
-            continue
-        entity_key = str(entity.get("key") or "").strip()
-        if not entity_key:
-            continue
-        view_id = f"entity-{entity_key}"
-        if view_id in seen_ids:
-            continue
-        seen_ids.add(view_id)
-        label = str(entity.get("plural_label") or entity_key).replace("_", " ").title()
-        views.append(
-            {
-                "id": view_id,
-                "label": label,
-                "path": f"/app/{entity_key}",
-                "surface": "admin" if _is_admin_entity_key(entity_key) else "manage",
-            }
-        )
-    workflow_defs = app_spec.get("workflow_definitions") if isinstance(app_spec.get("workflow_definitions"), list) else []
-    workflow_blob = " ".join(
-        str(row.get("description") or "")
-        for row in workflow_defs
-        if isinstance(row, dict)
-    ).lower()
-    ui_surface_blob = str(app_spec.get("ui_surfaces") or "").lower()
-    requires = {
-        str(token or "").strip().lower()
-        for token in (app_spec.get("requires_primitives") if isinstance(app_spec.get("requires_primitives"), list) else [])
-        if str(token or "").strip()
-    }
-    if (
-        "map" in workflow_blob
-        or "rectangle" in workflow_blob
-        or "map" in ui_surface_blob
-        or "rectangle" in ui_surface_blob
-        or "geospatial" in requires
-    ):
-        views.append({"id": "workflow-map-selection", "label": "Map Selection", "path": "/app/map-selection", "surface": "manage"})
-    if "admin" in workflow_blob or "operator" in workflow_blob or "admin" in ui_surface_blob or "operator" in ui_surface_blob:
-        views.append({"id": "workflow-admin", "label": "Admin / Operator", "path": "/app/admin", "surface": "admin"})
+    # Keep generated capability views limited to modern renderer-backed routes.
+    # Legacy compatibility views (/app/workbench, /app/<entity>, /app/admin, /app/map-selection)
+    # are intentionally omitted from source-of-truth manifests.
+    views: list[dict[str, Any]] = []
+    has_campaigns = any(str(entity.get("key") or "").strip() == "campaigns" for entity in entities if isinstance(entity, dict))
+    if has_campaigns:
+        views.append({"id": "entity-campaigns", "label": "Campaigns", "path": "/app/campaigns", "surface": "manage"})
+        views.append({"id": "entity-campaigns-new", "label": "New Campaign", "path": "/app/campaigns/new", "surface": "manage"})
     return views
 
 
