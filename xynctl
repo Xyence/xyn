@@ -51,6 +51,7 @@ DEFAULT_ARTIFACT_REGISTRY = "public.ecr.aws/i0h0h0n4/xyn/artifacts"
 DEFAULT_UI_IMAGE_NAME = "xyn-ui"
 DEFAULT_API_IMAGE_NAME = "xyn-api"
 DEFAULT_IMAGE_TAG = "dev"
+IMAGE_SOURCE_SHA_LABEL = "org.xyn.build.source_sha"
 DEFAULT_CONTEXT_PACK_MANIFEST = ".xyn/sync/context-packs.manifest.json"
 DEFAULT_CONTEXT_PACK_ARTIFACT = ".xyn/sync/context-packs.artifact.json"
 DEFAULT_USER_WORKSPACE_SLUG = "development"
@@ -584,6 +585,24 @@ def _docker_image_exists(image_ref: str) -> bool:
     return code == 0
 
 
+def _git_head_sha(path_text: str) -> str:
+    target = str(path_text or "").strip()
+    if not target:
+        return ""
+    code, out, _ = _run_capture(["git", "-C", target, "rev-parse", "HEAD"])
+    if code != 0:
+        return ""
+    return str(out).strip()
+
+
+def _expected_platform_image_source_shas(env: dict[str, str]) -> tuple[str, str]:
+    api_context = str(env.get("XYN_LOCAL_API_CONTEXT", "")).strip() or str(Path("../xyn-platform/services/xyn-api/backend").resolve())
+    ui_context = str(env.get("XYN_LOCAL_UI_CONTEXT", "")).strip() or str(Path("../xyn-platform/apps/xyn-ui").resolve())
+    api_sha = _git_head_sha(api_context)
+    ui_sha = _git_head_sha(ui_context)
+    return api_sha, ui_sha
+
+
 def _context_has_dockerfile(path_text: str) -> bool:
     candidate = Path(path_text).expanduser().resolve()
     return candidate.is_dir() and (candidate / "Dockerfile").exists()
@@ -616,13 +635,35 @@ def _resolve_artifacts(env: dict[str, str]) -> tuple[bool, dict[str, str]]:
     local_api_context = str(env.get("XYN_LOCAL_API_CONTEXT", "")).strip()
     if local_ui_context and local_api_context and _context_has_dockerfile(local_ui_context) and _context_has_dockerfile(local_api_context):
         resolved["mode"] = "local_build"
+        api_source_sha = _git_head_sha(local_api_context) or "unknown"
+        ui_source_sha = _git_head_sha(local_ui_context) or "unknown"
         print_info(f"Building local API image from: {local_api_context}")
-        code, _, err = _run_capture(["docker", "build", "-t", DEFAULT_API_IMAGE_NAME, local_api_context])
+        code, _, err = _run_capture(
+            [
+                "docker",
+                "build",
+                "--build-arg",
+                f"XYN_BUILD_SOURCE_SHA={api_source_sha}",
+                "-t",
+                DEFAULT_API_IMAGE_NAME,
+                local_api_context,
+            ]
+        )
         if code != 0:
             print_error(err or "docker build failed for API context")
             return False, resolved
         print_info(f"Building local UI image from: {local_ui_context}")
-        code, _, err = _run_capture(["docker", "build", "-t", DEFAULT_UI_IMAGE_NAME, local_ui_context])
+        code, _, err = _run_capture(
+            [
+                "docker",
+                "build",
+                "--build-arg",
+                f"XYN_BUILD_SOURCE_SHA={ui_source_sha}",
+                "-t",
+                DEFAULT_UI_IMAGE_NAME,
+                local_ui_context,
+            ]
+        )
         if code != 0:
             print_error(err or "docker build failed for UI context")
             return False, resolved
@@ -911,6 +952,73 @@ def _run_capture(cmd: list[str]) -> tuple[int, str, str]:
         return 1, "", str(exc)
 
 
+def _running_ui_api_containers() -> list[dict[str, str]]:
+    code, out, err = _run_capture(["docker", "ps", "--format", "{{.Names}}\t{{.Image}}"])
+    if code != 0:
+        print_error(err.strip() or "Failed to list running containers")
+        return []
+    rows: list[dict[str, str]] = []
+    for raw in out.splitlines():
+        line = raw.strip()
+        if not line or "\t" not in line:
+            continue
+        name, image = [part.strip() for part in line.split("\t", 1)]
+        if not name:
+            continue
+        if not re.match(r"^xyn-local-(api|ui)$", name) and not re.match(r"^xyn-smoke-[a-z0-9-]+-(api|ui)$", name):
+            continue
+        service = "api" if name.endswith("-api") else "ui" if name.endswith("-ui") else ""
+        if not service:
+            continue
+        rows.append({"name": name, "image": image, "service": service})
+    return rows
+
+
+def _image_source_sha(image_ref: str) -> str:
+    code, out, _ = _run_capture(
+        ["docker", "image", "inspect", image_ref, "--format", f"{{{{ index .Config.Labels \"{IMAGE_SOURCE_SHA_LABEL}\" }}}}"]
+    )
+    if code != 0:
+        return ""
+    return str(out).strip()
+
+
+def freshness_check(env: dict[str, str]) -> int:
+    expected_api_sha, expected_ui_sha = _expected_platform_image_source_shas(env)
+    if not expected_api_sha or not expected_ui_sha:
+        print_error("Unable to determine expected xyn-platform source SHA from local API/UI contexts.")
+        print_info("Set XYN_LOCAL_API_CONTEXT and XYN_LOCAL_UI_CONTEXT in .env to valid xyn-platform directories.")
+        return 2
+    print_info(f"Expected API source SHA: {expected_api_sha}")
+    print_info(f"Expected UI source SHA:  {expected_ui_sha}")
+    rows = _running_ui_api_containers()
+    if not rows:
+        print_warning("No running local/sibling UI/API containers found.")
+        return 0
+    failures: list[str] = []
+    print_info("Runtime freshness:")
+    for row in rows:
+        expected = expected_api_sha if row["service"] == "api" else expected_ui_sha
+        actual = _image_source_sha(row["image"])
+        if not actual or actual == "unknown":
+            status = "FAIL (unverifiable)"
+            failures.append(f"{row['name']}: image {row['image']} missing {IMAGE_SOURCE_SHA_LABEL}")
+        elif actual != expected:
+            status = "FAIL (stale)"
+            failures.append(f"{row['name']}: image {row['image']} stamped {actual}, expected {expected}")
+        else:
+            status = "OK"
+        print_info(f"  - {row['name']} [{row['service']}] image={row['image']} stamp={actual or '<missing>'} -> {status}")
+    if failures:
+        print_error("Freshness check failed.")
+        for item in failures:
+            print_error(f"  - {item}")
+        print_info("Rebuild and recreate xyn-api/xyn-ui images/containers before validating behavior.")
+        return 1
+    print_success("Freshness check passed for all running local/sibling UI/API containers.")
+    return 0
+
+
 def _cleanup_compose_project(project: str) -> tuple[bool, str]:
     project_name = str(project or "").strip()
     if not project_name:
@@ -1080,6 +1188,8 @@ def main() -> None:
         sys.exit(0)
     if cmd == "status":
         sys.exit(status(seed_url))
+    if cmd == "freshness":
+        sys.exit(freshness_check(env))
     if cmd == "apply":
         if "--from" not in sys.argv:
             print_error("Missing --from <path>")
@@ -1148,6 +1258,7 @@ def main() -> None:
         print("  ./xynctl quickstart [--force] [--name <name>]    # alias for start --provision")
         print("  ./xynctl provision local [--force] [--reset-state] [--name <name>] [--job-prompt <text>] [--repo-ref <path>]")
         print("  ./xynctl status")
+        print("  ./xynctl freshness        # verify running local/sibling ui/api containers match current xyn-platform source")
         print("  ./xynctl stop")
         print("  ./xynctl logs [service]")
         print("  ./xynctl apply --from <path>")

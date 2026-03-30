@@ -60,7 +60,7 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         self.assertIn(("application", "app.team-lunch-poll"), refs)
         self.assertIn(("policy_bundle", "policy.team-lunch-poll"), refs)
         self.assertEqual(packaged["policy_bundle_slug"], "policy.team-lunch-poll")
-        self.assertTrue(isinstance(surfaces, list) and surfaces)
+        self.assertTrue(isinstance(surfaces, list))
 
     def test_generated_package_surfaces_are_installer_compatible_and_manifest_nav_is_present(self):
         workspace_id = uuid.uuid4()
@@ -125,6 +125,15 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
             self.assertIn((row.get("renderer") or {}).get("type"), allowed_renderer_types)
         self.assertTrue(all(str(row.get("nav_visibility") or "") in {"always", "hidden"} for row in surfaces))
         self.assertTrue(any(str(row.get("route") or "").endswith("/:id") for row in surfaces))
+        surface_routes = {str(row.get("route") or "") for row in surfaces}
+        self.assertEqual(
+            surface_routes,
+            {
+                "/app/campaigns",
+                "/app/campaigns/new",
+                "/app/campaigns/:id",
+            },
+        )
         campaigns_create = next((row for row in surfaces if row.get("route") == "/app/campaigns/new"), {})
         campaigns_detail = next((row for row in surfaces if row.get("route") == "/app/campaigns/:id"), {})
         self.assertEqual(

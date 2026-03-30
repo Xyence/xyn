@@ -248,6 +248,9 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertIn("/app/campaigns/new", nav_paths)
         generated_defs = ((artifact_manifest.get("content") or {}).get("generated_surface_definitions"))
         self.assertTrue(isinstance(generated_defs, list) and generated_defs)
+        routes = {str(row.get("route") or "") for row in generated_defs if isinstance(row, dict)}
+        self.assertIn("/app/campaigns/new", routes)
+        self.assertNotIn("/app/signals", routes)
 
 
 if __name__ == "__main__":

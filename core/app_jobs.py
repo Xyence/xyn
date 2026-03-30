@@ -280,9 +280,6 @@ def _infer_map_surface_required(app_spec: dict[str, Any], ui_lines: list[str]) -
 def _build_generated_surface_definitions(*, app_spec: dict[str, Any], capability_manifest: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     entities = capability_manifest.get("entities") if isinstance(capability_manifest.get("entities"), list) else []
-    ui_lines = _extract_ui_surface_lines(app_spec)
-    admin_required = _infer_admin_surface_required(app_spec, ui_lines)
-    map_required = _infer_map_surface_required(app_spec, ui_lines)
 
     def _add_surface(
         *,
@@ -312,17 +309,19 @@ def _build_generated_surface_definitions(*, app_spec: dict[str, Any], capability
             }
         )
 
-    _add_surface(key="app-home", title="Application Home", route="/app", nav_section="manage", order=10)
-
     for idx, entity in enumerate(entities):
         if not isinstance(entity, dict):
             continue
         entity_key = str(entity.get("key") or "").strip()
         if not entity_key:
             continue
+        # Generated artifact surfaces are now intentionally narrow: only campaign
+        # workflows have a modern shell mapping contract in this build.
+        if entity_key != "campaigns":
+            continue
         plural_label = str(entity.get("plural_label") or entity_key).strip() or entity_key
         singular_label = str(entity.get("singular_label") or entity_key.rstrip("s")).strip() or entity_key.rstrip("s")
-        section = "admin" if _is_admin_surface_token(entity_key) else "manage"
+        section = "manage"
         _add_surface(
             key=f"entity-{entity_key}-list",
             title=plural_label.title(),
@@ -339,15 +338,11 @@ def _build_generated_surface_definitions(*, app_spec: dict[str, Any], capability
             order=102 + (idx * 10),
             nav_visibility="hidden",
             renderer_type="generic_dashboard",
-            renderer_payload=(
-                {
-                    "shell_renderer_key": "campaign_map_workflow",
-                    "mode": "detail",
-                    "campaign_id_param": "id",
-                }
-                if entity_key == "campaigns"
-                else None
-            ),
+            renderer_payload={
+                "shell_renderer_key": "campaign_map_workflow",
+                "mode": "detail",
+                "campaign_id_param": "id",
+            },
         )
         _add_surface(
             key=f"entity-{entity_key}-create",
@@ -357,42 +352,11 @@ def _build_generated_surface_definitions(*, app_spec: dict[str, Any], capability
             order=101 + (idx * 10),
             surface_kind="editor",
             renderer_type="generic_editor",
-            renderer_payload=(
-                {
-                    "shell_renderer_key": "campaign_map_workflow",
-                    "mode": "create",
-                }
-                if entity_key == "campaigns"
-                else None
-            ),
+            renderer_payload={
+                "shell_renderer_key": "campaign_map_workflow",
+                "mode": "create",
+            },
         )
-
-    if admin_required:
-        _add_surface(
-            key="admin-operator",
-            title="Admin / Operator",
-            route="/app/admin",
-            nav_section="admin",
-            order=50,
-        )
-    if map_required:
-        _add_surface(
-            key="map-selection",
-            title="Map Selection",
-            route="/app/map-selection",
-            nav_section="manage",
-            order=60,
-        )
-
-    _add_surface(
-        key="workbench",
-        title="Workbench",
-        route="/app/workbench",
-        nav_section="docs",
-        order=1000,
-        nav_visibility="hidden",
-        surface_kind="docs",
-    )
     rows.sort(key=lambda row: (str(row.get("nav_section") or ""), int(row.get("order") or 1000), str(row.get("key") or "")))
     return rows
 

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 
 def _load_xynctl_module():
@@ -80,6 +81,52 @@ class XynCtlEnvTests(unittest.TestCase):
             self.assertTrue(artifact_path.exists())
             payload = json.loads(artifact_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["artifact"]["kind"], "context-pack-bundle")
+
+    def test_running_ui_api_containers_filters_local_and_sibling(self):
+        mod = _load_xynctl_module()
+        with mock.patch.object(
+            mod,
+            "_run_capture",
+            return_value=(
+                0,
+                "\n".join(
+                    [
+                        "xyn-local-api\txyn-api:local",
+                        "xyn-local-ui\txyn-ui:local",
+                        "xyn-smoke-real-estate-de-api\txyn-api",
+                        "xyn-smoke-real-estate-de-ui\txyn-ui",
+                        "xyn-core\txyn-core",
+                    ]
+                ),
+                "",
+            ),
+        ):
+            rows = mod._running_ui_api_containers()
+        names = {row["name"] for row in rows}
+        self.assertIn("xyn-local-api", names)
+        self.assertIn("xyn-local-ui", names)
+        self.assertIn("xyn-smoke-real-estate-de-api", names)
+        self.assertIn("xyn-smoke-real-estate-de-ui", names)
+        self.assertNotIn("xyn-core", names)
+
+    def test_freshness_check_fails_on_stale_or_unverifiable_images(self):
+        mod = _load_xynctl_module()
+        with mock.patch.object(mod, "_expected_platform_image_source_shas", return_value=("sha-api", "sha-ui")), \
+            mock.patch.object(
+                mod,
+                "_running_ui_api_containers",
+                return_value=[
+                    {"name": "xyn-local-api", "image": "xyn-api:local", "service": "api"},
+                    {"name": "xyn-local-ui", "image": "xyn-ui:local", "service": "ui"},
+                ],
+            ), \
+            mock.patch.object(
+                mod,
+                "_image_source_sha",
+                side_effect=lambda image: {"xyn-api:local": "sha-api", "xyn-ui:local": "unknown"}.get(image, ""),
+            ):
+            status = mod.freshness_check({})
+        self.assertEqual(status, 1)
 
 
 if __name__ == "__main__":
