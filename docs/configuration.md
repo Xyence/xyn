@@ -61,6 +61,26 @@ Provider resolution:
   - local retention hint for stale managed workspace cleanup eligibility
   - default: `14`
 
+### Installable Solution Bundle Bootstrap
+
+Use these to auto-install durable solution bundles into the platform at startup:
+
+- `XYN_BOOTSTRAP_INSTALL_SOLUTIONS`
+  - comma-separated solution slugs to install (example: `deal-finder`)
+- `XYN_BOOTSTRAP_SOLUTION_SOURCE`
+  - `local` or `s3`
+- `XYN_BOOTSTRAP_SOLUTION_PREFIX`
+  - local directory (`local`) or key prefix (`s3`)
+- `XYN_BOOTSTRAP_SOLUTION_VERSION`
+  - optional version segment for startup lookup (`<solution>/<version>/manifest.json`)
+- `XYN_BOOTSTRAP_SOLUTION_BUCKET`
+  - required when source is `s3`
+- `XYN_BOOTSTRAP_IF_MISSING_ONLY`
+  - `true` (default): install only if solution missing
+  - `false`: always reinstall/update on startup
+- `XYN_BOOTSTRAP_SOLUTION_WORKSPACE_SLUG`
+  - optional workspace target (defaults to `XYN_WORKSPACE_SLUG` or `development`)
+
 Compatibility aliases still exported for current local flows:
 - `ARTIFACT_STORE_PATH` mirrors `XYN_ARTIFACT_ROOT`
 - `XYN_LOCAL_WORKSPACE_ROOT` and `XYNSEED_WORKSPACE` mirror `XYN_WORKSPACE_ROOT`
