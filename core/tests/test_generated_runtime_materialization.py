@@ -11,6 +11,7 @@ from unittest import mock
 from core.app_jobs import _build_app_spec, _build_policy_bundle, _materialize_net_inventory_compose, _package_generated_app, _prefer_local_platform_images_for_smoke
 from core.provisioning_local import (
     ProvisionLocalRequest,
+    _compose_yaml,
     _compose_down_cmd,
     _ensure_remote_workspace,
     _resolve_images_for_provision,
@@ -370,6 +371,21 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
             cmd,
             ["docker", "compose", "-p", "xyn-local", "-f", "/tmp/compose.yaml", "down", "--remove-orphans", "--volumes"],
         )
+
+    def test_local_compose_backend_includes_repo_mounts_and_runtime_repo_map(self):
+        compose_text = _compose_yaml(
+            "xyn-local",
+            ui_image="xyn-ui:latest",
+            api_image="xyn-api:latest",
+            ui_host="localhost",
+            api_host="api.localhost",
+        )
+        self.assertIn(
+            "XYN_RUNTIME_REPO_MAP: '${XYN_RUNTIME_REPO_MAP:-{\"xyn\":[\"/workspace/xyn\"],\"xyn-platform\":[\"/workspace/xyn-platform\"]}}'",
+            compose_text,
+        )
+        self.assertIn("${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn:/workspace/xyn", compose_text)
+        self.assertIn("${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn-platform:/workspace/xyn-platform", compose_text)
 
 
 if __name__ == "__main__":
