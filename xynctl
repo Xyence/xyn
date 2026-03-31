@@ -8,6 +8,7 @@ import json
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -369,6 +370,7 @@ def build_runtime_env() -> dict[str, str]:
     runtime = dict(os.environ)
     env_vars = normalize_ai_env(load_env())
     runtime.update(env_vars)
+    _hydrate_aws_env(runtime)
     if not str(runtime.get("XYN_HOST_SRC_ROOT", "")).strip():
         runtime["XYN_HOST_SRC_ROOT"] = str(Path.cwd().resolve().parent)
     runtime.setdefault("XYN_TRAEFIK_NETWORK", "xyn_traefik")
@@ -391,6 +393,30 @@ def build_runtime_env() -> dict[str, str]:
             except OSError:
                 pass
     return runtime
+
+
+def _hydrate_aws_env(runtime: dict[str, str]) -> None:
+    if str(runtime.get("XYN_BOOTSTRAP_SOLUTION_SOURCE", "")).strip().lower() != "s3":
+        return
+    if not shutil.which("aws"):
+        return
+
+    def _populate(name: str, command: list[str]) -> None:
+        if str(runtime.get(name, "")).strip():
+            return
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
+        if result.returncode != 0:
+            return
+        value = str(result.stdout or "").strip()
+        if value:
+            runtime[name] = value
+
+    _populate("AWS_ACCESS_KEY_ID", ["aws", "configure", "get", "aws_access_key_id"])
+    _populate("AWS_SECRET_ACCESS_KEY", ["aws", "configure", "get", "aws_secret_access_key"])
+    _populate("AWS_SESSION_TOKEN", ["aws", "configure", "get", "aws_session_token"])
+    _populate("AWS_DEFAULT_REGION", ["aws", "configure", "get", "region"])
+    if str(runtime.get("AWS_DEFAULT_REGION", "")).strip() and not str(runtime.get("AWS_REGION", "")).strip():
+        runtime["AWS_REGION"] = str(runtime.get("AWS_DEFAULT_REGION", "")).strip()
 
 
 def preflight(skip_ai_keys: bool) -> bool:

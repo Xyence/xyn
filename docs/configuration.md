@@ -80,6 +80,12 @@ Use these to auto-install durable solution bundles into the platform at startup:
   - `false`: always reinstall/update on startup
 - `XYN_BOOTSTRAP_SOLUTION_WORKSPACE_SLUG`
   - optional workspace target (defaults to `XYN_WORKSPACE_SLUG` or `development`)
+- AWS credentials for `s3` source:
+  - `AWS_ACCESS_KEY_ID`
+  - `AWS_SECRET_ACCESS_KEY`
+  - `AWS_SESSION_TOKEN` (optional)
+  - `AWS_DEFAULT_REGION` / `AWS_REGION`
+  - `xynctl` will best-effort hydrate these from `aws configure get ...` when `XYN_BOOTSTRAP_SOLUTION_SOURCE=s3`
 
 Compatibility aliases still exported for current local flows:
 - `ARTIFACT_STORE_PATH` mirrors `XYN_ARTIFACT_ROOT`
