@@ -806,9 +806,12 @@ def _resolve_images_for_provision(request: ProvisionLocalRequest) -> dict[str, A
     if prefer_local_images or prefer_local_sources:
         src_root = str(os.getenv("XYN_HOST_SRC_ROOT", "/home/ubuntu/src")).strip() or "/home/ubuntu/src"
         src_root_path = Path(src_root).expanduser().resolve()
+        workspace_root = Path("/workspace")
         local_ui_contexts = _candidate_contexts(
             str(os.getenv("XYN_LOCAL_UI_CONTEXT", "")).strip(),
             [
+                workspace_root / "xyn-platform" / "apps" / "xyn-ui",
+                workspace_root / "xyn-ui",
                 src_root_path / "xyn-platform" / "apps" / "xyn-ui",
                 src_root_path / "xyn-ui",
             ],
@@ -816,6 +819,8 @@ def _resolve_images_for_provision(request: ProvisionLocalRequest) -> dict[str, A
         local_api_contexts = _candidate_contexts(
             str(os.getenv("XYN_LOCAL_API_CONTEXT", "")).strip(),
             [
+                workspace_root / "xyn-platform" / "services" / "xyn-api",
+                workspace_root / "xyn-api",
                 src_root_path / "xyn-platform" / "services" / "xyn-api",
                 src_root_path / "xyn-api",
             ],
