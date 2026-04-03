@@ -695,6 +695,7 @@ class ProvisionLocalRequest(BaseModel):
     ui_host: Optional[str] = None
     api_host: Optional[str] = None
     prefer_local_images: bool = False
+    prefer_local_sources: bool = False
 
 
 def _compose_down_cmd(*, project: str, compose_path: Path, reset_state: bool = False) -> list[str]:
@@ -801,7 +802,52 @@ def _resolve_images_for_provision(request: ProvisionLocalRequest) -> dict[str, A
         }
 
     prefer_local_images = bool(request.prefer_local_images) or _as_bool(os.getenv("XYN_PROVISION_PREFER_LOCAL_IMAGES", "false"))
-    if prefer_local_images:
+    prefer_local_sources = bool(request.prefer_local_sources) or _as_bool(os.getenv("XYN_PROVISION_PREFER_LOCAL_SOURCES", "false"))
+    if prefer_local_images or prefer_local_sources:
+        src_root = str(os.getenv("XYN_HOST_SRC_ROOT", "/home/ubuntu/src")).strip() or "/home/ubuntu/src"
+        src_root_path = Path(src_root).expanduser().resolve()
+        local_ui_contexts = _candidate_contexts(
+            str(os.getenv("XYN_LOCAL_UI_CONTEXT", "")).strip(),
+            [
+                src_root_path / "xyn-platform" / "apps" / "xyn-ui",
+                src_root_path / "xyn-ui",
+            ],
+        )
+        local_api_contexts = _candidate_contexts(
+            str(os.getenv("XYN_LOCAL_API_CONTEXT", "")).strip(),
+            [
+                src_root_path / "xyn-platform" / "services" / "xyn-api",
+                src_root_path / "xyn-api",
+            ],
+        )
+        if prefer_local_sources:
+            built_api_context, api_attempts = _build_local_image(DEFAULT_API_IMAGE_NAME, local_api_contexts)
+            built_ui_context, ui_attempts = _build_local_image(DEFAULT_UI_IMAGE_NAME, local_ui_contexts)
+            if built_api_context and built_ui_context:
+                operations.extend(api_attempts[-1:])
+                operations.extend(ui_attempts[-1:])
+                return {
+                    "mode": "local_workspace",
+                    "registry": defaults["registry"],
+                    "ui_image": DEFAULT_UI_IMAGE_NAME,
+                    "api_image": DEFAULT_API_IMAGE_NAME,
+                    "registry_slug": None,
+                    "registry_source": "local_workspace",
+                    "channel": str(request.channel or DEFAULT_IMAGE_TAG).strip() or DEFAULT_IMAGE_TAG,
+                    "operations": operations,
+                }
+            api_context_exists = any(Path(context).exists() for context in local_api_contexts)
+            ui_context_exists = any(Path(context).exists() for context in local_ui_contexts)
+            if api_context_exists and ui_context_exists:
+                errors = [*api_attempts, *ui_attempts]
+                raise RuntimeError(
+                    "Failed to build local workspace images for preview provisioning. "
+                    + " ".join(str(item).strip() for item in errors if str(item).strip())
+                )
+            operations.append(
+                "Local workspace source paths were not available; falling back to non-source image resolution."
+            )
+
         # Prefer explicit local tags first so provisioning does not inherit a
         # stale anonymous image ID from long-running containers.
         if _docker_image_exists(DEFAULT_UI_IMAGE_NAME) and _docker_image_exists(DEFAULT_API_IMAGE_NAME):
@@ -832,22 +878,6 @@ def _resolve_images_for_provision(request: ProvisionLocalRequest) -> dict[str, A
                 "channel": str(request.channel or DEFAULT_IMAGE_TAG).strip() or DEFAULT_IMAGE_TAG,
                 "operations": operations,
             }
-        src_root = str(os.getenv("XYN_HOST_SRC_ROOT", "/home/ubuntu/src")).strip() or "/home/ubuntu/src"
-        src_root_path = Path(src_root).expanduser().resolve()
-        local_ui_contexts = _candidate_contexts(
-            str(os.getenv("XYN_LOCAL_UI_CONTEXT", "")).strip(),
-            [
-                src_root_path / "xyn-platform" / "apps" / "xyn-ui",
-                src_root_path / "xyn-ui",
-            ],
-        )
-        local_api_contexts = _candidate_contexts(
-            str(os.getenv("XYN_LOCAL_API_CONTEXT", "")).strip(),
-            [
-                src_root_path / "xyn-platform" / "services" / "xyn-api",
-                src_root_path / "xyn-api",
-            ],
-        )
         built_api_context, api_attempts = _build_local_image(DEFAULT_API_IMAGE_NAME, local_api_contexts)
         built_ui_context, ui_attempts = _build_local_image(DEFAULT_UI_IMAGE_NAME, local_ui_contexts)
         if built_api_context and built_ui_context:

@@ -321,6 +321,33 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         self.assertEqual(result["api_image"], "xyn-api")
         self.assertEqual(result["ui_image"], "xyn-ui")
 
+    @mock.patch("core.provisioning_local._docker_image_exists", return_value=True)
+    @mock.patch("core.provisioning_local._running_container_image_ref")
+    def test_provision_prefers_local_workspace_build_when_requested(self, running_container_image_ref, _docker_image_exists):
+        running_container_image_ref.side_effect = [
+            "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:dev",
+            "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:dev",
+        ]
+
+        def _run(cmd, *args, **kwargs):
+            context = cmd[-1]
+            if context in {"/tmp/src/xyn-platform/services/xyn-api", "/tmp/src/xyn-platform/apps/xyn-ui"}:
+                return (0, "", "")
+            return (1, "", f"missing context: {context}")
+
+        with mock.patch("core.provisioning_local._run", side_effect=_run):
+            with mock.patch.dict("os.environ", {"XYN_HOST_SRC_ROOT": "/tmp/src"}, clear=False):
+                result = _resolve_images_for_provision(
+                    ProvisionLocalRequest(name="smoke", prefer_local_images=True, prefer_local_sources=True)
+                )
+
+        self.assertEqual(result["mode"], "local_workspace")
+        self.assertEqual(result["api_image"], "xyn-api")
+        self.assertEqual(result["ui_image"], "xyn-ui")
+        self.assertEqual(result["registry_source"], "local_workspace")
+        self.assertIn("Built local image xyn-api from /tmp/src/xyn-platform/services/xyn-api", result["operations"])
+        self.assertIn("Built local image xyn-ui from /tmp/src/xyn-platform/apps/xyn-ui", result["operations"])
+
     def test_provision_can_opt_into_local_images(self):
         def _run(cmd, *args, **kwargs):
             context = cmd[-1]
