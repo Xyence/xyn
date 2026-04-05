@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict
 from unittest import TestCase, mock
 
 from core.mcp.xyn_api_adapter import XynApiAdapter, XynApiAdapterConfig
-from core.mcp.xyn_mcp_server import TOOL_NAMES, register_xyn_tools
+from core.mcp.xyn_mcp_server import TOOL_NAMES, create_xyn_mcp_http_app, register_xyn_tools
+from starlette.testclient import TestClient
 
 
 class FakeMcpServer:
@@ -73,3 +74,23 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(kwargs["headers"]["X-Internal-Token"], "int-1")
         self.assertEqual(kwargs["headers"]["Cookie"], "sessionid=abc")
 
+    def test_healthz_surfaces_effective_xyn_api_base_and_auth_presence(self) -> None:
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                api_base_url="http://localhost",
+                bearer_token="token-1",
+                internal_token="",
+                cookie="sessionid=abc",
+                timeout_seconds=10.0,
+            )
+        )
+        app = create_xyn_mcp_http_app(adapter)
+        with TestClient(app) as client:
+            response = client.get("/healthz")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload.get("xyn_api_base_url"), "http://localhost")
+        auth = payload.get("auth") if isinstance(payload.get("auth"), dict) else {}
+        self.assertTrue(bool(auth.get("has_bearer_token")))
+        self.assertFalse(bool(auth.get("has_internal_token")))
+        self.assertTrue(bool(auth.get("has_cookie")))

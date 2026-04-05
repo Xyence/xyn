@@ -32,6 +32,10 @@ class XynApiAdapter:
     def __init__(self, config: XynApiAdapterConfig):
         self._config = config
 
+    @property
+    def config(self) -> XynApiAdapterConfig:
+        return self._config
+
     def _headers(self) -> Dict[str, str]:
         headers: Dict[str, str] = {"Accept": "application/json"}
         if self._config.bearer_token:
@@ -160,4 +164,3 @@ class XynApiAdapter:
             path=f"/xyn/api/release-targets/{target_id}/execution_step",
             params={"limit": int(limit)},
         )
-

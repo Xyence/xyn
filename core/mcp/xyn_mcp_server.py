@@ -5,7 +5,6 @@ from typing import Any, Callable, Dict
 
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
-from starlette.routing import Mount, Route
 
 from core.mcp.xyn_api_adapter import XynApiAdapter, XynApiAdapterConfig
 
@@ -147,13 +146,14 @@ def create_xyn_mcp_server(adapter: XynApiAdapter | None = None) -> Any:
 
 
 def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
-    mcp_server = create_xyn_mcp_server(adapter)
+    configured_adapter = adapter or XynApiAdapter(XynApiAdapterConfig.from_env())
+    mcp_server = create_xyn_mcp_server(configured_adapter)
     # Prefer explicit streamable HTTP app construction (works across mcp versions).
     if hasattr(mcp_server, "streamable_http_app"):
-        mcp_app = mcp_server.streamable_http_app()
+        app = mcp_server.streamable_http_app()
     else:
         # Back-compat fallback for older FastMCP variants.
-        mcp_app = mcp_server.run(transport="streamable-http", return_app=True)
+        app = mcp_server.run(transport="streamable-http", return_app=True)
 
     async def healthz(_request):
         return JSONResponse(
@@ -162,24 +162,26 @@ def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
                 "service": "xyn-mcp-adapter",
                 "tool_count": len(TOOL_NAMES),
                 "tools": TOOL_NAMES,
+                "xyn_api_base_url": configured_adapter.config.api_base_url,
+                "auth": {
+                    "has_bearer_token": bool(configured_adapter.config.bearer_token),
+                    "has_internal_token": bool(configured_adapter.config.internal_token),
+                    "has_cookie": bool(configured_adapter.config.cookie),
+                },
             }
         )
 
-    return Starlette(
-        routes=[
-            Mount("/mcp", app=mcp_app),
-            Route("/healthz", endpoint=healthz, methods=["GET"]),
-        ]
-    )
+    # Add diagnostics route directly on the same MCP Starlette app so lifespan/task-group init stays intact.
+    app.add_route("/healthz", healthz, methods=["GET"])
+    return app
 
 def main() -> None:
     host = str(os.getenv("XYN_MCP_HOST", "0.0.0.0")).strip() or "0.0.0.0"
     port = int(str(os.getenv("XYN_MCP_PORT", "8011")).strip() or "8011")
-    server = create_xyn_mcp_server()
-    # mcp>=1.18 requires run(streamable-http) so internal session task groups are initialized.
-    server.settings.host = host
-    server.settings.port = port
-    server.run(transport="streamable-http")
+    import uvicorn
+
+    app = create_xyn_mcp_http_app()
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
