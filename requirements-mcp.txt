@@ -1,0 +1,4 @@
+mcp==1.18.0
+httpx==0.26.0
+uvicorn[standard]==0.27.0
+
