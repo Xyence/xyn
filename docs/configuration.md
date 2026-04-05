@@ -29,6 +29,11 @@ Production deployments should inject env via seed/compose and should not depend 
 - Optional purpose-specific bootstrap overlays:
   - `XYN_AI_PLANNING_PROVIDER` / `XYN_AI_PLANNING_MODEL` / `XYN_AI_PLANNING_API_KEY`
   - `XYN_AI_CODING_PROVIDER` / `XYN_AI_CODING_MODEL` / `XYN_AI_CODING_API_KEY`
+- Optional deterministic routing overrides (agent slugs):
+  - `XYN_AI_ROUTING_DEFAULT_AGENT_SLUG`
+  - `XYN_AI_ROUTING_PLANNING_AGENT_SLUG`
+  - `XYN_AI_ROUTING_CODING_AGENT_SLUG`
+  - `XYN_AI_ROUTING_PALETTE_AGENT_SLUG`
 - Secret encryption key (for encrypted credential storage fallback):
   - `XYN_SECRET_KEY` (or `XYN_CREDENTIALS_ENCRYPTION_KEY`)
 
@@ -55,6 +60,32 @@ Provider resolution:
 - `XYN_WORKSPACE_RETENTION_DAYS`
   - local retention hint for stale managed workspace cleanup eligibility
   - default: `14`
+
+### Installable Solution Bundle Bootstrap
+
+Use these to auto-install durable solution bundles into the platform at startup:
+
+- `XYN_BOOTSTRAP_INSTALL_SOLUTIONS`
+  - comma-separated solution slugs to install (example: `deal-finder`)
+- `XYN_BOOTSTRAP_SOLUTION_SOURCE`
+  - `local` or `s3`
+- `XYN_BOOTSTRAP_SOLUTION_PREFIX`
+  - local directory (`local`) or key prefix (`s3`)
+- `XYN_BOOTSTRAP_SOLUTION_VERSION`
+  - optional version segment for startup lookup (`<solution>/<version>/manifest.json`)
+- `XYN_BOOTSTRAP_SOLUTION_BUCKET`
+  - required when source is `s3`
+- `XYN_BOOTSTRAP_IF_MISSING_ONLY`
+  - `true` (default): install only if solution missing
+  - `false`: always reinstall/update on startup
+- `XYN_BOOTSTRAP_SOLUTION_WORKSPACE_SLUG`
+  - optional workspace target (defaults to `XYN_WORKSPACE_SLUG` or `development`)
+- AWS credentials for `s3` source:
+  - `AWS_ACCESS_KEY_ID`
+  - `AWS_SECRET_ACCESS_KEY`
+  - `AWS_SESSION_TOKEN` (optional)
+  - `AWS_DEFAULT_REGION` / `AWS_REGION`
+  - `xynctl` will best-effort hydrate these from `aws configure get ...` when `XYN_BOOTSTRAP_SOLUTION_SOURCE=s3`
 
 Compatibility aliases still exported for current local flows:
 - `ARTIFACT_STORE_PATH` mirrors `XYN_ARTIFACT_ROOT`

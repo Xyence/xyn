@@ -11,6 +11,7 @@ from unittest import mock
 from core.app_jobs import _build_app_spec, _build_policy_bundle, _materialize_net_inventory_compose, _package_generated_app, _prefer_local_platform_images_for_smoke
 from core.provisioning_local import (
     ProvisionLocalRequest,
+    _compose_yaml,
     _compose_down_cmd,
     _ensure_remote_workspace,
     _resolve_images_for_provision,
@@ -60,7 +61,7 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         self.assertIn(("application", "app.team-lunch-poll"), refs)
         self.assertIn(("policy_bundle", "policy.team-lunch-poll"), refs)
         self.assertEqual(packaged["policy_bundle_slug"], "policy.team-lunch-poll")
-        self.assertTrue(isinstance(surfaces, list) and surfaces)
+        self.assertTrue(isinstance(surfaces, list))
 
     def test_generated_package_surfaces_are_installer_compatible_and_manifest_nav_is_present(self):
         workspace_id = uuid.uuid4()
@@ -125,6 +126,15 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
             self.assertIn((row.get("renderer") or {}).get("type"), allowed_renderer_types)
         self.assertTrue(all(str(row.get("nav_visibility") or "") in {"always", "hidden"} for row in surfaces))
         self.assertTrue(any(str(row.get("route") or "").endswith("/:id") for row in surfaces))
+        surface_routes = {str(row.get("route") or "") for row in surfaces}
+        self.assertEqual(
+            surface_routes,
+            {
+                "/app/campaigns",
+                "/app/campaigns/new",
+                "/app/campaigns/:id",
+            },
+        )
         campaigns_create = next((row for row in surfaces if row.get("route") == "/app/campaigns/new"), {})
         campaigns_detail = next((row for row in surfaces if row.get("route") == "/app/campaigns/:id"), {})
         self.assertEqual(
@@ -311,6 +321,33 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         self.assertEqual(result["api_image"], "xyn-api")
         self.assertEqual(result["ui_image"], "xyn-ui")
 
+    @mock.patch("core.provisioning_local._docker_image_exists", return_value=True)
+    @mock.patch("core.provisioning_local._running_container_image_ref")
+    def test_provision_prefers_local_workspace_build_when_requested(self, running_container_image_ref, _docker_image_exists):
+        running_container_image_ref.side_effect = [
+            "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:dev",
+            "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:dev",
+        ]
+
+        def _run(cmd, *args, **kwargs):
+            context = cmd[-1]
+            if context in {"/tmp/src/xyn-platform/services/xyn-api", "/tmp/src/xyn-platform/apps/xyn-ui"}:
+                return (0, "", "")
+            return (1, "", f"missing context: {context}")
+
+        with mock.patch("core.provisioning_local._run", side_effect=_run):
+            with mock.patch.dict("os.environ", {"XYN_HOST_SRC_ROOT": "/tmp/src"}, clear=False):
+                result = _resolve_images_for_provision(
+                    ProvisionLocalRequest(name="smoke", prefer_local_images=True, prefer_local_sources=True)
+                )
+
+        self.assertEqual(result["mode"], "local_workspace")
+        self.assertEqual(result["api_image"], "xyn-api")
+        self.assertEqual(result["ui_image"], "xyn-ui")
+        self.assertEqual(result["registry_source"], "local_workspace")
+        self.assertIn("Built local image xyn-api from /tmp/src/xyn-platform/services/xyn-api", result["operations"])
+        self.assertIn("Built local image xyn-ui from /tmp/src/xyn-platform/apps/xyn-ui", result["operations"])
+
     def test_provision_can_opt_into_local_images(self):
         def _run(cmd, *args, **kwargs):
             context = cmd[-1]
@@ -361,6 +398,21 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
             cmd,
             ["docker", "compose", "-p", "xyn-local", "-f", "/tmp/compose.yaml", "down", "--remove-orphans", "--volumes"],
         )
+
+    def test_local_compose_backend_includes_repo_mounts_and_runtime_repo_map(self):
+        compose_text = _compose_yaml(
+            "xyn-local",
+            ui_image="xyn-ui:latest",
+            api_image="xyn-api:latest",
+            ui_host="localhost",
+            api_host="api.localhost",
+        )
+        self.assertIn(
+            "XYN_RUNTIME_REPO_MAP: '${XYN_RUNTIME_REPO_MAP:-{\"xyn\":[\"/workspace/xyn\"],\"xyn-platform\":[\"/workspace/xyn-platform\"]}}'",
+            compose_text,
+        )
+        self.assertIn("${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn:/workspace/xyn", compose_text)
+        self.assertIn("${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn-platform:/workspace/xyn-platform", compose_text)
 
 
 if __name__ == "__main__":

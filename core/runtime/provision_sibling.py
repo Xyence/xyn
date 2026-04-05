@@ -143,6 +143,14 @@ def handle_provision_sibling_xyn(
         "ui_url": sibling.get("ui_url"),
         "api_url": sibling.get("api_url"),
     }
+    policy_source = str(payload.get("policy_source") or "reconstructed").strip() or "reconstructed"
+    policy_artifact_ref = payload.get("policy_artifact_ref") if isinstance(payload.get("policy_artifact_ref"), dict) else {}
+    policy_compatibility = str(payload.get("policy_compatibility") or "unknown").strip() or "unknown"
+    policy_compatibility_reason = str(payload.get("policy_compatibility_reason") or "").strip()
+    sibling_output["policy_source"] = policy_source
+    sibling_output["policy_artifact_ref"] = policy_artifact_ref
+    sibling_output["policy_compatibility"] = policy_compatibility
+    sibling_output["policy_compatibility_reason"] = policy_compatibility_reason
     sibling_project = str(sibling.get("compose_project") or "").strip()
     sibling_api_container = f"{sibling_project}-api" if sibling_project else ""
     sibling_network = f"{sibling_project}_default" if sibling_project else ""
@@ -240,6 +248,8 @@ def handle_provision_sibling_xyn(
         artifact_slug=str(installed_artifact.get("artifact_slug") or generated_artifact.get("artifact_slug") or f"app.{app_slug}"),
         title=str(app_spec.get("title") or app_slug),
         runtime_target=sibling_runtime,
+        sibling_ui_url=str(sibling_output.get("ui_url") or ""),
+        sibling_api_url=str(sibling_output.get("api_url") or ""),
     )
     sibling_output["runtime_target"] = sibling_runtime
     sibling_output["runtime_registration"] = registration
@@ -292,6 +302,10 @@ def handle_provision_sibling_xyn(
                     "sibling": sibling_output,
                     "app_spec": app_spec,
                     "policy_bundle": payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {},
+                    "policy_source": policy_source,
+                    "policy_artifact_ref": policy_artifact_ref,
+                    "policy_compatibility": policy_compatibility,
+                    "policy_compatibility_reason": policy_compatibility_reason,
                     "generated_artifact": generated_artifact,
                     "execution_note_artifact_id": execution_note_artifact_id,
                     "source_job_id": str(job.id),

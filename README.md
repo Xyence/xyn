@@ -85,6 +85,37 @@ chmod +x xynctl
 - Stop local stack:
   - `docker compose down`
 
+## MCP Adapter (Thin API Wrapper)
+
+Xyn includes a thin MCP server adapter that exposes existing Xyn control/evidence/release-target APIs as MCP tools.
+The adapter does not add workflow semantics; it forwards to existing Xyn endpoints.
+
+Install MCP adapter dependencies in a dedicated environment:
+
+```bash
+pip install -r requirements-mcp.txt
+```
+
+Set adapter configuration (example):
+
+```bash
+export XYN_MCP_XYN_API_BASE_URL=http://localhost:8001
+export XYN_MCP_AUTH_BEARER_TOKEN=...
+# Optional:
+# export XYN_MCP_INTERNAL_TOKEN=...
+# export XYN_MCP_COOKIE='sessionid=...'
+```
+
+Run the MCP server:
+
+```bash
+python -m core.mcp.xyn_mcp_server
+```
+
+Endpoints:
+- MCP: `http://localhost:8011/mcp`
+- Health: `http://localhost:8011/healthz`
+
 ## Configuration Notes
 
 - Workspace defaults and bootstrap behavior are environment-driven.

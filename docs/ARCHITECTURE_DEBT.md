@@ -75,6 +75,11 @@ Risk: Future evolved entities or reports beyond the validated interfaces path ma
 Planned Resolution: Generalize the AppSpec-to-runtime materialization layer so newly added entities, palette commands, and reports derive systematically from generated artifact/application definition state rather than relying on scenario-specific expansion logic.  
 Status: Future hardening opportunity. Not required for demo readiness.
 
+AppSpec inference capability truth (current implementation):
+- Structured prompts (Route A) are deterministic-only and do not require Codex CLI.
+- Semi/freeform prompts (Routes B/C) attempt semantic augmentation only when `XYN_APPSPEC_ENABLE_LLM_FALLBACK` is enabled and Codex CLI is available.
+- When semantic extraction is unavailable, Routes B/C run in explicit limited heuristic mode with diagnostics metadata (capability state + reason) rather than silently implying full NL→app semantic extraction.
+
 DEBT-09  
 Title: Generated artifact promotion and version semantics remain minimal  
 Description: Generated artifacts now serve as the canonical installed identity in the happy path, but their versioning and promotion semantics remain intentionally lightweight (for example `0.0.1-dev` re-import/update behavior) rather than a fuller lifecycle with stronger revision, release, and promotion rules.  

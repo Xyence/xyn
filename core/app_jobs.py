@@ -280,9 +280,6 @@ def _infer_map_surface_required(app_spec: dict[str, Any], ui_lines: list[str]) -
 def _build_generated_surface_definitions(*, app_spec: dict[str, Any], capability_manifest: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     entities = capability_manifest.get("entities") if isinstance(capability_manifest.get("entities"), list) else []
-    ui_lines = _extract_ui_surface_lines(app_spec)
-    admin_required = _infer_admin_surface_required(app_spec, ui_lines)
-    map_required = _infer_map_surface_required(app_spec, ui_lines)
 
     def _add_surface(
         *,
@@ -312,17 +309,19 @@ def _build_generated_surface_definitions(*, app_spec: dict[str, Any], capability
             }
         )
 
-    _add_surface(key="app-home", title="Application Home", route="/app", nav_section="manage", order=10)
-
     for idx, entity in enumerate(entities):
         if not isinstance(entity, dict):
             continue
         entity_key = str(entity.get("key") or "").strip()
         if not entity_key:
             continue
+        # Generated artifact surfaces are now intentionally narrow: only campaign
+        # workflows have a modern shell mapping contract in this build.
+        if entity_key != "campaigns":
+            continue
         plural_label = str(entity.get("plural_label") or entity_key).strip() or entity_key
         singular_label = str(entity.get("singular_label") or entity_key.rstrip("s")).strip() or entity_key.rstrip("s")
-        section = "admin" if _is_admin_surface_token(entity_key) else "manage"
+        section = "manage"
         _add_surface(
             key=f"entity-{entity_key}-list",
             title=plural_label.title(),
@@ -339,15 +338,11 @@ def _build_generated_surface_definitions(*, app_spec: dict[str, Any], capability
             order=102 + (idx * 10),
             nav_visibility="hidden",
             renderer_type="generic_dashboard",
-            renderer_payload=(
-                {
-                    "shell_renderer_key": "campaign_map_workflow",
-                    "mode": "detail",
-                    "campaign_id_param": "id",
-                }
-                if entity_key == "campaigns"
-                else None
-            ),
+            renderer_payload={
+                "shell_renderer_key": "campaign_map_workflow",
+                "mode": "detail",
+                "campaign_id_param": "id",
+            },
         )
         _add_surface(
             key=f"entity-{entity_key}-create",
@@ -357,42 +352,11 @@ def _build_generated_surface_definitions(*, app_spec: dict[str, Any], capability
             order=101 + (idx * 10),
             surface_kind="editor",
             renderer_type="generic_editor",
-            renderer_payload=(
-                {
-                    "shell_renderer_key": "campaign_map_workflow",
-                    "mode": "create",
-                }
-                if entity_key == "campaigns"
-                else None
-            ),
+            renderer_payload={
+                "shell_renderer_key": "campaign_map_workflow",
+                "mode": "create",
+            },
         )
-
-    if admin_required:
-        _add_surface(
-            key="admin-operator",
-            title="Admin / Operator",
-            route="/app/admin",
-            nav_section="admin",
-            order=50,
-        )
-    if map_required:
-        _add_surface(
-            key="map-selection",
-            title="Map Selection",
-            route="/app/map-selection",
-            nav_section="manage",
-            order=60,
-        )
-
-    _add_surface(
-        key="workbench",
-        title="Workbench",
-        route="/app/workbench",
-        nav_section="docs",
-        order=1000,
-        nav_visibility="hidden",
-        surface_kind="docs",
-    )
     rows.sort(key=lambda row: (str(row.get("nav_section") or ""), int(row.get("order") or 1000), str(row.get("key") or "")))
     return rows
 
@@ -870,7 +834,21 @@ def _register_sibling_runtime_target(
     artifact_slug: str,
     title: str,
     runtime_target: dict[str, Any],
+    sibling_ui_url: str = "",
+    sibling_api_url: str = "",
 ) -> dict[str, Any]:
+    sibling_ui = str(sibling_ui_url or "").strip()
+    sibling_api = str(sibling_api_url or "").strip()
+    registration_body: dict[str, Any] = {
+        "app_slug": app_slug,
+        "artifact_slug": artifact_slug,
+        "title": title,
+        "runtime_target": runtime_target,
+    }
+    if sibling_ui:
+        registration_body["sibling_ui_url"] = sibling_ui
+    if sibling_api:
+        registration_body["sibling_api_url"] = sibling_api
     register_code, register_body, register_text = _container_http_session_json(
         sibling_api_container,
         port=8000,
@@ -883,12 +861,7 @@ def _register_sibling_runtime_target(
             {
                 "method": "POST",
                 "path": f"/xyn/api/workspaces/{workspace_id}/app-runtime-targets",
-                "body": {
-                    "app_slug": app_slug,
-                    "artifact_slug": artifact_slug,
-                    "title": title,
-                    "runtime_target": runtime_target,
-                },
+                "body": registration_body,
             },
         ],
     )
@@ -1745,11 +1718,27 @@ def _build_app_spec_with_diagnostics(
         spec["requires_primitives"] = appspec_normalization._normalize_unique_strings(requires_primitives)
     if revision_anchor:
         spec["revision_anchor"] = copy.deepcopy(revision_anchor)
+    consistency_warnings = list(consistency_result.warnings) + list(contract_validation.warnings)
+    if semantic_used and bool(semantic_diagnostics.get("limited_mode")):
+        reason = str(semantic_diagnostics.get("limited_mode_reason") or "limited mode").strip()
+        consistency_warnings.append(
+            f"Semantic extraction ran in limited heuristic mode ({reason}); deterministic inference remains authoritative."
+        )
+
     diagnostics = {
         "structure_score": round(structure_score, 3),
         "route": route,
         "llm_used": bool(semantic_diagnostics.get("llm_used")),
-        "consistency_warnings": list(consistency_result.warnings) + list(contract_validation.warnings),
+        "appspec_semantic_capability_state": (
+            str(semantic_diagnostics.get("capability_state") or "limited_no_llm")
+            if semantic_used
+            else "deterministic_only"
+        ),
+        "semantic_limited_mode": bool(semantic_diagnostics.get("limited_mode")) if semantic_used else False,
+        "semantic_limited_mode_reason": (
+            str(semantic_diagnostics.get("limited_mode_reason") or "").strip() if semantic_used else ""
+        ),
+        "consistency_warnings": consistency_warnings,
         "consistency_errors": list(consistency_result.errors) + list(contract_validation.errors),
         "fallback_or_repair_used": bool(
             semantic_diagnostics.get("fallback_used") or semantic_diagnostics.get("repair_used")
@@ -1851,6 +1840,13 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
     revision_anchor = content.get("revision_anchor") if isinstance(content.get("revision_anchor"), dict) else None
     current_app_summary = content.get("current_app_summary") if isinstance(content.get("current_app_summary"), dict) else None
     current_app_spec = content.get("current_app_spec") if isinstance(content.get("current_app_spec"), dict) else None
+    policy_bundle_override = (
+        content.get("policy_bundle_override") if isinstance(content.get("policy_bundle_override"), dict) else None
+    )
+    policy_artifact_ref = content.get("policy_artifact_ref") if isinstance(content.get("policy_artifact_ref"), dict) else {}
+    policy_source_hint = str(content.get("policy_source") or "").strip().lower()
+    policy_compatibility = str(content.get("policy_compatibility") or "unknown").strip() or "unknown"
+    policy_compatibility_reason = str(content.get("policy_compatibility_reason") or "").strip()
     primitive_catalog = get_primitive_catalog()
     _append_job_log(logs, f"Loaded primitive catalog ({len(primitive_catalog)} entries)")
     _append_job_log(logs, f"Generating AppSpec from prompt: {raw_prompt}")
@@ -1894,11 +1890,18 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
     except ValidationError as exc:
         raise RuntimeError(f"AppSpec validation failed: {exc.message}") from exc
 
-    policy_bundle = _build_policy_bundle(
-        workspace_id=job.workspace_id,
-        app_spec=app_spec,
-        raw_prompt=raw_prompt,
-    )
+    if policy_bundle_override:
+        policy_bundle = copy.deepcopy(policy_bundle_override)
+        policy_source = "artifact"
+    else:
+        policy_bundle = _build_policy_bundle(
+            workspace_id=job.workspace_id,
+            app_spec=app_spec,
+            raw_prompt=raw_prompt,
+        )
+        policy_source = "reconstructed"
+    if policy_source_hint == "artifact" and not policy_bundle_override:
+        _append_job_log(logs, "Policy override requested but unavailable; using reconstructed policy bundle.")
     try:
         validate(instance=policy_bundle, schema=_load_policy_bundle_schema())
     except ValidationError as exc:
@@ -1962,6 +1965,10 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
         "services": app_spec.get("services") if isinstance(app_spec.get("services"), list) else [],
         "workspace_id": str(job.workspace_id),
         "source_job_id": str(job.id),
+        "policy_source": policy_source,
+        "policy_artifact_ref": policy_artifact_ref if isinstance(policy_artifact_ref, dict) else {},
+        "policy_compatibility": policy_compatibility,
+        "policy_compatibility_reason": policy_compatibility_reason,
     }
     packaged_artifact = _package_generated_app(
         workspace_id=job.workspace_id,
@@ -2000,6 +2007,8 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
             "Primitive catalog loaded successfully.",
             "AppSpec validated against xyn.appspec.v0 schema.",
             "Policy bundle validated against xyn.policy_bundle.v0 schema.",
+            f"Policy source: {policy_source}.",
+            f"Policy compatibility: {policy_compatibility}{f' ({policy_compatibility_reason})' if policy_compatibility_reason else ''}.",
             f"AppSpec artifact persisted: {artifact_id}.",
             f"Policy bundle artifact persisted: {policy_bundle_artifact_id}.",
             f"Generated artifact package created: {packaged_artifact['artifact_slug']}@{packaged_artifact['artifact_version']}.",
@@ -2014,6 +2023,10 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
             "app_spec_artifact_id": artifact_id,
             "policy_bundle_artifact_id": policy_bundle_artifact_id,
             "inference_diagnostics": inference_diagnostics,
+            "policy_source": policy_source,
+            "policy_artifact_ref": policy_artifact_ref if isinstance(policy_artifact_ref, dict) else {},
+            "policy_compatibility": policy_compatibility,
+            "policy_compatibility_reason": policy_compatibility_reason,
         },
         update_note=update_execution_note,
     )
@@ -2025,6 +2038,10 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
             "policy_bundle_artifact_id": policy_bundle_artifact_id,
             "app_spec_schema": "xyn.appspec.v0",
             "policy_bundle_schema": "xyn.policy_bundle.v0",
+            "policy_source": policy_source,
+            "policy_artifact_ref": policy_artifact_ref if isinstance(policy_artifact_ref, dict) else {},
+            "policy_compatibility": policy_compatibility,
+            "policy_compatibility_reason": policy_compatibility_reason,
             "inference_diagnostics": inference_diagnostics,
             "primitive_catalog": primitive_catalog,
             "selected_images": selected_images,
@@ -2045,6 +2062,10 @@ def _handle_generate_app_spec(db: Session, job: Job, logs: list[str]) -> tuple[d
                     "policy_bundle": policy_bundle,
                     "app_spec_artifact_id": artifact_id,
                     "policy_bundle_artifact_id": policy_bundle_artifact_id,
+                    "policy_source": policy_source,
+                    "policy_artifact_ref": policy_artifact_ref if isinstance(policy_artifact_ref, dict) else {},
+                    "policy_compatibility": policy_compatibility,
+                    "policy_compatibility_reason": policy_compatibility_reason,
                     "generated_artifact": {
                         **packaged_artifact,
                         "registry_import": registry_artifact,

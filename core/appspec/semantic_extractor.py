@@ -43,6 +43,32 @@ _VISUAL_KEYWORDS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _semantic_codex_binary() -> str:
+    return str(os.getenv("XYN_APPSPEC_SEMANTIC_CODEX_BINARY") or "").strip() or shutil.which("codex") or "codex"
+
+
+def _semantic_codex_available(codex_bin: str) -> bool:
+    if "/" in codex_bin:
+        return os.path.isfile(codex_bin) and os.access(codex_bin, os.X_OK)
+    return bool(shutil.which(codex_bin))
+
+
+def _semantic_capability_state(*, prefer_llm: bool, force_llm: bool, llm_enabled: bool, codex_available: bool) -> str:
+    if force_llm:
+        return "llm_forced"
+    if prefer_llm and llm_enabled and codex_available:
+        return "hybrid_llm_available"
+    return "limited_no_llm"
+
+
+def _limited_mode_reason(*, llm_enabled: bool, codex_available: bool) -> str:
+    if not llm_enabled:
+        return "llm_fallback_disabled"
+    if not codex_available:
+        return "codex_unavailable"
+    return "heuristic_only"
+
+
 def _simple_entity_contract(entity_key: str) -> dict[str, Any]:
     key = _safe_slug(str(entity_key or "").strip(), default="records").replace("-", "_")
     singular = key[:-1] if key.endswith("s") and len(key) > 1 else key
@@ -140,8 +166,8 @@ def _payload_types_valid(payload: dict[str, Any]) -> bool:
 
 
 def _extract_via_codex(raw_prompt: str) -> dict[str, Any]:
-    codex_bin = str(os.getenv("XYN_APPSPEC_SEMANTIC_CODEX_BINARY") or "").strip() or shutil.which("codex") or "codex"
-    if not shutil.which(codex_bin) and "/" not in codex_bin:
+    codex_bin = _semantic_codex_binary()
+    if not _semantic_codex_available(codex_bin):
         raise RuntimeError("codex executable unavailable")
     instruction = (
         "Return JSON only (no markdown) matching exactly this schema: "
@@ -203,16 +229,32 @@ def extract_semantic_inference_with_diagnostics(
     force_llm: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     llm_enabled = str(os.getenv("XYN_APPSPEC_ENABLE_LLM_FALLBACK", "")).strip().lower() in {"1", "true", "yes", "on"}
-    use_llm = force_llm or (prefer_llm and llm_enabled)
+    codex_bin = _semantic_codex_binary()
+    codex_available = _semantic_codex_available(codex_bin)
+    use_llm = force_llm or (prefer_llm and llm_enabled and codex_available)
     payload: dict[str, Any]
     payload_from_llm = False
     fallback_used = False
     repair_used = False
+    capability_state = _semantic_capability_state(
+        prefer_llm=prefer_llm,
+        force_llm=force_llm,
+        llm_enabled=llm_enabled,
+        codex_available=codex_available,
+    )
+    limited_mode = capability_state == "limited_no_llm"
+    limited_reason = _limited_mode_reason(llm_enabled=llm_enabled, codex_available=codex_available)
+    if force_llm and not llm_enabled:
+        raise RuntimeError("LLM semantic extraction forced but XYN_APPSPEC_ENABLE_LLM_FALLBACK is disabled")
+    if force_llm and not codex_available:
+        raise RuntimeError("LLM semantic extraction forced but codex executable unavailable")
     if use_llm:
         try:
             payload = _extract_via_codex(raw_prompt)
             payload_from_llm = True
         except Exception:
+            if force_llm:
+                raise
             payload = _heuristic_semantic_extract(raw_prompt)
             fallback_used = True
     else:
@@ -232,5 +274,10 @@ def extract_semantic_inference_with_diagnostics(
         "llm_used": bool(payload_from_llm),
         "fallback_used": bool(fallback_used),
         "repair_used": bool(repair_used),
+        "capability_state": capability_state,
+        "limited_mode": bool(limited_mode),
+        "limited_mode_reason": limited_reason if limited_mode else "",
+        "llm_enabled": bool(llm_enabled),
+        "codex_available": bool(codex_available),
     }
     return normalized, diagnostics
