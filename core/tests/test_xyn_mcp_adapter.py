@@ -44,10 +44,24 @@ class XynMcpAdapterTests(TestCase):
 
     def test_discovery_tool_calls_underlying_adapter(self) -> None:
         adapter = mock.Mock()
+        adapter.list_blueprints.return_value = {"ok": True, "status_code": 200, "response": {"blueprints": []}}
+        adapter.create_blueprint.return_value = {"ok": True, "status_code": 200, "response": {"id": "bp-1"}}
         adapter.list_release_targets.return_value = {"ok": True, "status_code": 200, "response": {"release_targets": []}}
         adapter.create_release_target.return_value = {"ok": True, "status_code": 200, "response": {"id": "rt-1"}}
         server = FakeMcpServer()
         register_xyn_tools(server, adapter)
+
+        list_blueprints_tool = server.tools["list_blueprints"]["fn"]
+        list_blueprints_result = list_blueprints_tool()
+        adapter.list_blueprints.assert_called_once_with()
+        self.assertTrue(list_blueprints_result["ok"])
+        self.assertEqual(list_blueprints_result["status_code"], 200)
+        self.assertEqual(list_blueprints_result["response"]["blueprints"], [])
+
+        create_blueprint_tool = server.tools["create_blueprint"]["fn"]
+        create_blueprint_result = create_blueprint_tool(payload={"name": "Xyn Self Hosted Sibling", "namespace": "xyn"})
+        adapter.create_blueprint.assert_called_once_with(payload={"name": "Xyn Self Hosted Sibling", "namespace": "xyn"})
+        self.assertTrue(create_blueprint_result["ok"])
 
         tool = server.tools["list_release_targets"]["fn"]
         result = tool()
@@ -118,7 +132,7 @@ class XynMcpAdapterTests(TestCase):
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_list_discovery_endpoints_return_empty_lists_without_errors(self, mock_request: mock.Mock) -> None:
         responses = []
-        for body in ({"release_targets": []}, {"artifacts": []}, {"providers": []}):
+        for body in ({"blueprints": []}, {"release_targets": []}, {"artifacts": []}, {"providers": []}):
             response = mock.Mock()
             response.status_code = 200
             response.json.return_value = body
@@ -135,10 +149,13 @@ class XynMcpAdapterTests(TestCase):
             )
         )
 
+        blueprints = adapter.list_blueprints()
         release_targets = adapter.list_release_targets()
         artifacts = adapter.list_artifacts(limit=10, offset=0)
         providers = adapter.list_deployment_providers()
 
+        self.assertTrue(blueprints["ok"])
+        self.assertEqual(blueprints["response"]["blueprints"], [])
         self.assertTrue(release_targets["ok"])
         self.assertEqual(release_targets["response"]["release_targets"], [])
         self.assertTrue(artifacts["ok"])

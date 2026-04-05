@@ -269,3 +269,16 @@ class XynApiAdapter:
             path="/xyn/api/release-targets",
             json_payload=dict(payload or {}),
         )
+
+    def list_blueprints(self) -> Dict[str, Any]:
+        return self._request(method="GET", path="/xyn/api/blueprints")
+
+    def get_blueprint(self, *, blueprint_id: str) -> Dict[str, Any]:
+        return self._request(method="GET", path=f"/xyn/api/blueprints/{blueprint_id}")
+
+    def create_blueprint(self, *, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self._request(
+            method="POST",
+            path="/xyn/api/blueprints",
+            json_payload=dict(payload or {}),
+        )

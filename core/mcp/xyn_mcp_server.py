@@ -10,6 +10,9 @@ from core.mcp.xyn_api_adapter import XynApiAdapter, XynApiAdapterConfig
 
 
 TOOL_NAMES = [
+    "list_blueprints",
+    "get_blueprint",
+    "create_blueprint",
     "list_release_targets",
     "get_release_target",
     "create_release_target",
@@ -43,6 +46,24 @@ def _register_tool(mcp_server: Any, *, name: str, description: str, fn: Callable
 
 
 def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
+    _register_tool(
+        mcp_server,
+        name="list_blueprints",
+        description="List available blueprints for release-target binding.",
+        fn=lambda: adapter.list_blueprints(),
+    )
+    _register_tool(
+        mcp_server,
+        name="get_blueprint",
+        description="Get one blueprint by id.",
+        fn=lambda blueprint_id: adapter.get_blueprint(blueprint_id=blueprint_id),
+    )
+    _register_tool(
+        mcp_server,
+        name="create_blueprint",
+        description="Create or update a blueprint using existing blueprint API payload fields.",
+        fn=lambda payload=None: adapter.create_blueprint(payload=payload),
+    )
     _register_tool(
         mcp_server,
         name="list_release_targets",
