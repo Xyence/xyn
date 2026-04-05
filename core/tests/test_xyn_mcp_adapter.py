@@ -45,6 +45,7 @@ class XynMcpAdapterTests(TestCase):
     def test_discovery_tool_calls_underlying_adapter(self) -> None:
         adapter = mock.Mock()
         adapter.list_release_targets.return_value = {"ok": True, "status_code": 200, "response": {"release_targets": []}}
+        adapter.create_release_target.return_value = {"ok": True, "status_code": 200, "response": {"id": "rt-1"}}
         server = FakeMcpServer()
         register_xyn_tools(server, adapter)
 
@@ -55,6 +56,11 @@ class XynMcpAdapterTests(TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["status_code"], 200)
         self.assertEqual(result["response"]["release_targets"], [])
+
+        create_tool = server.tools["create_release_target"]["fn"]
+        create_result = create_tool(payload={"name": "xyn-sibling"})
+        adapter.create_release_target.assert_called_once_with(payload={"name": "xyn-sibling"})
+        self.assertTrue(create_result["ok"])
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_passes_base_url_auth_and_path(self, mock_request: mock.Mock) -> None:

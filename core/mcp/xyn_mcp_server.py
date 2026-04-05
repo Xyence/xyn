@@ -12,6 +12,7 @@ from core.mcp.xyn_api_adapter import XynApiAdapter, XynApiAdapterConfig
 TOOL_NAMES = [
     "list_release_targets",
     "get_release_target",
+    "create_release_target",
     "list_artifacts",
     "get_artifact",
     "list_deployment_providers",
@@ -53,6 +54,12 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
         name="get_release_target",
         description="Get one release target by id.",
         fn=lambda target_id: adapter.get_release_target(target_id=target_id),
+    )
+    _register_tool(
+        mcp_server,
+        name="create_release_target",
+        description="Create a release target using the existing release-target API payload contract.",
+        fn=lambda payload=None: adapter.create_release_target(payload=payload),
     )
     _register_tool(
         mcp_server,

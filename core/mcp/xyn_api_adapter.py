@@ -80,21 +80,30 @@ class XynApiAdapter:
     def _release_target_discovery_row(payload: Dict[str, Any]) -> Dict[str, Any]:
         runtime = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else {}
         dns = payload.get("dns") if isinstance(payload.get("dns"), dict) else {}
+        topology = payload.get("topology") if isinstance(payload.get("topology"), dict) else {}
+        artifact_binding = payload.get("artifact_binding") if isinstance(payload.get("artifact_binding"), dict) else {}
+        provider_binding = payload.get("provider_binding") if isinstance(payload.get("provider_binding"), dict) else {}
         return {
             "id": str(payload.get("id") or ""),
             "provider": {
                 "runtime_transport": str(runtime.get("transport") or ""),
                 "runtime_type": str(runtime.get("type") or ""),
                 "dns_provider": str(dns.get("provider") or ""),
+                "provider_key": str(provider_binding.get("provider_key") or ""),
+                "module_fqn": str(provider_binding.get("module_fqn") or ""),
             },
             "artifact_reference": {
                 "blueprint_id": str(payload.get("blueprint_id") or ""),
+                "artifact_id": str(artifact_binding.get("artifact_id") or ""),
+                "artifact_slug": str(artifact_binding.get("artifact_slug") or ""),
+                "artifact_family_id": str(artifact_binding.get("artifact_family_id") or ""),
             },
             "configuration_summary": {
                 "name": str(payload.get("name") or ""),
                 "environment": str(payload.get("environment") or ""),
                 "fqdn": str(payload.get("fqdn") or ""),
                 "target_instance_id": str(payload.get("target_instance_id") or ""),
+                "topology_kind": str(topology.get("kind") or ""),
             },
             "status": str(payload.get("status") or payload.get("execution_status") or payload.get("state") or ""),
         }
@@ -253,3 +262,10 @@ class XynApiAdapter:
 
     def get_provider_capabilities(self, *, provider_key: str) -> Dict[str, Any]:
         return self._request(method="GET", path=f"/xyn/api/deployment-providers/{provider_key}")
+
+    def create_release_target(self, *, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self._request(
+            method="POST",
+            path="/xyn/api/release-targets",
+            json_payload=dict(payload or {}),
+        )
