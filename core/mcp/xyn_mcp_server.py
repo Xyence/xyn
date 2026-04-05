@@ -10,6 +10,12 @@ from core.mcp.xyn_api_adapter import XynApiAdapter, XynApiAdapterConfig
 
 
 TOOL_NAMES = [
+    "list_release_targets",
+    "get_release_target",
+    "list_artifacts",
+    "get_artifact",
+    "list_deployment_providers",
+    "get_provider_capabilities",
     "inspect_change_session_control",
     "run_change_session_control_action",
     "get_change_session_promotion_evidence",
@@ -36,6 +42,43 @@ def _register_tool(mcp_server: Any, *, name: str, description: str, fn: Callable
 
 
 def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
+    _register_tool(
+        mcp_server,
+        name="list_release_targets",
+        description="List discoverable release targets with provider and configuration summaries.",
+        fn=lambda: adapter.list_release_targets(),
+    )
+    _register_tool(
+        mcp_server,
+        name="get_release_target",
+        description="Get one release target by id.",
+        fn=lambda target_id: adapter.get_release_target(target_id=target_id),
+    )
+    _register_tool(
+        mcp_server,
+        name="list_artifacts",
+        description="List discoverable artifacts using existing artifact registry models.",
+        fn=lambda limit=100, offset=0: adapter.list_artifacts(limit=limit, offset=offset),
+    )
+    _register_tool(
+        mcp_server,
+        name="get_artifact",
+        description="Get one artifact by id.",
+        fn=lambda artifact_id: adapter.get_artifact(artifact_id=artifact_id),
+    )
+    _register_tool(
+        mcp_server,
+        name="list_deployment_providers",
+        description="List deployment provider/module capabilities available to release-target workflows.",
+        fn=lambda: adapter.list_deployment_providers(),
+    )
+    _register_tool(
+        mcp_server,
+        name="get_provider_capabilities",
+        description="Get deployment provider/module capability details by provider key.",
+        fn=lambda provider_key: adapter.get_provider_capabilities(provider_key=provider_key),
+    )
+
     _register_tool(
         mcp_server,
         name="inspect_change_session_control",

@@ -42,6 +42,20 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(result["status_code"], 409)
         self.assertEqual(result["response"]["status"], "blocked")
 
+    def test_discovery_tool_calls_underlying_adapter(self) -> None:
+        adapter = mock.Mock()
+        adapter.list_release_targets.return_value = {"ok": True, "status_code": 200, "response": {"release_targets": []}}
+        server = FakeMcpServer()
+        register_xyn_tools(server, adapter)
+
+        tool = server.tools["list_release_targets"]["fn"]
+        result = tool()
+
+        adapter.list_release_targets.assert_called_once_with()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status_code"], 200)
+        self.assertEqual(result["response"]["release_targets"], [])
+
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_passes_base_url_auth_and_path(self, mock_request: mock.Mock) -> None:
         response = mock.Mock()
@@ -94,3 +108,34 @@ class XynMcpAdapterTests(TestCase):
         self.assertTrue(bool(auth.get("has_bearer_token")))
         self.assertFalse(bool(auth.get("has_internal_token")))
         self.assertTrue(bool(auth.get("has_cookie")))
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_list_discovery_endpoints_return_empty_lists_without_errors(self, mock_request: mock.Mock) -> None:
+        responses = []
+        for body in ({"release_targets": []}, {"artifacts": []}, {"providers": []}):
+            response = mock.Mock()
+            response.status_code = 200
+            response.json.return_value = body
+            responses.append(response)
+        mock_request.side_effect = responses
+
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                api_base_url="http://localhost",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        release_targets = adapter.list_release_targets()
+        artifacts = adapter.list_artifacts(limit=10, offset=0)
+        providers = adapter.list_deployment_providers()
+
+        self.assertTrue(release_targets["ok"])
+        self.assertEqual(release_targets["response"]["release_targets"], [])
+        self.assertTrue(artifacts["ok"])
+        self.assertEqual(artifacts["response"]["artifacts"], [])
+        self.assertTrue(providers["ok"])
+        self.assertEqual(providers["response"]["providers"], [])
