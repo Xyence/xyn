@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 from typing import Any, Callable, Dict
 
-import uvicorn
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
@@ -149,7 +148,12 @@ def create_xyn_mcp_server(adapter: XynApiAdapter | None = None) -> Any:
 
 def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
     mcp_server = create_xyn_mcp_server(adapter)
-    mcp_app = mcp_server.streamable_http_app()
+    # Prefer explicit streamable HTTP app construction (works across mcp versions).
+    if hasattr(mcp_server, "streamable_http_app"):
+        mcp_app = mcp_server.streamable_http_app()
+    else:
+        # Back-compat fallback for older FastMCP variants.
+        mcp_app = mcp_server.run(transport="streamable-http", return_app=True)
 
     async def healthz(_request):
         return JSONResponse(
@@ -168,12 +172,14 @@ def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
         ]
     )
 
-
 def main() -> None:
     host = str(os.getenv("XYN_MCP_HOST", "0.0.0.0")).strip() or "0.0.0.0"
     port = int(str(os.getenv("XYN_MCP_PORT", "8011")).strip() or "8011")
-    app = create_xyn_mcp_http_app()
-    uvicorn.run(app, host=host, port=port)
+    server = create_xyn_mcp_server()
+    # mcp>=1.18 requires run(streamable-http) so internal session task groups are initialized.
+    server.settings.host = host
+    server.settings.port = port
+    server.run(transport="streamable-http")
 
 
 if __name__ == "__main__":
