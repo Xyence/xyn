@@ -44,6 +44,8 @@ services:
   postgres:
     image: postgis/postgis:16-3.4
     container_name: xyn-postgres
+    profiles:
+      - localdb
     restart: unless-stopped
     environment:
       POSTGRES_DB: xyn
@@ -91,8 +93,8 @@ services:
       XYN_TRUSTED_PROXY_CIDRS: ${XYN_TRUSTED_PROXY_CIDRS:-127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
       XYN_DEBUG_AUTH: ${XYN_DEBUG_AUTH:-false}
       XYN_UI_BEARER_TOKEN: ${XYN_UI_BEARER_TOKEN:-}
-      DATABASE_URL: postgresql://xyn:xyn_dev_password@postgres:5432/xyn
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL:-postgresql://xyn:xyn_dev_password@postgres:5432/xyn}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       XYN_ARTIFACT_ROOT: /app/.xyn/artifacts
       ARTIFACT_STORE_PATH: /app/.xyn/artifacts
       XYN_WORKSPACE_ROOT: /app/.xyn/workspace
@@ -167,8 +169,6 @@ services:
     depends_on:
       traefik:
         condition: service_started
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     labels:

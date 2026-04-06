@@ -60,6 +60,8 @@ DEFAULT_USER_WORKSPACE_SLUG = "development"
 ALLOWED_DB_MODES = {"local", "external"}
 ALLOWED_SECRET_STORE_MODES = {"local", "aws_secrets_manager"}
 ALLOWED_RUNTIME_ARTIFACT_PROVIDERS = {"local", "s3"}
+LOCAL_COMPOSE_DATABASE_URL = "postgresql://xyn:xyn_dev_password@postgres:5432/xyn"
+LOCAL_COMPOSE_REDIS_URL = "redis://redis:6379/0"
 
 
 def _as_bool(value: str) -> bool:
@@ -374,6 +376,16 @@ def build_runtime_env() -> dict[str, str]:
     runtime = dict(os.environ)
     env_vars = normalize_ai_env(load_env())
     runtime.update(env_vars)
+    db_mode = _normalize_mode(env=runtime, key="XYN_DB_MODE", default="local", allowed=ALLOWED_DB_MODES)
+    if db_mode == "local":
+        database_url = str(runtime.get("DATABASE_URL", "")).strip()
+        redis_url = str(runtime.get("REDIS_URL", "")).strip()
+        db_host = str(urlparse(database_url).hostname or "").strip().lower() if database_url else ""
+        redis_host = str(urlparse(redis_url).hostname or "").strip().lower() if redis_url else ""
+        if not database_url or db_host in {"localhost", "127.0.0.1"}:
+            runtime["DATABASE_URL"] = LOCAL_COMPOSE_DATABASE_URL
+        if not redis_url or redis_host in {"localhost", "127.0.0.1"}:
+            runtime["REDIS_URL"] = LOCAL_COMPOSE_REDIS_URL
     _hydrate_aws_env(runtime)
     if not str(runtime.get("XYN_HOST_SRC_ROOT", "")).strip():
         runtime["XYN_HOST_SRC_ROOT"] = str(Path.cwd().resolve().parent)
@@ -565,8 +577,11 @@ def preflight(skip_ai_keys: bool, env: Optional[dict[str, str]] = None) -> bool:
     return True
 
 
-def _compose_up(detached: bool, env: dict[str, str]) -> bool:
-    args = ["docker", "compose", "up", "--build"]
+def _compose_up(detached: bool, env: dict[str, str], db_mode: str) -> bool:
+    args = ["docker", "compose"]
+    if db_mode == "local":
+        args.extend(["--profile", "localdb"])
+    args.extend(["up", "--build"])
     if detached:
         args.append("-d")
     proc = subprocess.run(
@@ -929,7 +944,7 @@ def start(detached: bool, env: dict[str, str]) -> bool:
         if not _ensure_external_database_connectivity(env):
             return False
     print_info("Starting seed core stack...")
-    if not _compose_up(detached=detached, env=env):
+    if not _compose_up(detached=detached, env=env, db_mode=db_mode):
         return False
     if db_mode == "local":
         if not _ensure_postgis_ready(env):

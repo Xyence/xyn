@@ -49,6 +49,32 @@ Provider resolution:
 - `DATABASE_URL`
 - `REDIS_URL`
 
+### Bootstrap Mode Contract
+
+`xynctl` uses explicit mode flags to keep local developer defaults intact while allowing AWS-hosted/bootstrap overrides:
+
+- `XYN_DB_MODE=local|external` (default: `local`)
+- `XYN_SECRET_STORE_MODE=local|aws_secrets_manager` (default: `local`)
+- `XYN_RUNTIME_ARTIFACT_PROVIDER=local|s3` (default: `local`)
+
+Required values by mode:
+
+- `XYN_DB_MODE=local`
+  - no extra requirements; compose-managed Postgres is started by default
+- `XYN_DB_MODE=external`
+  - requires `DATABASE_URL` using a postgres/postgresql scheme
+  - compose no longer requires local Postgres in this mode
+- `XYN_SECRET_STORE_MODE=aws_secrets_manager`
+  - requires `AWS_REGION` or `AWS_DEFAULT_REGION`
+  - AWS auth uses standard AWS SDK chain (IAM role preferred; static `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` optional)
+- `XYN_RUNTIME_ARTIFACT_PROVIDER=s3`
+  - requires `XYN_RUNTIME_ARTIFACT_S3_BUCKET` (or compatible alias `XYN_ARTIFACT_S3_BUCKET`)
+  - recommended: `XYN_RUNTIME_ARTIFACT_S3_REGION`, `XYN_RUNTIME_ARTIFACT_S3_PREFIX`
+
+Default local developer ergonomics are unchanged:
+- local DB mode starts local compose Postgres
+- local secret/artifact modes do not require AWS credentials
+
 ### Managed Storage Roots
 
 - `XYN_ARTIFACT_ROOT`
