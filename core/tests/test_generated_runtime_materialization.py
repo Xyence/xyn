@@ -444,6 +444,7 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
             "XYN_RUNTIME_REPO_MAP: '${XYN_RUNTIME_REPO_MAP:-{\"xyn\":[\"/workspace/xyn\"],\"xyn-platform\":[\"/workspace/xyn-platform\"]}}'",
             compose_text,
         )
+        self.assertIn("XYN_OIDC_CLIENT_SECRET: ${XYN_OIDC_CLIENT_SECRET:-}", compose_text)
         self.assertIn("${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn:/workspace/xyn", compose_text)
         self.assertIn("${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn-platform:/workspace/xyn-platform", compose_text)
         self.assertIn("XYN_AUTH_MODE: token", compose_text)

@@ -14,6 +14,7 @@ Production deployments should inject env via seed/compose and should not depend 
 
 - `XYN_OIDC_ISSUER`
 - `XYN_OIDC_CLIENT_ID`
+- `XYN_OIDC_CLIENT_SECRET`
 - `XYN_OIDC_REDIRECT_URI` (recommended)
 - Optional domain controls:
   - `XYN_OIDC_ALLOWED_DOMAINS`

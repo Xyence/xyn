@@ -100,6 +100,20 @@ class XynCtlEnvTests(unittest.TestCase):
         mode = mod._resolve_provision_auth_mode(env)
         self.assertEqual(mode, "dev")
 
+    def test_normalize_retains_canonical_oidc_vars(self):
+        mod = _load_xynctl_module()
+        env = {
+            "XYN_OIDC_ISSUER": "https://issuer.example.com",
+            "XYN_OIDC_CLIENT_ID": "client-id",
+            "XYN_OIDC_CLIENT_SECRET": "client-secret",
+            "XYN_OIDC_REDIRECT_URI": "https://xyn.xyence.io/auth/callback",
+        }
+        normalized = mod.normalize_ai_env(env)
+        self.assertEqual(normalized.get("XYN_OIDC_ISSUER"), "https://issuer.example.com")
+        self.assertEqual(normalized.get("XYN_OIDC_CLIENT_ID"), "client-id")
+        self.assertEqual(normalized.get("XYN_OIDC_CLIENT_SECRET"), "client-secret")
+        self.assertEqual(normalized.get("XYN_OIDC_REDIRECT_URI"), "https://xyn.xyence.io/auth/callback")
+
     def test_build_context_pack_distribution_artifact_includes_revision_identity(self):
         mod = _load_xynctl_module()
         manifest = {

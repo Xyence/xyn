@@ -120,6 +120,7 @@ services:
       XYN_RUNTIME_REPO_MAP: '${XYN_RUNTIME_REPO_MAP:-{"xyn":["/workspace/xyn"],"xyn-platform":["/workspace/xyn-platform"]}}'
       XYN_OIDC_ISSUER: ${XYN_OIDC_ISSUER:-}
       XYN_OIDC_CLIENT_ID: ${XYN_OIDC_CLIENT_ID:-}
+      XYN_OIDC_CLIENT_SECRET: ${XYN_OIDC_CLIENT_SECRET:-}
       XYN_OIDC_REDIRECT_URI: ${XYN_OIDC_REDIRECT_URI:-}
       XYN_AI_PROVIDER: ${XYN_AI_PROVIDER:-}
       XYN_AI_MODEL: ${XYN_AI_MODEL:-gpt-5-mini}
