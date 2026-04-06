@@ -886,6 +886,23 @@ def _resolve_artifacts_via_seed(seed_url: str, env: dict[str, str]) -> tuple[boo
         return False, {"error": str(exc)}
 
 
+def _apply_explicit_image_overrides(payload: dict[str, Any], env: dict[str, str]) -> dict[str, Any]:
+    """Apply per-image explicit overrides with highest precedence."""
+    result = dict(payload or {})
+    images = result.get("images") if isinstance(result.get("images"), dict) else {}
+    if not isinstance(images, dict):
+        images = {}
+    explicit_ui = str(env.get("XYN_UI_IMAGE", "")).strip()
+    explicit_api = str(env.get("XYN_API_IMAGE", "")).strip()
+    if explicit_ui:
+        images["ui_image"] = explicit_ui
+    if explicit_api:
+        images["api_image"] = explicit_api
+    if explicit_ui or explicit_api:
+        result["images"] = images
+    return result
+
+
 def _provision_local(
     seed_url: str,
     *,
@@ -993,6 +1010,7 @@ def start_with_provision(
         }
     if not artifacts_ok:
         return 4
+    resolved = _apply_explicit_image_overrides(resolved, env)
     registry = resolved.get("registry") if isinstance(resolved.get("registry"), dict) else {}
     images = resolved.get("images") if isinstance(resolved.get("images"), dict) else {}
     endpoint = str(registry.get("endpoint") or "").strip()
@@ -1402,6 +1420,7 @@ def main() -> None:
             }
         if not artifacts_ok:
             sys.exit(4)
+        resolved = _apply_explicit_image_overrides(resolved, env)
         images = resolved.get("images") if isinstance(resolved.get("images"), dict) else {}
         ok, payload = _provision_local(
             seed_url,

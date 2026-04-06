@@ -260,8 +260,9 @@ else
 fi
 
 # Artifact refresh/self-update smoke
+ARTIFACT_CHANNEL="${XYN_ARTIFACT_CHANNEL:-dev}"
 if curl -fsS -X POST "${BASE_URL}/api/v1/artifacts/refresh" -H "Content-Type: application/json" \
-  -d '{"artifacts":["xyn-ui","xyn-api","net-inventory-api"],"channel":"dev"}' >/tmp/artifact_refresh_e2e.json && \
+  -d "{\"artifacts\":[\"xyn-ui\",\"xyn-api\",\"net-inventory-api\"],\"channel\":\"${ARTIFACT_CHANNEL}\"}" >/tmp/artifact_refresh_e2e.json && \
   curl -fsS "${BASE_URL}/health" >/tmp/health_after_refresh.json && \
   curl -fsS -I "${UI_URL}" >/tmp/ui_after_refresh.txt; then
   pass "artifact refresh/self-update smoke"

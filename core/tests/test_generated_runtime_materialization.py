@@ -307,6 +307,38 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         self.assertEqual(result["ui_image"], "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:dev")
         resolve_registry_images.assert_called_once()
 
+    @mock.patch("core.provisioning_local.SessionLocal")
+    @mock.patch("core.provisioning_local.resolve_registry_images")
+    def test_provision_applies_per_image_explicit_overrides(self, resolve_registry_images, session_local):
+        session_local.return_value = mock.Mock()
+        resolve_registry_images.return_value = {
+            "registry": {"endpoint": "public.ecr.aws/i0h0h0n4/xyn/artifacts"},
+            "images": {
+                "ui_image": "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:develop",
+                "api_image": "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:83915e4",
+                "channel": "develop",
+            },
+            "registry_slug": "default-registry",
+            "registry_source": "default-registry",
+            "operations": [],
+        }
+        with mock.patch("core.provisioning_local._docker_image_exists", return_value=True):
+            result = _resolve_images_for_provision(
+                ProvisionLocalRequest(
+                    name="smoke",
+                    api_image="public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:83915e4",
+                )
+            )
+
+        self.assertEqual(result["api_image"], "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:83915e4")
+        self.assertEqual(result["ui_image"], "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:develop")
+        self.assertEqual(result["mode"], "artifact_registry_with_explicit_overrides")
+        _args, kwargs = resolve_registry_images.call_args
+        self.assertEqual(
+            kwargs.get("explicit_api_image"),
+            "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:83915e4",
+        )
+
     @mock.patch("core.provisioning_local._docker_image_exists", return_value=True)
     @mock.patch("core.provisioning_local._running_container_image_ref")
     def test_provision_prefers_prebuilt_local_tags_before_running_container_refs(self, running_container_image_ref, _docker_image_exists):

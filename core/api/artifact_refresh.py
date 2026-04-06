@@ -14,7 +14,7 @@ router = APIRouter()
 
 class ArtifactRefreshRequest(BaseModel):
     artifacts: list[str] = Field(default_factory=lambda: ["xyn-ui", "xyn-api", "net-inventory-api"])
-    channel: str = "dev"
+    channel: str = ""
     pull_net_inventory: bool = True
     restart_hint: bool = False
 
@@ -35,13 +35,23 @@ async def refresh_artifacts(
     principal: AccessPrincipal = Depends(require_capabilities(CAP_REFRESHES_RUN)),
 ):
     registry = str(os.getenv("XYN_ARTIFACT_REGISTRY", "public.ecr.aws/i0h0h0n4/xyn/artifacts")).strip().rstrip("/")
-    channel = str(payload.channel or "dev").strip() or "dev"
+    channel = str(payload.channel or os.getenv("XYN_ARTIFACT_CHANNEL", "")).strip() or "dev"
     artifact_names = [str(item).strip() for item in (payload.artifacts or []) if str(item).strip()]
     if not artifact_names:
         artifact_names = ["xyn-ui", "xyn-api"]
     if payload.pull_net_inventory and "net-inventory-api" not in artifact_names:
         artifact_names.append("net-inventory-api")
-    images = [f"{registry}/{name}:{channel}" for name in artifact_names]
+    explicit_map = {
+        "xyn-ui": str(os.getenv("XYN_UI_IMAGE", "")).strip(),
+        "xyn-api": str(os.getenv("XYN_API_IMAGE", "")).strip(),
+    }
+    images = []
+    for name in artifact_names:
+        explicit_image = explicit_map.get(name, "")
+        if explicit_image:
+            images.append(explicit_image)
+        else:
+            images.append(f"{registry}/{name}:{channel}")
 
     results: list[dict[str, Any]] = []
     for image in images:
