@@ -7,7 +7,7 @@ Production deployments should inject env via seed/compose and should not depend 
 
 - `XYN_ENV` = `local|dev|prod` (default: `local`)
 - `XYN_BASE_DOMAIN` (optional; alias: `DOMAIN`)
-- `XYN_AUTH_MODE` = `simple|oidc` (default: `simple`)
+- `XYN_AUTH_MODE` = `dev|token|oidc` (default: `dev`)
 - `XYN_INTERNAL_TOKEN` (required in prod; dev default is generated with warning)
 
 ### OIDC (required only when `XYN_AUTH_MODE=oidc`)
@@ -74,6 +74,30 @@ Required values by mode:
 Default local developer ergonomics are unchanged:
 - local DB mode starts local compose Postgres
 - local secret/artifact modes do not require AWS credentials
+- local auth defaults to `XYN_AUTH_MODE=dev`
+
+For production/AWS roots:
+- set `XYN_AUTH_MODE=token` (plus `XYN_UI_BEARER_TOKEN`) or `XYN_AUTH_MODE=oidc`
+- do not use `dev` auth mode
+
+Optional per-provision override:
+- `XYN_PROVISION_AUTH_MODE=dev|token|oidc`
+  - when set, `xynctl quickstart` / `xynctl provision local` uses this mode for the provisioned sibling stack
+  - when unset, provisioning inherits `XYN_AUTH_MODE`
+
+### Provisioning Route Host Controls
+
+`xynctl quickstart` / `xynctl provision local` host selection for the provisioned sibling:
+
+- `XYN_PROVISION_UI_HOST` / `XYN_PROVISION_API_HOST` (highest precedence)
+  - explicit per-run ingress host override sent in the provision request
+- `XYN_LOCAL_UI_HOST` / `XYN_LOCAL_API_HOST` (next)
+  - default sibling host override read by the provisioning runtime
+- fallback:
+  - if `XYN_PUBLIC_BASE_URL` host is non-localhost, that host is used for both UI/API
+  - otherwise localhost-style routing remains (`localhost`)
+
+This keeps local dev unchanged while allowing AWS/prod bootstrap to pin a public host such as `xyn.xyence.io`.
 
 ### Managed Storage Roots
 

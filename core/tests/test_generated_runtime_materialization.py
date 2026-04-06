@@ -438,6 +438,7 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
             api_image="xyn-api:latest",
             ui_host="localhost",
             api_host="api.localhost",
+            auth_mode="token",
         )
         self.assertIn(
             "XYN_RUNTIME_REPO_MAP: '${XYN_RUNTIME_REPO_MAP:-{\"xyn\":[\"/workspace/xyn\"],\"xyn-platform\":[\"/workspace/xyn-platform\"]}}'",
@@ -445,6 +446,7 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         )
         self.assertIn("${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn:/workspace/xyn", compose_text)
         self.assertIn("${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn-platform:/workspace/xyn-platform", compose_text)
+        self.assertIn("XYN_AUTH_MODE: token", compose_text)
 
 
 if __name__ == "__main__":
