@@ -790,8 +790,8 @@ def _resolve_images_for_provision(request: ProvisionLocalRequest) -> dict[str, A
     defaults = _artifact_image_defaults()
     operations: list[str] = []
 
-    requested_ui = str(request.ui_image or "").strip()
-    requested_api = str(request.api_image or "").strip()
+    requested_ui = str(request.ui_image or "").strip() or None
+    requested_api = str(request.api_image or "").strip() or None
     if requested_ui and requested_api:
         return {
             "mode": "explicit",
@@ -924,6 +924,8 @@ def _resolve_images_for_provision(request: ProvisionLocalRequest) -> dict[str, A
             explicit_registry_slug=str(request.registry_slug or "").strip() or None,
             workspace_slug=_default_workspace_slug(request.workspace_slug),
             channel=str(request.channel or "").strip() or None,
+            explicit_ui_image=requested_ui,
+            explicit_api_image=requested_api,
             ensure_local=True,
         )
     finally:
@@ -932,7 +934,7 @@ def _resolve_images_for_provision(request: ProvisionLocalRequest) -> dict[str, A
     operations.extend(list(resolved.get("operations") or []))
     images = resolved.get("images") if isinstance(resolved.get("images"), dict) else {}
     return {
-        "mode": "artifact_registry",
+        "mode": "artifact_registry" if not (requested_ui or requested_api) else "artifact_registry_with_explicit_overrides",
         "registry": str((resolved.get("registry") or {}).get("endpoint") or defaults["registry"]),
         "ui_image": str(images.get("ui_image") or defaults["ui_image"]),
         "api_image": str(images.get("api_image") or defaults["api_image"]),

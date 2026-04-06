@@ -48,6 +48,21 @@ class XynCtlEnvTests(unittest.TestCase):
         self.assertEqual(normalized.get("XYN_UI_IMAGE"), "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:dev")
         self.assertEqual(normalized.get("XYN_API_IMAGE"), "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:dev")
 
+    def test_explicit_image_overrides_take_precedence(self):
+        mod = _load_xynctl_module()
+        payload = {
+            "images": {
+                "ui_image": "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:develop",
+                "api_image": "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:develop",
+                "channel": "develop",
+            }
+        }
+        env = {"XYN_API_IMAGE": "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:83915e4"}
+        merged = mod._apply_explicit_image_overrides(payload, env)
+        images = merged.get("images") or {}
+        self.assertEqual(images.get("api_image"), "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:83915e4")
+        self.assertEqual(images.get("ui_image"), "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:develop")
+
     def test_build_context_pack_distribution_artifact_includes_revision_identity(self):
         mod = _load_xynctl_module()
         manifest = {

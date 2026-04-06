@@ -269,17 +269,25 @@ def resolve_registry(
     )
 
 
-def build_image_refs(spec: Dict[str, Any], *, channel: Optional[str] = None) -> Dict[str, str]:
+def build_image_refs(
+    spec: Dict[str, Any],
+    *,
+    channel: Optional[str] = None,
+    explicit_ui_image: Optional[str] = None,
+    explicit_api_image: Optional[str] = None,
+) -> Dict[str, str]:
     normalized = validate_registry_spec(spec)
     endpoint = str(normalized["endpoint"]).rstrip("/")
     defaults = normalized["defaults"]
     naming = defaults["naming"]
     effective_channel = str(channel or defaults.get("channel") or DEFAULT_CHANNEL).strip() or DEFAULT_CHANNEL
+    ui_image_override = str(explicit_ui_image or "").strip()
+    api_image_override = str(explicit_api_image or "").strip()
 
     return {
         "channel": effective_channel,
-        "ui_image": f"{endpoint}/{naming['ui_image_name']}:{effective_channel}",
-        "api_image": f"{endpoint}/{naming['api_image_name']}:{effective_channel}",
+        "ui_image": ui_image_override or f"{endpoint}/{naming['ui_image_name']}:{effective_channel}",
+        "api_image": api_image_override or f"{endpoint}/{naming['api_image_name']}:{effective_channel}",
     }
 
 
@@ -317,6 +325,8 @@ def resolve_registry_images(
     explicit_registry_slug: Optional[str] = None,
     workspace_slug: str = "default",
     channel: Optional[str] = None,
+    explicit_ui_image: Optional[str] = None,
+    explicit_api_image: Optional[str] = None,
     ensure_local: bool = False,
 ) -> Dict[str, Any]:
     resolved = resolve_registry(
@@ -324,7 +334,14 @@ def resolve_registry_images(
         explicit_registry_slug=explicit_registry_slug,
         workspace_slug=workspace_slug,
     )
-    refs = build_image_refs(resolved.spec, channel=channel)
+    ui_image_override = str(explicit_ui_image if explicit_ui_image is not None else os.getenv("XYN_UI_IMAGE", "")).strip()
+    api_image_override = str(explicit_api_image if explicit_api_image is not None else os.getenv("XYN_API_IMAGE", "")).strip()
+    refs = build_image_refs(
+        resolved.spec,
+        channel=channel,
+        explicit_ui_image=ui_image_override or None,
+        explicit_api_image=api_image_override or None,
+    )
     operations: list[str] = []
     if ensure_local:
         for image_ref in (refs["api_image"], refs["ui_image"]):
