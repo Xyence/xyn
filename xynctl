@@ -8,6 +8,7 @@ import json
 import hashlib
 import os
 import re
+import socket
 import shutil
 import subprocess
 import sys
@@ -56,6 +57,9 @@ IMAGE_SOURCE_SHA_LABEL = "org.xyn.build.source_sha"
 DEFAULT_CONTEXT_PACK_MANIFEST = ".xyn/sync/context-packs.manifest.json"
 DEFAULT_CONTEXT_PACK_ARTIFACT = ".xyn/sync/context-packs.artifact.json"
 DEFAULT_USER_WORKSPACE_SLUG = "development"
+ALLOWED_DB_MODES = {"local", "external"}
+ALLOWED_SECRET_STORE_MODES = {"local", "aws_secrets_manager"}
+ALLOWED_RUNTIME_ARTIFACT_PROVIDERS = {"local", "s3"}
 
 
 def _as_bool(value: str) -> bool:
@@ -419,11 +423,131 @@ def _hydrate_aws_env(runtime: dict[str, str]) -> None:
         runtime["AWS_REGION"] = str(runtime.get("AWS_DEFAULT_REGION", "")).strip()
 
 
-def preflight(skip_ai_keys: bool) -> bool:
+def _normalize_mode(*, env: dict[str, str], key: str, default: str, allowed: set[str]) -> str:
+    value = str(env.get(key, default)).strip().lower() or default
+    if value not in allowed:
+        raise ValueError(f"{key} must be one of: {', '.join(sorted(allowed))}")
+    return value
+
+
+def _bootstrap_mode_summary(env: dict[str, str]) -> tuple[str, str, str]:
+    db_mode = _normalize_mode(env=env, key="XYN_DB_MODE", default="local", allowed=ALLOWED_DB_MODES)
+    secret_store_mode = _normalize_mode(
+        env=env,
+        key="XYN_SECRET_STORE_MODE",
+        default="local",
+        allowed=ALLOWED_SECRET_STORE_MODES,
+    )
+    runtime_artifact_provider = _normalize_mode(
+        env=env,
+        key="XYN_RUNTIME_ARTIFACT_PROVIDER",
+        default="local",
+        allowed=ALLOWED_RUNTIME_ARTIFACT_PROVIDERS,
+    )
+    return db_mode, secret_store_mode, runtime_artifact_provider
+
+
+def _validate_external_database_url(database_url: str) -> tuple[bool, str, str, int]:
+    parsed = urlparse(database_url)
+    scheme = str(parsed.scheme or "").strip().lower()
+    if not scheme.startswith("postgres"):
+        return False, "DATABASE_URL must use a postgres/postgresql scheme", "", 0
+    host = str(parsed.hostname or "").strip()
+    if not host:
+        return False, "DATABASE_URL is missing a hostname", "", 0
+    port = int(parsed.port or 5432)
+    return True, "", host, port
+
+
+def _ensure_external_database_connectivity(env: dict[str, str], *, timeout_seconds: int = 5) -> bool:
+    database_url = str(env.get("DATABASE_URL", "")).strip()
+    if not database_url:
+        print_error("XYN_DB_MODE=external requires DATABASE_URL")
+        return False
+    ok, error_msg, host, port = _validate_external_database_url(database_url)
+    if not ok:
+        print_error(error_msg)
+        return False
+    print_info(f"Checking external database connectivity at {host}:{port} ...")
+    try:
+        with socket.create_connection((host, port), timeout=timeout_seconds):
+            pass
+    except OSError as exc:
+        print_error(f"Unable to reach external database host {host}:{port}: {exc}")
+        return False
+    print_success("External database host is reachable")
+    return True
+
+
+def check_bootstrap_modes(env: dict[str, str]) -> bool:
+    try:
+        db_mode, secret_store_mode, runtime_artifact_provider = _bootstrap_mode_summary(env)
+    except ValueError as exc:
+        print_error(str(exc))
+        return False
+
+    print_info(
+        "Bootstrap modes: "
+        f"XYN_DB_MODE={db_mode}, "
+        f"XYN_SECRET_STORE_MODE={secret_store_mode}, "
+        f"XYN_RUNTIME_ARTIFACT_PROVIDER={runtime_artifact_provider}"
+    )
+
+    if db_mode == "external":
+        database_url = str(env.get("DATABASE_URL", "")).strip()
+        if not database_url:
+            print_error("XYN_DB_MODE=external requires DATABASE_URL")
+            return False
+        ok, error_msg, _host, _port = _validate_external_database_url(database_url)
+        if not ok:
+            print_error(error_msg)
+            return False
+        print_success("External database mode configured")
+
+    if secret_store_mode == "aws_secrets_manager":
+        aws_region = str(env.get("AWS_REGION", "")).strip() or str(env.get("AWS_DEFAULT_REGION", "")).strip()
+        if not aws_region:
+            print_error("XYN_SECRET_STORE_MODE=aws_secrets_manager requires AWS_REGION or AWS_DEFAULT_REGION")
+            return False
+        print_success(f"AWS Secrets Manager mode configured (region={aws_region})")
+
+    if runtime_artifact_provider == "s3":
+        bucket = str(env.get("XYN_RUNTIME_ARTIFACT_S3_BUCKET", "")).strip() or str(env.get("XYN_ARTIFACT_S3_BUCKET", "")).strip()
+        if not bucket:
+            print_error("XYN_RUNTIME_ARTIFACT_PROVIDER=s3 requires XYN_RUNTIME_ARTIFACT_S3_BUCKET")
+            return False
+        print_success(f"Runtime artifact S3 mode configured (bucket={bucket})")
+
+    aws_needed = (
+        secret_store_mode == "aws_secrets_manager"
+        or runtime_artifact_provider == "s3"
+        or str(env.get("XYN_BOOTSTRAP_SOLUTION_SOURCE", "")).strip().lower() == "s3"
+    )
+    if aws_needed:
+        has_env_keys = bool(
+            str(env.get("AWS_ACCESS_KEY_ID", "")).strip()
+            and str(env.get("AWS_SECRET_ACCESS_KEY", "")).strip()
+        )
+        if has_env_keys:
+            print_success("AWS credentials detected via environment variables")
+        else:
+            print_info("No static AWS credentials detected; relying on IAM role/default AWS credential chain")
+            if str(env.get("AWS_PROFILE", "")).strip():
+                print_warning(
+                    "AWS_PROFILE is set, but profile files are not mounted into containers by default. "
+                    "Prefer IAM role or explicit AWS_* env credentials for bootstrap."
+                )
+
+    return True
+
+
+def preflight(skip_ai_keys: bool, env: Optional[dict[str, str]] = None) -> bool:
+    runtime_env = env or build_runtime_env()
     print_info("Running Xyn Seed preflight checks...\n")
     checks = [
         ("Environment file", check_env_file),
         ("AI keys", lambda: check_api_keys(skip_ai_keys)),
+        ("Bootstrap modes", lambda: check_bootstrap_modes(runtime_env)),
         ("Docker", check_docker),
         ("Docker Compose", check_docker_compose),
         ("Artifacts directory", create_artifacts_dir),
@@ -798,11 +922,20 @@ def _provision_local(
 
 
 def start(detached: bool, env: dict[str, str]) -> bool:
+    if not check_bootstrap_modes(env):
+        return False
+    db_mode, _secret_store_mode, _runtime_artifact_provider = _bootstrap_mode_summary(env)
+    if db_mode == "external":
+        if not _ensure_external_database_connectivity(env):
+            return False
     print_info("Starting seed core stack...")
     if not _compose_up(detached=detached, env=env):
         return False
-    if not _ensure_postgis_ready(env):
-        return False
+    if db_mode == "local":
+        if not _ensure_postgis_ready(env):
+            return False
+    else:
+        print_info("Skipping local PostGIS container checks because XYN_DB_MODE=external")
     seed_url = str(env.get("XYN_SEED_URL", "")).strip() or _build_default_seed_url(env)
     print_success("Seed core stack started")
     print_info(f"Seed URL: {seed_url}")
@@ -1229,7 +1362,7 @@ def main() -> None:
         if len(sys.argv) < 3 or sys.argv[2] != "local":
             print_error("Usage: ./xynctl provision local [--name <name>] [--force] [--reset-state] [--job-prompt <text>] [--repo-ref <path>]")
             sys.exit(1)
-        if not preflight(args["skip_ai_keys"]):
+        if not preflight(args["skip_ai_keys"], env):
             sys.exit(1)
         if not _wait_for_seed_health(seed_url, timeout_seconds=2):
             print_warning("Seed core does not appear healthy yet; starting core stack first...")
@@ -1296,7 +1429,7 @@ def main() -> None:
 
     # default: start
     provision = args["provision"] or cmd == "quickstart"
-    if not preflight(args["skip_ai_keys"]):
+    if not preflight(args["skip_ai_keys"], env):
         sys.exit(1)
     if provision:
         sys.exit(
