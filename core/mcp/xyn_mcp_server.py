@@ -10,6 +10,16 @@ from core.mcp.xyn_api_adapter import XynApiAdapter, XynApiAdapterConfig
 
 
 TOOL_NAMES = [
+    "list_blueprints",
+    "get_blueprint",
+    "create_blueprint",
+    "list_release_targets",
+    "get_release_target",
+    "create_release_target",
+    "list_artifacts",
+    "get_artifact",
+    "list_deployment_providers",
+    "get_provider_capabilities",
     "inspect_change_session_control",
     "run_change_session_control_action",
     "get_change_session_promotion_evidence",
@@ -18,7 +28,9 @@ TOOL_NAMES = [
     "get_release_target_deployment_preparation_evidence",
     "create_release_target_execution_preparation_handoff",
     "get_release_target_execution_preparation_handoff",
+    "approve_release_target_execution_preparation",
     "consume_release_target_execution_preparation",
+    "approve_release_target_execution_step",
     "run_release_target_execution_step",
     "get_release_target_execution_step_history",
 ]
@@ -36,6 +48,67 @@ def _register_tool(mcp_server: Any, *, name: str, description: str, fn: Callable
 
 
 def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
+    _register_tool(
+        mcp_server,
+        name="list_blueprints",
+        description="List available blueprints for release-target binding.",
+        fn=lambda: adapter.list_blueprints(),
+    )
+    _register_tool(
+        mcp_server,
+        name="get_blueprint",
+        description="Get one blueprint by id.",
+        fn=lambda blueprint_id: adapter.get_blueprint(blueprint_id=blueprint_id),
+    )
+    _register_tool(
+        mcp_server,
+        name="create_blueprint",
+        description="Create or update a blueprint using existing blueprint API payload fields.",
+        fn=lambda payload=None: adapter.create_blueprint(payload=payload),
+    )
+    _register_tool(
+        mcp_server,
+        name="list_release_targets",
+        description="List discoverable release targets with provider and configuration summaries.",
+        fn=lambda: adapter.list_release_targets(),
+    )
+    _register_tool(
+        mcp_server,
+        name="get_release_target",
+        description="Get one release target by id.",
+        fn=lambda target_id: adapter.get_release_target(target_id=target_id),
+    )
+    _register_tool(
+        mcp_server,
+        name="create_release_target",
+        description="Create a release target using the existing release-target API payload contract.",
+        fn=lambda payload=None: adapter.create_release_target(payload=payload),
+    )
+    _register_tool(
+        mcp_server,
+        name="list_artifacts",
+        description="List discoverable artifacts using existing artifact registry models.",
+        fn=lambda limit=100, offset=0: adapter.list_artifacts(limit=limit, offset=offset),
+    )
+    _register_tool(
+        mcp_server,
+        name="get_artifact",
+        description="Get one artifact by id.",
+        fn=lambda artifact_id: adapter.get_artifact(artifact_id=artifact_id),
+    )
+    _register_tool(
+        mcp_server,
+        name="list_deployment_providers",
+        description="List deployment provider/module capabilities available to release-target workflows.",
+        fn=lambda: adapter.list_deployment_providers(),
+    )
+    _register_tool(
+        mcp_server,
+        name="get_provider_capabilities",
+        description="Get deployment provider/module capability details by provider key.",
+        fn=lambda provider_key: adapter.get_provider_capabilities(provider_key=provider_key),
+    )
+
     _register_tool(
         mcp_server,
         name="inspect_change_session_control",
@@ -109,6 +182,15 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     )
     _register_tool(
         mcp_server,
+        name="approve_release_target_execution_preparation",
+        description="Approve execution-preparation handoff for a release target.",
+        fn=lambda target_id, payload=None: adapter.approve_release_target_execution_preparation(
+            target_id=target_id,
+            payload=payload,
+        ),
+    )
+    _register_tool(
+        mcp_server,
         name="consume_release_target_execution_preparation",
         description="Consume execution-preparation handoff into prepared execution evidence.",
         fn=lambda target_id, payload=None: adapter.consume_release_target_execution_preparation(
@@ -121,6 +203,15 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
         name="run_release_target_execution_step",
         description="Run one explicitly approved bounded execution step for a release target.",
         fn=lambda target_id, payload=None: adapter.run_release_target_execution_step(
+            target_id=target_id,
+            payload=payload,
+        ),
+    )
+    _register_tool(
+        mcp_server,
+        name="approve_release_target_execution_step",
+        description="Approve one prepared execution step for a release target.",
+        fn=lambda target_id, payload=None: adapter.approve_release_target_execution_step(
             target_id=target_id,
             payload=payload,
         ),

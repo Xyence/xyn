@@ -76,6 +76,83 @@ class XynApiAdapter:
             "response": body if isinstance(body, (dict, list)) else {"value": body},
         }
 
+    @staticmethod
+    def _with_release_target_not_found_hint(result: Dict[str, Any], *, target_id: str) -> Dict[str, Any]:
+        if int(result.get("status_code") or 0) != 404:
+            return result
+        response_body = result.get("response")
+        if not isinstance(response_body, dict):
+            response_body = {}
+        warnings = response_body.get("warnings") if isinstance(response_body.get("warnings"), list) else []
+        warning = (
+            "Release target not found for the provided target_id. "
+            "Use list_release_targets to fetch current ids, then retry with a listed id."
+        )
+        if warning not in warnings:
+            warnings.append(warning)
+        response_body["warnings"] = warnings
+        response_body.setdefault("blocked_reason", "release_target_not_found")
+        response_body.setdefault("recommended_action", "refresh_release_targets_and_retry")
+        response_body.setdefault(
+            "next_allowed_actions",
+            ["list_release_targets", "get_release_target", "get_release_target_deployment_plan"],
+        )
+        response_body.setdefault("target_id", str(target_id or ""))
+        result["response"] = response_body
+        return result
+
+    @staticmethod
+    def _release_target_discovery_row(payload: Dict[str, Any]) -> Dict[str, Any]:
+        runtime = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else {}
+        dns = payload.get("dns") if isinstance(payload.get("dns"), dict) else {}
+        topology = payload.get("topology") if isinstance(payload.get("topology"), dict) else {}
+        artifact_binding = payload.get("artifact_binding") if isinstance(payload.get("artifact_binding"), dict) else {}
+        provider_binding = payload.get("provider_binding") if isinstance(payload.get("provider_binding"), dict) else {}
+        return {
+            "id": str(payload.get("id") or ""),
+            "provider": {
+                "runtime_transport": str(runtime.get("transport") or ""),
+                "runtime_type": str(runtime.get("type") or ""),
+                "dns_provider": str(dns.get("provider") or ""),
+                "provider_key": str(provider_binding.get("provider_key") or ""),
+                "module_fqn": str(provider_binding.get("module_fqn") or ""),
+            },
+            "artifact_reference": {
+                "blueprint_id": str(payload.get("blueprint_id") or ""),
+                "artifact_id": str(artifact_binding.get("artifact_id") or ""),
+                "artifact_slug": str(artifact_binding.get("artifact_slug") or ""),
+                "artifact_family_id": str(artifact_binding.get("artifact_family_id") or ""),
+            },
+            "configuration_summary": {
+                "name": str(payload.get("name") or ""),
+                "environment": str(payload.get("environment") or ""),
+                "fqdn": str(payload.get("fqdn") or ""),
+                "target_instance_id": str(payload.get("target_instance_id") or ""),
+                "topology_kind": str(topology.get("kind") or ""),
+            },
+            "status": str(payload.get("status") or payload.get("execution_status") or payload.get("state") or ""),
+        }
+
+    @staticmethod
+    def _artifact_discovery_row(payload: Dict[str, Any]) -> Dict[str, Any]:
+        artifact_type = payload.get("artifact_type") if isinstance(payload.get("artifact_type"), dict) else {}
+        return {
+            "id": str(payload.get("id") or ""),
+            "slug": str(payload.get("slug") or ""),
+            "title": str(payload.get("title") or ""),
+            "artifact_type": str(
+                artifact_type.get("slug")
+                or payload.get("kind")
+                or payload.get("type")
+                or ""
+            ),
+            "status": str(payload.get("artifact_state") or payload.get("status") or ""),
+            "artifact_reference": {
+                "source_ref_type": str(payload.get("source_ref_type") or ""),
+                "source_ref_id": str(payload.get("source_ref_id") or ""),
+            },
+        }
+
     def inspect_change_session_control(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
         return self._request(
             method="GET",
@@ -105,62 +182,154 @@ class XynApiAdapter:
         )
 
     def get_release_target_deployment_plan(self, *, target_id: str) -> Dict[str, Any]:
-        return self._request(
+        result = self._request(
             method="GET",
             path=f"/xyn/api/release-targets/{target_id}/deployment_plan",
         )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
 
     def create_release_target_deployment_preparation_evidence(
         self, *, target_id: str, payload: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        return self._request(
+        result = self._request(
             method="POST",
             path=f"/xyn/api/release-targets/{target_id}/deployment_preparation_evidence",
             json_payload=dict(payload or {}),
         )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
 
     def get_release_target_deployment_preparation_evidence(self, *, target_id: str, limit: int = 10) -> Dict[str, Any]:
-        return self._request(
+        result = self._request(
             method="GET",
             path=f"/xyn/api/release-targets/{target_id}/deployment_preparation_evidence",
             params={"limit": int(limit)},
         )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
 
     def create_release_target_execution_preparation_handoff(
         self, *, target_id: str, payload: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        return self._request(
+        result = self._request(
             method="POST",
             path=f"/xyn/api/release-targets/{target_id}/execution_preparation_handoff",
             json_payload=dict(payload or {}),
         )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
 
     def get_release_target_execution_preparation_handoff(self, *, target_id: str, limit: int = 10) -> Dict[str, Any]:
-        return self._request(
+        result = self._request(
             method="GET",
             path=f"/xyn/api/release-targets/{target_id}/execution_preparation_handoff",
             params={"limit": int(limit)},
         )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
+
+    def approve_release_target_execution_preparation(
+        self, *, target_id: str, payload: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        result = self._request(
+            method="POST",
+            path=f"/xyn/api/release-targets/{target_id}/execution_preparation_approval",
+            json_payload=dict(payload or {}),
+        )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
 
     def consume_release_target_execution_preparation(
         self, *, target_id: str, payload: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        return self._request(
+        result = self._request(
             method="POST",
             path=f"/xyn/api/release-targets/{target_id}/execution_preparation_consume",
             json_payload=dict(payload or {}),
         )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
 
     def run_release_target_execution_step(self, *, target_id: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self._request(
+        result = self._request(
             method="POST",
             path=f"/xyn/api/release-targets/{target_id}/execution_step",
             json_payload=dict(payload or {}),
         )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
+
+    def approve_release_target_execution_step(self, *, target_id: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        result = self._request(
+            method="POST",
+            path=f"/xyn/api/release-targets/{target_id}/execution_step_approval",
+            json_payload=dict(payload or {}),
+        )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
 
     def get_release_target_execution_step_history(self, *, target_id: str, limit: int = 10) -> Dict[str, Any]:
-        return self._request(
+        result = self._request(
             method="GET",
             path=f"/xyn/api/release-targets/{target_id}/execution_step",
             params={"limit": int(limit)},
+        )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
+
+    def list_release_targets(self) -> Dict[str, Any]:
+        result = self._request(method="GET", path="/xyn/api/release-targets")
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        rows = body.get("release_targets") if isinstance(body.get("release_targets"), list) else []
+        normalized = [self._release_target_discovery_row(row) for row in rows if isinstance(row, dict)]
+        result["response"] = {"release_targets": normalized, "count": len(normalized)}
+        return result
+
+    def get_release_target(self, *, target_id: str) -> Dict[str, Any]:
+        result = self._request(method="GET", path=f"/xyn/api/release-targets/{target_id}")
+        if not result.get("ok"):
+            return self._with_release_target_not_found_hint(result, target_id=target_id)
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        result["response"] = {"release_target": self._release_target_discovery_row(body)}
+        return result
+
+    def list_artifacts(self, *, limit: int = 100, offset: int = 0) -> Dict[str, Any]:
+        result = self._request(
+            method="GET",
+            path="/xyn/api/artifacts",
+            params={"limit": int(limit), "offset": int(offset)},
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        rows = body.get("artifacts") if isinstance(body.get("artifacts"), list) else []
+        normalized = [self._artifact_discovery_row(row) for row in rows if isinstance(row, dict)]
+        result["response"] = {"artifacts": normalized, "count": len(normalized)}
+        return result
+
+    def get_artifact(self, *, artifact_id: str) -> Dict[str, Any]:
+        result = self._request(method="GET", path=f"/xyn/api/artifacts/{artifact_id}")
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        result["response"] = {"artifact": self._artifact_discovery_row(body)}
+        return result
+
+    def list_deployment_providers(self) -> Dict[str, Any]:
+        return self._request(method="GET", path="/xyn/api/deployment-providers")
+
+    def get_provider_capabilities(self, *, provider_key: str) -> Dict[str, Any]:
+        return self._request(method="GET", path=f"/xyn/api/deployment-providers/{provider_key}")
+
+    def create_release_target(self, *, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self._request(
+            method="POST",
+            path="/xyn/api/release-targets",
+            json_payload=dict(payload or {}),
+        )
+
+    def list_blueprints(self) -> Dict[str, Any]:
+        return self._request(method="GET", path="/xyn/api/blueprints")
+
+    def get_blueprint(self, *, blueprint_id: str) -> Dict[str, Any]:
+        return self._request(method="GET", path=f"/xyn/api/blueprints/{blueprint_id}")
+
+    def create_blueprint(self, *, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self._request(
+            method="POST",
+            path="/xyn/api/blueprints",
+            json_payload=dict(payload or {}),
         )
