@@ -903,6 +903,21 @@ def _apply_explicit_image_overrides(payload: dict[str, Any], env: dict[str, str]
     return result
 
 
+def _log_effective_artifact_images(images: dict[str, Any], env: dict[str, str]) -> None:
+    ui_image = str(images.get("ui_image") or "").strip()
+    api_image = str(images.get("api_image") or "").strip()
+    ui_override = bool(str(env.get("XYN_UI_IMAGE", "")).strip())
+    api_override = bool(str(env.get("XYN_API_IMAGE", "")).strip())
+    if ui_image:
+        ui_source = "explicit XYN_UI_IMAGE override" if ui_override else "artifact channel resolution"
+        print_info(f"Effective UI image ({ui_source}):")
+        print(ui_image)
+    if api_image:
+        api_source = "explicit XYN_API_IMAGE override" if api_override else "artifact channel resolution"
+        print_info(f"Effective API image ({api_source}):")
+        print(api_image)
+
+
 def _provision_local(
     seed_url: str,
     *,
@@ -1017,6 +1032,7 @@ def start_with_provision(
     reg_slug = str(resolved.get("registry_slug") or "default-registry").strip() or "default-registry"
     eff_channel = str(images.get("channel") or DEFAULT_IMAGE_TAG).strip() or DEFAULT_IMAGE_TAG
     print_info(f"Using ArtifactRegistry: {reg_slug} ({endpoint}) channel={eff_channel}")
+    _log_effective_artifact_images(images, env)
     for op in list(resolved.get("operations") or []):
         op_text = str(op or "").strip()
         if op_text.startswith("Pulled artifact image "):
@@ -1422,6 +1438,7 @@ def main() -> None:
             sys.exit(4)
         resolved = _apply_explicit_image_overrides(resolved, env)
         images = resolved.get("images") if isinstance(resolved.get("images"), dict) else {}
+        _log_effective_artifact_images(images, env)
         ok, payload = _provision_local(
             seed_url,
             name=args["name"],
