@@ -31,6 +31,7 @@ DEFAULT_UI_IMAGE_NAME = "xyn-ui"
 DEFAULT_API_IMAGE_NAME = "xyn-api"
 DEFAULT_IMAGE_TAG = "dev"
 DEFAULT_USER_WORKSPACE_SLUG = "development"
+ALLOWED_AUTH_MODES = {"dev", "token", "oidc"}
 
 
 def _utc_now() -> datetime:
@@ -110,6 +111,15 @@ def _tls_enabled() -> bool:
     if _as_bool(os.getenv("XYN_TRAEFIK_ENABLE_TLS", "false")):
         return True
     return bool(str(os.getenv("XYN_TRAEFIK_ACME_EMAIL", "")).strip())
+
+
+def _normalize_auth_mode(value: str) -> str:
+    mode = str(value or "").strip().lower()
+    if mode in {"simple", "local"}:
+        mode = "dev"
+    if mode not in ALLOWED_AUTH_MODES:
+        raise ValueError(f"Unsupported auth mode '{value}'. Expected one of: dev, token, oidc")
+    return mode
 
 
 def _resolved_hosts(project: str, *, ui_host_override: Optional[str] = None, api_host_override: Optional[str] = None) -> tuple[str, str]:
@@ -276,7 +286,7 @@ def _ensure_remote_workspace(*, api_url: str, workspace_slug: str, workspace_tit
     raise RuntimeError(f"Failed to ensure workspace '{slug}' in provisioned instance: {last_error or 'timeout'}")
 
 
-def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, api_host: str) -> str:
+def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, api_host: str, auth_mode: str) -> str:
     traefik_network = str(os.getenv("XYN_TRAEFIK_NETWORK", "xyn_traefik")).strip() or "xyn_traefik"
     resolver = str(os.getenv("XYN_TRAEFIK_CERT_RESOLVER", "letsencrypt")).strip() or "letsencrypt"
     tls = _tls_enabled()
@@ -327,7 +337,7 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       XYN_ENV: local
-      XYN_AUTH_MODE: ${{XYN_AUTH_MODE:-dev}}
+      XYN_AUTH_MODE: {auth_mode}
       DJANGO_ALLOWED_HOSTS: ${{DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,backend,{ui_host},{api_host}}}
       XYN_INTENT_ENGINE_V1: ${{XYN_INTENT_ENGINE_V1:-1}}
       XYN_PUBLIC_BASE_URL: ${{XYN_PUBLIC_BASE_URL:-{ui_scheme}://{ui_host}}}
@@ -408,7 +418,7 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       XYN_ENV: local
-      XYN_AUTH_MODE: ${{XYN_AUTH_MODE:-dev}}
+      XYN_AUTH_MODE: {auth_mode}
       DJANGO_ALLOWED_HOSTS: ${{DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,backend,{ui_host},{api_host}}}
       XYN_INTENT_ENGINE_V1: ${{XYN_INTENT_ENGINE_V1:-1}}
       XYN_PUBLIC_BASE_URL: ${{XYN_PUBLIC_BASE_URL:-{ui_scheme}://{ui_host}}}
@@ -697,6 +707,7 @@ class ProvisionLocalRequest(BaseModel):
     workspace_slug: Optional[str] = None
     ui_host: Optional[str] = None
     api_host: Optional[str] = None
+    auth_mode: Optional[str] = None
     prefer_local_images: bool = False
     prefer_local_sources: bool = False
 
@@ -962,6 +973,7 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
             "compose_path": existing.get("compose_path") or str(deploy_dir / "compose.yaml"),
             "ui_url": existing.get("ui_url") or "",
             "api_url": existing.get("api_url") or "",
+            "auth_mode": existing.get("auth_mode") or "",
             "surfaces": {"deployment": {"label": "Deployment", "path": existing.get("ui_url") or ""}},
             "ensured_artifacts": existing.get("ensured_artifacts") or [],
             "artifact_resolution": existing.get("artifact_resolution") or {},
@@ -991,6 +1003,10 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
         ui_host_override=request.ui_host,
         api_host_override=request.api_host,
     )
+    try:
+        auth_mode = _normalize_auth_mode(str(request.auth_mode or os.getenv("XYN_AUTH_MODE", "dev")).strip() or "dev")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"message": str(exc)}) from exc
     tls = _tls_enabled()
     scheme = "https" if tls else "http"
     compose_yaml = _compose_yaml(
@@ -999,6 +1015,7 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
         api_image=artifact_resolution["api_image"],
         ui_host=ui_host,
         api_host=api_host,
+        auth_mode=auth_mode,
     )
     compose_path.write_text(compose_yaml, encoding="utf-8")
     if request.force or request.reset_state:
@@ -1031,6 +1048,7 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
         "compose_path": str(compose_path),
         "ui_url": ui_url,
         "api_url": api_url,
+        "auth_mode": auth_mode,
         "ensured_artifacts": ensured_artifacts,
         "artifact_resolution": artifact_resolution,
         "created_at": _utc_now().isoformat(),
@@ -1104,6 +1122,7 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
         "compose_path": str(compose_path),
         "ui_url": ui_url,
         "api_url": api_url,
+        "auth_mode": auth_mode,
         "ensured_artifacts": ensured_artifacts,
         "artifact_resolution": artifact_resolution,
         "surfaces": {

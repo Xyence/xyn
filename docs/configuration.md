@@ -7,7 +7,7 @@ Production deployments should inject env via seed/compose and should not depend 
 
 - `XYN_ENV` = `local|dev|prod` (default: `local`)
 - `XYN_BASE_DOMAIN` (optional; alias: `DOMAIN`)
-- `XYN_AUTH_MODE` = `simple|oidc` (default: `simple`)
+- `XYN_AUTH_MODE` = `dev|token|oidc` (default: `dev`)
 - `XYN_INTERNAL_TOKEN` (required in prod; dev default is generated with warning)
 
 ### OIDC (required only when `XYN_AUTH_MODE=oidc`)
@@ -74,6 +74,16 @@ Required values by mode:
 Default local developer ergonomics are unchanged:
 - local DB mode starts local compose Postgres
 - local secret/artifact modes do not require AWS credentials
+- local auth defaults to `XYN_AUTH_MODE=dev`
+
+For production/AWS roots:
+- set `XYN_AUTH_MODE=token` (plus `XYN_UI_BEARER_TOKEN`) or `XYN_AUTH_MODE=oidc`
+- do not use `dev` auth mode
+
+Optional per-provision override:
+- `XYN_PROVISION_AUTH_MODE=dev|token|oidc`
+  - when set, `xynctl quickstart` / `xynctl provision local` uses this mode for the provisioned sibling stack
+  - when unset, provisioning inherits `XYN_AUTH_MODE`
 
 ### Provisioning Route Host Controls
 

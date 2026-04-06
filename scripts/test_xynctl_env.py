@@ -85,6 +85,21 @@ class XynCtlEnvTests(unittest.TestCase):
         self.assertEqual(ui_host, "xyn.xyence.io")
         self.assertEqual(api_host, "xyn.xyence.io")
 
+    def test_resolve_provision_auth_mode_prefers_provision_override(self):
+        mod = _load_xynctl_module()
+        env = {
+            "XYN_AUTH_MODE": "dev",
+            "XYN_PROVISION_AUTH_MODE": "oidc",
+        }
+        mode = mod._resolve_provision_auth_mode(env)
+        self.assertEqual(mode, "oidc")
+
+    def test_resolve_provision_auth_mode_normalizes_simple_to_dev(self):
+        mod = _load_xynctl_module()
+        env = {"XYN_AUTH_MODE": "simple"}
+        mode = mod._resolve_provision_auth_mode(env)
+        self.assertEqual(mode, "dev")
+
     def test_build_context_pack_distribution_artifact_includes_revision_identity(self):
         mod = _load_xynctl_module()
         manifest = {

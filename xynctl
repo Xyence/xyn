@@ -60,6 +60,7 @@ DEFAULT_USER_WORKSPACE_SLUG = "development"
 ALLOWED_DB_MODES = {"local", "external"}
 ALLOWED_SECRET_STORE_MODES = {"local", "aws_secrets_manager"}
 ALLOWED_RUNTIME_ARTIFACT_PROVIDERS = {"local", "s3"}
+ALLOWED_AUTH_MODES = {"dev", "token", "oidc"}
 LOCAL_COMPOSE_DATABASE_URL = "postgresql://xyn:xyn_dev_password@postgres:5432/xyn"
 LOCAL_COMPOSE_REDIS_URL = "redis://redis:6379/0"
 
@@ -934,6 +935,22 @@ def _resolve_provision_hosts(env: dict[str, str]) -> tuple[str, str]:
     return "", ""
 
 
+def _normalize_auth_mode(value: str) -> str:
+    mode = str(value or "").strip().lower()
+    if mode in {"simple", "local"}:
+        mode = "dev"
+    if mode not in ALLOWED_AUTH_MODES:
+        raise ValueError(f"Unsupported auth mode '{value}'. Expected one of: dev, token, oidc")
+    return mode
+
+
+def _resolve_provision_auth_mode(env: dict[str, str]) -> str:
+    explicit = str(env.get("XYN_PROVISION_AUTH_MODE", "")).strip()
+    if explicit:
+        return _normalize_auth_mode(explicit)
+    return _normalize_auth_mode(str(env.get("XYN_AUTH_MODE", "dev")).strip() or "dev")
+
+
 def _log_effective_artifact_images(images: dict[str, Any], env: dict[str, str]) -> None:
     ui_image = str(images.get("ui_image") or "").strip()
     api_image = str(images.get("api_image") or "").strip()
@@ -964,6 +981,7 @@ def _provision_local(
     workspace_slug: Optional[str],
     ui_host: Optional[str],
     api_host: Optional[str],
+    auth_mode: Optional[str],
 ) -> tuple[bool, dict[str, Any]]:
     payload: dict[str, Any] = {}
     if name:
@@ -988,6 +1006,8 @@ def _provision_local(
         payload["ui_host"] = ui_host
     if api_host:
         payload["api_host"] = api_host
+    if auth_mode:
+        payload["auth_mode"] = auth_mode
     request = Request(
         f"{seed_url.rstrip('/')}/api/v1/provision/local-instance",
         method="POST",
@@ -1082,8 +1102,14 @@ def start_with_provision(
             print_info(op_text)
     print_info("Provisioning local instance...")
     provision_ui_host, provision_api_host = _resolve_provision_hosts(env)
+    try:
+        provision_auth_mode = _resolve_provision_auth_mode(env)
+    except ValueError as exc:
+        print_error(str(exc))
+        return 6
     if provision_ui_host or provision_api_host:
         print_info(f"Provision route hosts: ui={provision_ui_host or '(auto)'} api={provision_api_host or '(auto)'}")
+    print_info(f"Provision auth mode: {provision_auth_mode}")
     ok, payload = _provision_local(
         seed_url,
         name=name,
@@ -1098,6 +1124,7 @@ def start_with_provision(
         workspace_slug=_default_workspace_slug(env),
         ui_host=provision_ui_host or None,
         api_host=provision_api_host or None,
+        auth_mode=provision_auth_mode,
     )
     if not ok:
         print_error(f"Provisioning failed: {payload.get('error')}")
@@ -1116,9 +1143,7 @@ def start_with_provision(
         print_success(f"UI available at: {ui_url}")
     else:
         print_warning("Provisioning completed but no UI URL was returned")
-    auth_mode = str(env.get("XYN_AUTH_MODE", "dev")).strip().lower()
-    if auth_mode in {"simple", "local"}:
-        auth_mode = "dev"
+    auth_mode = _normalize_auth_mode(str(payload.get("auth_mode") or env.get("XYN_AUTH_MODE", "dev")).strip() or "dev")
     print_info(f"Auth mode: {auth_mode}")
     if auth_mode == "token":
         token_value = str(env.get("XYN_UI_BEARER_TOKEN", "")).strip()
@@ -1482,8 +1507,14 @@ def main() -> None:
         images = resolved.get("images") if isinstance(resolved.get("images"), dict) else {}
         _log_effective_artifact_images(images, env)
         provision_ui_host, provision_api_host = _resolve_provision_hosts(env)
+        try:
+            provision_auth_mode = _resolve_provision_auth_mode(env)
+        except ValueError as exc:
+            print_error(str(exc))
+            sys.exit(6)
         if provision_ui_host or provision_api_host:
             print_info(f"Provision route hosts: ui={provision_ui_host or '(auto)'} api={provision_api_host or '(auto)'}")
+        print_info(f"Provision auth mode: {provision_auth_mode}")
         ok, payload = _provision_local(
             seed_url,
             name=args["name"],
@@ -1498,6 +1529,7 @@ def main() -> None:
             workspace_slug=_default_workspace_slug(env),
             ui_host=provision_ui_host or None,
             api_host=provision_api_host or None,
+            auth_mode=provision_auth_mode,
         )
         if not ok:
             print_error(f"Provisioning failed: {payload.get('error')}")
