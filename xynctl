@@ -903,6 +903,37 @@ def _apply_explicit_image_overrides(payload: dict[str, Any], env: dict[str, str]
     return result
 
 
+def _resolve_provision_hosts(env: dict[str, str]) -> tuple[str, str]:
+    """Resolve optional sibling host overrides for provision requests.
+
+    Precedence:
+    1) Explicit per-run overrides (XYN_PROVISION_UI_HOST / XYN_PROVISION_API_HOST)
+    2) Existing local sibling host overrides (XYN_LOCAL_UI_HOST / XYN_LOCAL_API_HOST)
+    3) Public base URL host, when non-localhost (uses same host for UI/API path-based routing)
+    """
+    explicit_ui = str(env.get("XYN_PROVISION_UI_HOST", "")).strip()
+    explicit_api = str(env.get("XYN_PROVISION_API_HOST", "")).strip()
+    if explicit_ui or explicit_api:
+        ui_host = explicit_ui or explicit_api
+        api_host = explicit_api or explicit_ui
+        return ui_host, api_host
+
+    local_ui = str(env.get("XYN_LOCAL_UI_HOST", "")).strip()
+    local_api = str(env.get("XYN_LOCAL_API_HOST", "")).strip()
+    if local_ui or local_api:
+        ui_host = local_ui or local_api
+        api_host = local_api or local_ui
+        return ui_host, api_host
+
+    public_base = str(env.get("XYN_PUBLIC_BASE_URL", "")).strip()
+    if public_base:
+        parsed = urlparse(public_base)
+        host = str(parsed.hostname or "").strip()
+        if host and host.lower() not in {"localhost", "127.0.0.1"}:
+            return host, host
+    return "", ""
+
+
 def _log_effective_artifact_images(images: dict[str, Any], env: dict[str, str]) -> None:
     ui_image = str(images.get("ui_image") or "").strip()
     api_image = str(images.get("api_image") or "").strip()
@@ -931,6 +962,8 @@ def _provision_local(
     registry_slug: Optional[str],
     channel: Optional[str],
     workspace_slug: Optional[str],
+    ui_host: Optional[str],
+    api_host: Optional[str],
 ) -> tuple[bool, dict[str, Any]]:
     payload: dict[str, Any] = {}
     if name:
@@ -951,6 +984,10 @@ def _provision_local(
         payload["channel"] = channel
     if workspace_slug:
         payload["workspace_slug"] = workspace_slug
+    if ui_host:
+        payload["ui_host"] = ui_host
+    if api_host:
+        payload["api_host"] = api_host
     request = Request(
         f"{seed_url.rstrip('/')}/api/v1/provision/local-instance",
         method="POST",
@@ -1044,6 +1081,9 @@ def start_with_provision(
         elif op_text:
             print_info(op_text)
     print_info("Provisioning local instance...")
+    provision_ui_host, provision_api_host = _resolve_provision_hosts(env)
+    if provision_ui_host or provision_api_host:
+        print_info(f"Provision route hosts: ui={provision_ui_host or '(auto)'} api={provision_api_host or '(auto)'}")
     ok, payload = _provision_local(
         seed_url,
         name=name,
@@ -1056,6 +1096,8 @@ def start_with_provision(
         registry_slug=reg_slug,
         channel=eff_channel,
         workspace_slug=_default_workspace_slug(env),
+        ui_host=provision_ui_host or None,
+        api_host=provision_api_host or None,
     )
     if not ok:
         print_error(f"Provisioning failed: {payload.get('error')}")
@@ -1439,6 +1481,9 @@ def main() -> None:
         resolved = _apply_explicit_image_overrides(resolved, env)
         images = resolved.get("images") if isinstance(resolved.get("images"), dict) else {}
         _log_effective_artifact_images(images, env)
+        provision_ui_host, provision_api_host = _resolve_provision_hosts(env)
+        if provision_ui_host or provision_api_host:
+            print_info(f"Provision route hosts: ui={provision_ui_host or '(auto)'} api={provision_api_host or '(auto)'}")
         ok, payload = _provision_local(
             seed_url,
             name=args["name"],
@@ -1451,6 +1496,8 @@ def main() -> None:
             registry_slug=str(resolved.get("registry_slug") or ""),
             channel=str(images.get("channel") or DEFAULT_IMAGE_TAG),
             workspace_slug=_default_workspace_slug(env),
+            ui_host=provision_ui_host or None,
+            api_host=provision_api_host or None,
         )
         if not ok:
             print_error(f"Provisioning failed: {payload.get('error')}")

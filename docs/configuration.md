@@ -75,6 +75,20 @@ Default local developer ergonomics are unchanged:
 - local DB mode starts local compose Postgres
 - local secret/artifact modes do not require AWS credentials
 
+### Provisioning Route Host Controls
+
+`xynctl quickstart` / `xynctl provision local` host selection for the provisioned sibling:
+
+- `XYN_PROVISION_UI_HOST` / `XYN_PROVISION_API_HOST` (highest precedence)
+  - explicit per-run ingress host override sent in the provision request
+- `XYN_LOCAL_UI_HOST` / `XYN_LOCAL_API_HOST` (next)
+  - default sibling host override read by the provisioning runtime
+- fallback:
+  - if `XYN_PUBLIC_BASE_URL` host is non-localhost, that host is used for both UI/API
+  - otherwise localhost-style routing remains (`localhost`)
+
+This keeps local dev unchanged while allowing AWS/prod bootstrap to pin a public host such as `xyn.xyence.io`.
+
 ### Managed Storage Roots
 
 - `XYN_ARTIFACT_ROOT`

@@ -63,6 +63,28 @@ class XynCtlEnvTests(unittest.TestCase):
         self.assertEqual(images.get("api_image"), "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:83915e4")
         self.assertEqual(images.get("ui_image"), "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:develop")
 
+    def test_resolve_provision_hosts_prefers_explicit_provision_overrides(self):
+        mod = _load_xynctl_module()
+        env = {
+            "XYN_PROVISION_UI_HOST": "xyn.xyence.io",
+            "XYN_PROVISION_API_HOST": "api.xyn.xyence.io",
+            "XYN_LOCAL_UI_HOST": "ignored-ui.local",
+            "XYN_LOCAL_API_HOST": "ignored-api.local",
+            "XYN_PUBLIC_BASE_URL": "https://ignored.example",
+        }
+        ui_host, api_host = mod._resolve_provision_hosts(env)
+        self.assertEqual(ui_host, "xyn.xyence.io")
+        self.assertEqual(api_host, "api.xyn.xyence.io")
+
+    def test_resolve_provision_hosts_falls_back_to_public_base_host(self):
+        mod = _load_xynctl_module()
+        env = {
+            "XYN_PUBLIC_BASE_URL": "https://xyn.xyence.io",
+        }
+        ui_host, api_host = mod._resolve_provision_hosts(env)
+        self.assertEqual(ui_host, "xyn.xyence.io")
+        self.assertEqual(api_host, "xyn.xyence.io")
+
     def test_build_context_pack_distribution_artifact_includes_revision_identity(self):
         mod = _load_xynctl_module()
         manifest = {
