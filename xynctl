@@ -171,6 +171,7 @@ def _ensure_env_defaults_file() -> None:
 
 def normalize_ai_env(env_vars: dict[str, str]) -> dict[str, str]:
     normalized = _artifact_defaults(env_vars)
+
     for provider, names in AI_KEY_SPECS.items():
         canonical = names[0]
         first = ""
