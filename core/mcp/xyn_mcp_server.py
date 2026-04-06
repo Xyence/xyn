@@ -28,7 +28,9 @@ TOOL_NAMES = [
     "get_release_target_deployment_preparation_evidence",
     "create_release_target_execution_preparation_handoff",
     "get_release_target_execution_preparation_handoff",
+    "approve_release_target_execution_preparation",
     "consume_release_target_execution_preparation",
+    "approve_release_target_execution_step",
     "run_release_target_execution_step",
     "get_release_target_execution_step_history",
 ]
@@ -180,6 +182,15 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     )
     _register_tool(
         mcp_server,
+        name="approve_release_target_execution_preparation",
+        description="Approve execution-preparation handoff for a release target.",
+        fn=lambda target_id, payload=None: adapter.approve_release_target_execution_preparation(
+            target_id=target_id,
+            payload=payload,
+        ),
+    )
+    _register_tool(
+        mcp_server,
         name="consume_release_target_execution_preparation",
         description="Consume execution-preparation handoff into prepared execution evidence.",
         fn=lambda target_id, payload=None: adapter.consume_release_target_execution_preparation(
@@ -192,6 +203,15 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
         name="run_release_target_execution_step",
         description="Run one explicitly approved bounded execution step for a release target.",
         fn=lambda target_id, payload=None: adapter.run_release_target_execution_step(
+            target_id=target_id,
+            payload=payload,
+        ),
+    )
+    _register_tool(
+        mcp_server,
+        name="approve_release_target_execution_step",
+        description="Approve one prepared execution step for a release target.",
+        fn=lambda target_id, payload=None: adapter.approve_release_target_execution_step(
             target_id=target_id,
             payload=payload,
         ),

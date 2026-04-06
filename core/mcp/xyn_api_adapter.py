@@ -77,6 +77,31 @@ class XynApiAdapter:
         }
 
     @staticmethod
+    def _with_release_target_not_found_hint(result: Dict[str, Any], *, target_id: str) -> Dict[str, Any]:
+        if int(result.get("status_code") or 0) != 404:
+            return result
+        response_body = result.get("response")
+        if not isinstance(response_body, dict):
+            response_body = {}
+        warnings = response_body.get("warnings") if isinstance(response_body.get("warnings"), list) else []
+        warning = (
+            "Release target not found for the provided target_id. "
+            "Use list_release_targets to fetch current ids, then retry with a listed id."
+        )
+        if warning not in warnings:
+            warnings.append(warning)
+        response_body["warnings"] = warnings
+        response_body.setdefault("blocked_reason", "release_target_not_found")
+        response_body.setdefault("recommended_action", "refresh_release_targets_and_retry")
+        response_body.setdefault(
+            "next_allowed_actions",
+            ["list_release_targets", "get_release_target", "get_release_target_deployment_plan"],
+        )
+        response_body.setdefault("target_id", str(target_id or ""))
+        result["response"] = response_body
+        return result
+
+    @staticmethod
     def _release_target_discovery_row(payload: Dict[str, Any]) -> Dict[str, Any]:
         runtime = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else {}
         dns = payload.get("dns") if isinstance(payload.get("dns"), dict) else {}
@@ -157,65 +182,91 @@ class XynApiAdapter:
         )
 
     def get_release_target_deployment_plan(self, *, target_id: str) -> Dict[str, Any]:
-        return self._request(
+        result = self._request(
             method="GET",
             path=f"/xyn/api/release-targets/{target_id}/deployment_plan",
         )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
 
     def create_release_target_deployment_preparation_evidence(
         self, *, target_id: str, payload: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        return self._request(
+        result = self._request(
             method="POST",
             path=f"/xyn/api/release-targets/{target_id}/deployment_preparation_evidence",
             json_payload=dict(payload or {}),
         )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
 
     def get_release_target_deployment_preparation_evidence(self, *, target_id: str, limit: int = 10) -> Dict[str, Any]:
-        return self._request(
+        result = self._request(
             method="GET",
             path=f"/xyn/api/release-targets/{target_id}/deployment_preparation_evidence",
             params={"limit": int(limit)},
         )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
 
     def create_release_target_execution_preparation_handoff(
         self, *, target_id: str, payload: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        return self._request(
+        result = self._request(
             method="POST",
             path=f"/xyn/api/release-targets/{target_id}/execution_preparation_handoff",
             json_payload=dict(payload or {}),
         )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
 
     def get_release_target_execution_preparation_handoff(self, *, target_id: str, limit: int = 10) -> Dict[str, Any]:
-        return self._request(
+        result = self._request(
             method="GET",
             path=f"/xyn/api/release-targets/{target_id}/execution_preparation_handoff",
             params={"limit": int(limit)},
         )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
+
+    def approve_release_target_execution_preparation(
+        self, *, target_id: str, payload: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        result = self._request(
+            method="POST",
+            path=f"/xyn/api/release-targets/{target_id}/execution_preparation_approval",
+            json_payload=dict(payload or {}),
+        )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
 
     def consume_release_target_execution_preparation(
         self, *, target_id: str, payload: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        return self._request(
+        result = self._request(
             method="POST",
             path=f"/xyn/api/release-targets/{target_id}/execution_preparation_consume",
             json_payload=dict(payload or {}),
         )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
 
     def run_release_target_execution_step(self, *, target_id: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self._request(
+        result = self._request(
             method="POST",
             path=f"/xyn/api/release-targets/{target_id}/execution_step",
             json_payload=dict(payload or {}),
         )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
+
+    def approve_release_target_execution_step(self, *, target_id: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        result = self._request(
+            method="POST",
+            path=f"/xyn/api/release-targets/{target_id}/execution_step_approval",
+            json_payload=dict(payload or {}),
+        )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
 
     def get_release_target_execution_step_history(self, *, target_id: str, limit: int = 10) -> Dict[str, Any]:
-        return self._request(
+        result = self._request(
             method="GET",
             path=f"/xyn/api/release-targets/{target_id}/execution_step",
             params={"limit": int(limit)},
         )
+        return self._with_release_target_not_found_hint(result, target_id=target_id)
 
     def list_release_targets(self) -> Dict[str, Any]:
         result = self._request(method="GET", path="/xyn/api/release-targets")
@@ -230,7 +281,7 @@ class XynApiAdapter:
     def get_release_target(self, *, target_id: str) -> Dict[str, Any]:
         result = self._request(method="GET", path=f"/xyn/api/release-targets/{target_id}")
         if not result.get("ok"):
-            return result
+            return self._with_release_target_not_found_hint(result, target_id=target_id)
         body = result.get("response") if isinstance(result.get("response"), dict) else {}
         result["response"] = {"release_target": self._release_target_discovery_row(body)}
         return result

@@ -162,3 +162,91 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(artifacts["response"]["artifacts"], [])
         self.assertTrue(providers["ok"])
         self.assertEqual(providers["response"]["providers"], [])
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_release_target_404_adds_actionable_warning(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 404
+        response.json.side_effect = ValueError("not json")
+        response.text = ""
+        mock_request.return_value = response
+
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                api_base_url="http://localhost",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        target_id = "4939b572-4604-42eb-b133-279580527906"
+        detail = adapter.get_release_target(target_id=target_id)
+        plan = adapter.get_release_target_deployment_plan(target_id=target_id)
+        create_prep = adapter.create_release_target_deployment_preparation_evidence(target_id=target_id)
+        get_prep = adapter.get_release_target_deployment_preparation_evidence(target_id=target_id)
+        create_handoff = adapter.create_release_target_execution_preparation_handoff(target_id=target_id)
+        get_handoff = adapter.get_release_target_execution_preparation_handoff(target_id=target_id)
+        approve_handoff = adapter.approve_release_target_execution_preparation(target_id=target_id)
+        consume = adapter.consume_release_target_execution_preparation(target_id=target_id)
+        run_step = adapter.run_release_target_execution_step(target_id=target_id)
+        approve_step = adapter.approve_release_target_execution_step(target_id=target_id)
+        get_step_history = adapter.get_release_target_execution_step_history(target_id=target_id)
+
+        self.assertFalse(detail["ok"])
+        self.assertEqual(detail["status_code"], 404)
+        self.assertEqual(detail["response"]["blocked_reason"], "release_target_not_found")
+        self.assertEqual(detail["response"]["recommended_action"], "refresh_release_targets_and_retry")
+        self.assertIn("list_release_targets", detail["response"]["next_allowed_actions"])
+        self.assertEqual(detail["response"]["target_id"], target_id)
+        self.assertTrue(detail["response"]["warnings"])
+
+        self.assertFalse(plan["ok"])
+        self.assertEqual(plan["status_code"], 404)
+        self.assertEqual(plan["response"]["blocked_reason"], "release_target_not_found")
+        self.assertEqual(plan["response"]["target_id"], target_id)
+
+        self.assertFalse(create_prep["ok"])
+        self.assertEqual(create_prep["status_code"], 404)
+        self.assertEqual(create_prep["response"]["blocked_reason"], "release_target_not_found")
+        self.assertEqual(create_prep["response"]["target_id"], target_id)
+
+        self.assertFalse(get_prep["ok"])
+        self.assertEqual(get_prep["status_code"], 404)
+        self.assertEqual(get_prep["response"]["blocked_reason"], "release_target_not_found")
+        self.assertEqual(get_prep["response"]["target_id"], target_id)
+
+        self.assertFalse(create_handoff["ok"])
+        self.assertEqual(create_handoff["status_code"], 404)
+        self.assertEqual(create_handoff["response"]["blocked_reason"], "release_target_not_found")
+        self.assertEqual(create_handoff["response"]["target_id"], target_id)
+
+        self.assertFalse(get_handoff["ok"])
+        self.assertEqual(get_handoff["status_code"], 404)
+        self.assertEqual(get_handoff["response"]["blocked_reason"], "release_target_not_found")
+        self.assertEqual(get_handoff["response"]["target_id"], target_id)
+
+        self.assertFalse(approve_handoff["ok"])
+        self.assertEqual(approve_handoff["status_code"], 404)
+        self.assertEqual(approve_handoff["response"]["blocked_reason"], "release_target_not_found")
+        self.assertEqual(approve_handoff["response"]["target_id"], target_id)
+
+        self.assertFalse(consume["ok"])
+        self.assertEqual(consume["status_code"], 404)
+        self.assertEqual(consume["response"]["blocked_reason"], "release_target_not_found")
+        self.assertEqual(consume["response"]["target_id"], target_id)
+
+        self.assertFalse(run_step["ok"])
+        self.assertEqual(run_step["status_code"], 404)
+        self.assertEqual(run_step["response"]["blocked_reason"], "release_target_not_found")
+        self.assertEqual(run_step["response"]["target_id"], target_id)
+
+        self.assertFalse(approve_step["ok"])
+        self.assertEqual(approve_step["status_code"], 404)
+        self.assertEqual(approve_step["response"]["blocked_reason"], "release_target_not_found")
+        self.assertEqual(approve_step["response"]["target_id"], target_id)
+
+        self.assertFalse(get_step_history["ok"])
+        self.assertEqual(get_step_history["status_code"], 404)
+        self.assertEqual(get_step_history["response"]["blocked_reason"], "release_target_not_found")
+        self.assertEqual(get_step_history["response"]["target_id"], target_id)
