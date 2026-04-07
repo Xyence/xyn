@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 import importlib.util
 from importlib.machinery import SourceFileLoader
+import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
+from urllib.error import HTTPError
 
 
 def _load_xynctl_module():
@@ -193,6 +195,38 @@ class XynCtlEnvTests(unittest.TestCase):
             ):
             status = mod.freshness_check({})
         self.assertEqual(status, 1)
+
+    def test_seed_control_plane_ready_accepts_method_not_allowed(self):
+        mod = _load_xynctl_module()
+        err = HTTPError(
+            url="https://seed.xyence.io/api/v1/provision/local-instance",
+            code=405,
+            msg="Method Not Allowed",
+            hdrs=None,
+            fp=io.BytesIO(b""),
+        )
+        with mock.patch.object(mod, "urlopen", side_effect=err):
+            self.assertTrue(mod._seed_control_plane_ready("https://seed.xyence.io", timeout_seconds=1))
+
+    def test_seed_control_plane_ready_rejects_not_found(self):
+        mod = _load_xynctl_module()
+        err = HTTPError(
+            url="https://xyn.xyence.io/api/v1/provision/local-instance",
+            code=404,
+            msg="Not Found",
+            hdrs=None,
+            fp=io.BytesIO(b""),
+        )
+        with mock.patch.object(mod, "urlopen", side_effect=err):
+            self.assertFalse(mod._seed_control_plane_ready("https://xyn.xyence.io", timeout_seconds=1))
+
+    def test_ensure_seed_control_plane_falls_back_to_default_seed_url(self):
+        mod = _load_xynctl_module()
+        with mock.patch.object(mod, "_seed_control_plane_ready", side_effect=[False, True]):
+            with mock.patch.object(mod, "_build_default_seed_url", return_value="https://seed.xyence.io"):
+                ok, effective = mod._ensure_seed_control_plane("https://xyn.xyence.io", {"XYN_SEED_HOST": "seed.xyence.io"})
+        self.assertTrue(ok)
+        self.assertEqual(effective, "https://seed.xyence.io")
 
 
 if __name__ == "__main__":

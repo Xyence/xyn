@@ -11,6 +11,7 @@ from unittest import mock
 from core.app_jobs import _build_app_spec, _build_policy_bundle, _materialize_net_inventory_compose, _package_generated_app, _prefer_local_platform_images_for_smoke
 from core.provisioning_local import (
     ProvisionLocalRequest,
+    _bootstrap_remote_default_agent,
     _compose_yaml,
     _compose_down_cmd,
     _ensure_remote_workspace,
@@ -19,6 +20,23 @@ from core.provisioning_local import (
 
 
 class GeneratedRuntimeMaterializationTests(unittest.TestCase):
+    def test_bootstrap_remote_default_agent_serializes_datetime_payload(self):
+        with mock.patch(
+            "core.provisioning_local._run",
+            return_value=(
+                0,
+                '{"status":"ok","last_bootstrap_at":"2026-04-07 14:00:00+00:00"}\n',
+                "",
+            ),
+        ) as run_mock:
+            payload = _bootstrap_remote_default_agent(api_container_name="xyn-local-api")
+
+        self.assertIsInstance(payload, dict)
+        self.assertEqual(payload.get("status"), "ok")
+        run_args = run_mock.call_args[0][0]
+        self.assertIn("manage.py", run_args)
+        self.assertIn("json.dumps(payload, default=str)", run_args[-1])
+
     def test_generated_package_includes_policy_bundle_artifact(self):
         workspace_id = uuid.uuid4()
         app_spec = _build_app_spec(

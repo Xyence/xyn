@@ -732,6 +732,64 @@ def _wait_for_seed_health(seed_url: str, timeout_seconds: int = 120, show_progre
     return False
 
 
+def _seed_control_plane_candidates(seed_url: str) -> list[tuple[str, dict[str, str]]]:
+    parsed = urlparse(seed_url)
+    scheme = parsed.scheme or "http"
+    host = parsed.hostname or "seed.localhost"
+    port = parsed.port
+    netloc = host if port is None else f"{host}:{port}"
+    base_paths = ["/api/v1/provision/local-instance", "/api/v1/artifact-registries/resolve"]
+    candidates: list[tuple[str, dict[str, str]]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def _add_candidate(target_host: str, headers: dict[str, str]) -> None:
+        candidate_netloc = target_host if port is None else f"{target_host}:{port}"
+        for path in base_paths:
+            key = (scheme, candidate_netloc, path)
+            if key in seen:
+                continue
+            seen.add(key)
+            url = urlunparse((scheme, candidate_netloc, path, "", "", ""))
+            candidates.append((url, headers))
+
+    _add_candidate(host, {})
+    if host.endswith(".localhost"):
+        host_header = netloc
+        _add_candidate("localhost", {"Host": host_header})
+        _add_candidate("127.0.0.1", {"Host": host_header})
+    return candidates
+
+
+def _seed_control_plane_ready(seed_url: str, timeout_seconds: int = 20) -> bool:
+    deadline = time.time() + timeout_seconds
+    candidates = _seed_control_plane_candidates(seed_url)
+    while time.time() < deadline:
+        for route_url, headers in candidates:
+            req = Request(route_url, method="GET", headers=headers)
+            try:
+                with urlopen(req, timeout=5) as response:
+                    if response.status < 500:
+                        return True
+            except HTTPError as exc:
+                # Route exists (method/validation/auth mismatch is acceptable).
+                if exc.code in {400, 401, 403, 405, 422}:
+                    return True
+            except Exception:
+                continue
+        time.sleep(1)
+    return False
+
+
+def _ensure_seed_control_plane(seed_url: str, env: dict[str, str]) -> tuple[bool, str]:
+    if _seed_control_plane_ready(seed_url):
+        return True, seed_url
+    fallback_url = _build_default_seed_url(env)
+    if fallback_url != seed_url and _seed_control_plane_ready(fallback_url):
+        print_warning(f"Seed URL {seed_url} did not expose seed control-plane routes; falling back to {fallback_url}")
+        return True, fallback_url
+    return False, seed_url
+
+
 def _print_seed_health_debug(seed_url: str) -> None:
     print_warning("Seed health check timed out. Debug info:")
     print_warning("  - docker compose ps")
@@ -1066,6 +1124,12 @@ def start_with_provision(
         _print_seed_health_debug(seed_url)
         return 2
     print_success("Seed API is healthy")
+    control_plane_ok, effective_seed_url = _ensure_seed_control_plane(seed_url, env)
+    if not control_plane_ok:
+        print_error("Seed health responded, but seed control-plane routes are unavailable at the configured seed URL.")
+        print_info("Set XYN_SEED_URL (or --seed-url) to your seed host origin, e.g. https://seed.xyence.io")
+        return 7
+    seed_url = effective_seed_url
     print_info("Resolving artifacts...")
     artifacts_ok, resolved = _resolve_artifacts_via_seed(seed_url, env)
     if not artifacts_ok:
@@ -1489,6 +1553,12 @@ def main() -> None:
                 print_error("Seed API is unavailable; cannot provision local instance")
                 _print_seed_health_debug(seed_url)
                 sys.exit(3)
+        control_plane_ok, effective_seed_url = _ensure_seed_control_plane(seed_url, env)
+        if not control_plane_ok:
+            print_error("Seed health responded, but seed control-plane routes are unavailable at the configured seed URL.")
+            print_info("Set XYN_SEED_URL (or --seed-url) to your seed host origin, e.g. https://seed.xyence.io")
+            sys.exit(7)
+        seed_url = effective_seed_url
         print_info("Resolving artifacts...")
         artifacts_ok, resolved = _resolve_artifacts_via_seed(seed_url, env)
         if not artifacts_ok:

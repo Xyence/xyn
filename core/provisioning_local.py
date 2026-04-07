@@ -302,7 +302,7 @@ def _bootstrap_remote_default_agent(*, api_container_name: str) -> Optional[Dict
         "ensure_default_ai_seeds()\n"
         "payload = get_default_agent_bootstrap_status() or {}\n"
         "payload['status'] = 'ok'\n"
-        "print(json.dumps(payload))\n"
+        "print(json.dumps(payload, default=str))\n"
     )
     code, stdout, stderr = _run(["docker", "exec", container, "python", "manage.py", "shell", "-c", script])
     if code != 0:
