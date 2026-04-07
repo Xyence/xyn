@@ -112,7 +112,7 @@ services:
       XYN_WORKSPACE_RETENTION_DAYS: ${XYN_WORKSPACE_RETENTION_DAYS:-14}
       XYN_LOCAL_DEPLOYMENTS_ROOT: /app/.xyn/deployments
       XYN_CONTEXT_PACK_MANIFEST_PATH: /app/.xyn/sync/context-packs.manifest.json
-      XYNSEED_CONTRACTS_ROOT: /xyn-contracts
+      XYNSEED_CONTRACTS_ROOT: /app/contracts
       XYN_SEED_ENABLE_LEGACY_PRODUCT: "false"
       XYN_ENABLE_BLUEPRINTS_LEGACY: ${XYN_ENABLE_BLUEPRINTS_LEGACY:-false}
       XYN_ENABLE_LEGACY_UI_ROUTES: ${XYN_ENABLE_LEGACY_UI_ROUTES:-false}
@@ -170,11 +170,8 @@ services:
       - ./.xyn/deployments:/app/.xyn/deployments:z
       - ./.xyn/sync:/app/.xyn/sync:z
       - ./core:/app/core:z
+      - ./contracts:/app/contracts:ro,z
       - ${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn:/workspace/xyn:z
-      - ${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn-platform:/workspace/xyn-platform:z
-      - ${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn-api:${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn-api:ro,z
-      - ${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn-ui:${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn-ui:ro,z
-      - ${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn-contracts:/xyn-contracts:ro,z
       - /var/run/docker.sock:/var/run/docker.sock:z
     depends_on:
       traefik:
