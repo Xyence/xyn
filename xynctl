@@ -583,6 +583,8 @@ def _compose_up(detached: bool, env: dict[str, str], db_mode: str) -> bool:
     args = ["docker", "compose"]
     if db_mode == "local":
         args.extend(["--profile", "localdb"])
+    if _as_bool(env.get("XYN_ENABLE_MCP", "false")):
+        args.extend(["--profile", "mcp"])
     args.extend(["up", "--build"])
     if detached:
         args.append("-d")

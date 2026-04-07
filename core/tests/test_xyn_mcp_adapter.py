@@ -129,6 +129,92 @@ class XynMcpAdapterTests(TestCase):
         self.assertFalse(bool(auth.get("has_internal_token")))
         self.assertTrue(bool(auth.get("has_cookie")))
 
+    def test_healthz_remains_unauthenticated_when_mcp_auth_enabled(self) -> None:
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                api_base_url="http://localhost",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        with mock.patch.dict("os.environ", {"XYN_MCP_AUTH_MODE": "token", "XYN_MCP_AUTH_BEARER_TOKEN": "top-secret"}, clear=False):
+            app = create_xyn_mcp_http_app(adapter)
+            with TestClient(app) as client:
+                response = client.get("/healthz")
+        self.assertEqual(response.status_code, 200)
+
+    def test_mcp_route_rejects_missing_bearer_when_token_mode_enabled(self) -> None:
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                api_base_url="http://localhost",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        with mock.patch.dict("os.environ", {"XYN_MCP_AUTH_MODE": "token", "XYN_MCP_AUTH_BEARER_TOKEN": "top-secret"}, clear=False):
+            app = create_xyn_mcp_http_app(adapter)
+            with TestClient(app) as client:
+                response = client.get("/mcp", headers={"Accept": "text/event-stream"})
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload.get("error"), "unauthorized")
+
+    def test_mcp_route_allows_valid_bearer_when_token_mode_enabled(self) -> None:
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                api_base_url="http://localhost",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        with mock.patch.dict("os.environ", {"XYN_MCP_AUTH_MODE": "token", "XYN_MCP_AUTH_BEARER_TOKEN": "top-secret"}, clear=False):
+            app = create_xyn_mcp_http_app(adapter)
+            with TestClient(app) as client:
+                response = client.get(
+                    "/mcp",
+                    headers={
+                        "Accept": "text/event-stream",
+                        "Authorization": "Bearer top-secret",
+                    },
+                )
+        self.assertNotEqual(response.status_code, 401)
+
+    @mock.patch("core.mcp.xyn_mcp_server.httpx.request")
+    def test_mcp_route_oidc_mode_rejects_invalid_token(self, mock_request: mock.Mock) -> None:
+        mock_response = mock.Mock()
+        mock_response.status_code = 401
+        mock_request.return_value = mock_response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                api_base_url="http://localhost",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "XYN_MCP_AUTH_MODE": "oidc",
+                "OIDC_ISSUER": "https://issuer.example.com",
+                "OIDC_CLIENT_ID": "client-id",
+            },
+            clear=False,
+        ):
+            app = create_xyn_mcp_http_app(adapter)
+            with TestClient(app) as client:
+                response = client.get("/mcp", headers={"Accept": "text/event-stream", "Authorization": "Bearer bad"})
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload.get("error"), "unauthorized")
+
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_list_discovery_endpoints_return_empty_lists_without_errors(self, mock_request: mock.Mock) -> None:
         responses = []

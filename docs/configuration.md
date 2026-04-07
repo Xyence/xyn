@@ -142,6 +142,31 @@ Compatibility aliases still exported for current local flows:
 - `ARTIFACT_STORE_PATH` mirrors `XYN_ARTIFACT_ROOT`
 - `XYN_LOCAL_WORKSPACE_ROOT` and `XYNSEED_WORKSPACE` mirror `XYN_WORKSPACE_ROOT`
 
+### MCP Runtime Service (Optional)
+
+`compose.yml` includes an optional `mcp` service behind profile `mcp`.
+
+- Enable via `XYN_ENABLE_MCP=true` (used by `xynctl`) or `docker compose --profile mcp ...`
+- Routed by Traefik on host `XYN_MCP_HOST` (default: `mcp.localhost`)
+- Exposes both `/mcp` and `/healthz` on that host
+
+Required MCP env:
+
+- `XYN_MCP_XYN_API_BASE_URL` (upstream Xyn API base URL; default `http://xyn-local-api:8000`)
+- `XYN_MCP_PORT` (default `8011`)
+- `XYN_MCP_BIND_HOST` (default `0.0.0.0`)
+
+MCP auth modes:
+
+- `XYN_MCP_AUTH_MODE=none` (dev default)
+- `XYN_MCP_AUTH_MODE=token` + `XYN_MCP_AUTH_BEARER_TOKEN=<strong token>`
+- `XYN_MCP_AUTH_MODE=oidc` + `OIDC_ISSUER` and `OIDC_CLIENT_ID` (or canonical `XYN_OIDC_*` equivalents)
+
+Notes:
+
+- `/healthz` remains unauthenticated by design.
+- `/mcp` is protected whenever MCP auth mode is `token` or `oidc`.
+
 ## Compatibility Aliases (Migration Window)
 
 - `DOMAIN` -> `XYN_BASE_DOMAIN`
