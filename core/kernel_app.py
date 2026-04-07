@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -69,6 +70,21 @@ logger = logging.getLogger(__name__)
 _STARTUP_TS = time.time()
 
 
+async def _bootstrap_ai_agent_with_retry(*, max_attempts: int = 6, initial_delay_seconds: float = 0.5) -> None:
+    """Retry AI bootstrap after server startup to avoid localhost bind races."""
+    delay = max(0.1, float(initial_delay_seconds))
+    for attempt in range(1, max_attempts + 1):
+        ok = await asyncio.to_thread(ensure_default_agent_via_api)
+        if ok:
+            if attempt > 1:
+                logger.info("AI bootstrap succeeded on retry attempt=%s", attempt)
+            return
+        if attempt < max_attempts:
+            await asyncio.sleep(delay)
+            delay = min(delay * 2.0, 5.0)
+    logger.warning("AI bootstrap did not succeed after %s attempts", max_attempts)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     config = load_seed_config()
@@ -91,7 +107,7 @@ async def _lifespan(app: FastAPI):
         ensure_default_palette_commands(db)
     finally:
         db.close()
-    ensure_default_agent_via_api()
+    ai_bootstrap_task: asyncio.Task[None] | None = asyncio.create_task(_bootstrap_ai_agent_with_retry())
     app_job_worker: AppJobWorkerHandle | None = None
     runtime_worker_loop: RuntimeWorkerLoopHandle | None = None
     if os.getenv("XYN_APP_JOB_WORKER_ENABLED", "true").strip().lower() in {"1", "true", "yes"}:
@@ -112,6 +128,12 @@ async def _lifespan(app: FastAPI):
 
     yield
 
+    if ai_bootstrap_task:
+        ai_bootstrap_task.cancel()
+        try:
+            await ai_bootstrap_task
+        except asyncio.CancelledError:
+            pass
     if reconciler_task:
         reconciler_task.cancel()
         try:
