@@ -110,7 +110,13 @@ def _running_container_image_ref(container_name: str) -> str:
 def _tls_enabled() -> bool:
     if _as_bool(os.getenv("XYN_TRAEFIK_ENABLE_TLS", "false")):
         return True
-    return bool(str(os.getenv("XYN_TRAEFIK_ACME_EMAIL", "")).strip())
+    if bool(str(os.getenv("XYN_TRAEFIK_ACME_EMAIL", "")).strip()):
+        return True
+    for key in ("XYN_SEED_URL", "XYN_PUBLIC_BASE_URL", "XYN_BASE_URL"):
+        value = str(os.getenv(key, "")).strip().lower()
+        if value.startswith("https://"):
+            return True
+    return False
 
 
 def _normalize_auth_mode(value: str) -> str:
@@ -427,7 +433,6 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       XYN_CREDENTIALS_ENCRYPTION_KEY: ${{XYN_CREDENTIALS_ENCRYPTION_KEY:-}}
     volumes:
       - ${{XYN_HOST_SRC_ROOT:-${{PWD}}/..}}/xyn:/workspace/xyn
-      - ${{XYN_HOST_SRC_ROOT:-${{PWD}}/..}}/xyn-platform:/workspace/xyn-platform
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network={traefik_network}"
