@@ -286,6 +286,33 @@ def _ensure_remote_workspace(*, api_url: str, workspace_slug: str, workspace_tit
     raise RuntimeError(f"Failed to ensure workspace '{slug}' in provisioned instance: {last_error or 'timeout'}")
 
 
+def _bootstrap_remote_default_agent(*, api_container_name: str) -> Optional[Dict[str, Any]]:
+    container = str(api_container_name or "").strip()
+    if not container:
+        return None
+    script = (
+        "import json\n"
+        "from xyn_orchestrator.ai_runtime import ensure_default_ai_seeds, get_default_agent_bootstrap_status\n"
+        "ensure_default_ai_seeds()\n"
+        "payload = get_default_agent_bootstrap_status() or {}\n"
+        "payload['status'] = 'ok'\n"
+        "print(json.dumps(payload))\n"
+    )
+    code, stdout, stderr = _run(["docker", "exec", container, "python", "manage.py", "shell", "-c", script])
+    if code != 0:
+        raise RuntimeError(
+            f"Failed to bootstrap default AI agent in provisioned instance '{container}': {stderr or stdout}"
+        )
+    lines = [line.strip() for line in str(stdout or "").splitlines() if line.strip()]
+    if not lines:
+        return None
+    try:
+        payload = json.loads(lines[-1])
+    except json.JSONDecodeError:
+        return {"status": "unknown", "raw": lines[-1]}
+    return payload if isinstance(payload, dict) else None
+
+
 def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, api_host: str, auth_mode: str) -> str:
     traefik_network = str(os.getenv("XYN_TRAEFIK_NETWORK", "xyn_traefik")).strip() or "xyn_traefik"
     resolver = str(os.getenv("XYN_TRAEFIK_CERT_RESOLVER", "letsencrypt")).strip() or "letsencrypt"
@@ -972,6 +999,7 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
             "ui_url": existing.get("ui_url") or "",
             "api_url": existing.get("api_url") or "",
             "auth_mode": existing.get("auth_mode") or "",
+            "default_agent_bootstrap": existing.get("default_agent_bootstrap") or {},
             "surfaces": {"deployment": {"label": "Deployment", "path": existing.get("ui_url") or ""}},
             "ensured_artifacts": existing.get("ensured_artifacts") or [],
             "artifact_resolution": existing.get("artifact_resolution") or {},
@@ -1038,6 +1066,21 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
 
     ui_url = f"{scheme}://{ui_host}"
     api_url = f"{scheme}://{api_host}"
+    default_agent_bootstrap: Optional[Dict[str, Any]] = None
+    if status == "succeeded":
+        api_container_name = f"{project}-api"
+        try:
+            default_agent_bootstrap = _bootstrap_remote_default_agent(api_container_name=api_container_name)
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "Provisioned instance started but default AI agent bootstrap failed",
+                    "deployment_id": deployment_id,
+                    "compose_project": project,
+                    "error": str(exc),
+                },
+            ) from exc
     deployment_payload: Dict[str, Any] = {
         "schema_version": "xyn.deployment.v1",
         "deployment_id": deployment_id,
@@ -1051,6 +1094,8 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
         "artifact_resolution": artifact_resolution,
         "created_at": _utc_now().isoformat(),
     }
+    if default_agent_bootstrap is not None:
+        deployment_payload["default_agent_bootstrap"] = default_agent_bootstrap
     if pull_cmd:
         deployment_payload["pull_stdout"] = pull_stdout
         deployment_payload["pull_stderr"] = pull_stderr
@@ -1123,6 +1168,7 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
         "auth_mode": auth_mode,
         "ensured_artifacts": ensured_artifacts,
         "artifact_resolution": artifact_resolution,
+        "default_agent_bootstrap": default_agent_bootstrap or {},
         "surfaces": {
             "deployment": {"label": "Deployment", "path": ui_url},
         },

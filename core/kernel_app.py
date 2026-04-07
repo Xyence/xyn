@@ -74,10 +74,12 @@ async def _bootstrap_ai_agent_with_retry(*, max_attempts: int = 6, initial_delay
     """Retry AI bootstrap after server startup to avoid localhost bind races."""
     delay = max(0.1, float(initial_delay_seconds))
     for attempt in range(1, max_attempts + 1):
-        ok = await asyncio.to_thread(ensure_default_agent_via_api)
-        if ok:
+        outcome = await asyncio.to_thread(ensure_default_agent_via_api)
+        if outcome == "succeeded":
             if attempt > 1:
                 logger.info("AI bootstrap succeeded on retry attempt=%s", attempt)
+            return
+        if outcome == "unsupported":
             return
         if attempt < max_attempts:
             await asyncio.sleep(delay)
