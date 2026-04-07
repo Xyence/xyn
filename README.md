@@ -116,6 +116,41 @@ Endpoints:
 - MCP: `http://localhost:8011/mcp`
 - Health: `http://localhost:8011/healthz`
 
+### Managed MCP Service via Compose
+
+Xyn can run MCP as an optional managed service (profile: `mcp`) behind Traefik.
+
+Enable with environment:
+
+```bash
+export XYN_ENABLE_MCP=true
+export XYN_MCP_HOST=mcp.localhost
+export XYN_MCP_AUTH_MODE=none
+```
+
+Then run:
+
+```bash
+./xynctl quickstart
+```
+
+Production auth example (OIDC-validated bearer):
+
+```bash
+XYN_ENABLE_MCP=true
+XYN_MCP_HOST=mcp.xyn.xyence.io
+XYN_MCP_AUTH_MODE=oidc
+OIDC_ISSUER=https://accounts.google.com
+OIDC_CLIENT_ID=<client-id>
+```
+
+Emergency/bootstrap token mode:
+
+```bash
+XYN_MCP_AUTH_MODE=token
+XYN_MCP_AUTH_BEARER_TOKEN=<strong-random-token>
+```
+
 ## Configuration Notes
 
 - Workspace defaults and bootstrap behavior are environment-driven.

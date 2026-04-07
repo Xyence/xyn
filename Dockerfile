@@ -22,8 +22,8 @@ RUN git config --system --add safe.directory /workspace/xyn \
     && git config --system --add safe.directory /workspace/xyn-platform
 
 # Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-mcp.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-mcp.txt
 
 # Copy application code
 COPY core/ ./core/

@@ -195,6 +195,50 @@ services:
       - traefik
     command: /bin/sh -lc 'if [ "$${XYN_CORE_RELOAD:-false}" = "true" ]; then exec uvicorn core.main:app --host 0.0.0.0 --port 8000 --reload; else exec uvicorn core.main:app --host 0.0.0.0 --port 8000; fi'
 
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: xyn-mcp
+    profiles:
+      - mcp
+    restart: unless-stopped
+    security_opt:
+      - label=disable
+    environment:
+      XYN_MCP_BIND_HOST: ${XYN_MCP_BIND_HOST:-0.0.0.0}
+      XYN_MCP_PORT: ${XYN_MCP_PORT:-8011}
+      XYN_MCP_XYN_API_BASE_URL: ${XYN_MCP_XYN_API_BASE_URL:-http://xyn-local-api:8000}
+      XYN_MCP_AUTH_MODE: ${XYN_MCP_AUTH_MODE:-none}
+      XYN_MCP_AUTH_BEARER_TOKEN: ${XYN_MCP_AUTH_BEARER_TOKEN:-}
+      OIDC_ISSUER: ${OIDC_ISSUER:-${XYN_OIDC_ISSUER:-}}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-${XYN_OIDC_CLIENT_ID:-}}
+      XYN_OIDC_ISSUER: ${XYN_OIDC_ISSUER:-}
+      XYN_OIDC_CLIENT_ID: ${XYN_OIDC_CLIENT_ID:-}
+    volumes:
+      - ./core:/app/core:z
+    depends_on:
+      traefik:
+        condition: service_started
+      core:
+        condition: service_started
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${XYN_TRAEFIK_NETWORK:-xyn_traefik}"
+      - "traefik.http.routers.mcp-http.rule=Host(`${XYN_MCP_HOST:-mcp.localhost}`)"
+      - "traefik.http.routers.mcp-http.entrypoints=web"
+      - "traefik.http.routers.mcp-http.service=mcp-svc"
+      - "traefik.http.services.mcp-svc.loadbalancer.server.port=8011"
+      - "traefik.http.routers.mcp-https.rule=Host(`${XYN_MCP_HOST:-mcp.localhost}`)"
+      - "traefik.http.routers.mcp-https.entrypoints=websecure"
+      - "traefik.http.routers.mcp-https.service=mcp-svc"
+      - "traefik.http.routers.mcp-https.tls=${XYN_TRAEFIK_ENABLE_TLS:-false}"
+      - "traefik.http.routers.mcp-https.tls.certresolver=${XYN_TRAEFIK_CERT_RESOLVER:-letsencrypt}"
+    networks:
+      - default
+      - traefik
+    command: python -m core.mcp.xyn_mcp_server
+
 volumes:
   postgres_data:
   letsencrypt_data:
