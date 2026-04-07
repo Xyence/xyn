@@ -401,6 +401,7 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       XYN_OIDC_ISSUER: ${{XYN_OIDC_ISSUER:-}}
       XYN_OIDC_CLIENT_ID: ${{XYN_OIDC_CLIENT_ID:-}}
       XYN_OIDC_CLIENT_SECRET: ${{XYN_OIDC_CLIENT_SECRET:-}}
+      XYN_OIDC_REDIRECT_URI: ${{XYN_OIDC_REDIRECT_URI:-}}
       XYN_UI_BEARER_TOKEN: ${{XYN_UI_BEARER_TOKEN:-}}
       XYN_AI_PROVIDER: ${{XYN_AI_PROVIDER:-}}
       XYN_AI_MODEL: ${{XYN_AI_MODEL:-}}
@@ -475,6 +476,7 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       XYN_OIDC_ISSUER: ${{XYN_OIDC_ISSUER:-}}
       XYN_OIDC_CLIENT_ID: ${{XYN_OIDC_CLIENT_ID:-}}
       XYN_OIDC_CLIENT_SECRET: ${{XYN_OIDC_CLIENT_SECRET:-}}
+      XYN_OIDC_REDIRECT_URI: ${{XYN_OIDC_REDIRECT_URI:-}}
       XYN_UI_BEARER_TOKEN: ${{XYN_UI_BEARER_TOKEN:-}}
       XYN_AI_PROVIDER: ${{XYN_AI_PROVIDER:-}}
       XYN_AI_MODEL: ${{XYN_AI_MODEL:-}}
