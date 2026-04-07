@@ -23,7 +23,11 @@ RUN git config --system --add safe.directory /workspace/xyn \
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt requirements-mcp.txt ./
-RUN pip install --no-cache-dir -r requirements.txt -r requirements-mcp.txt
+RUN pip install --no-cache-dir -r requirements.txt
+# Install MCP dependencies in an isolated venv so MCP pinning does not conflict with core runtime deps.
+RUN python -m venv /opt/mcp \
+    && /opt/mcp/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/mcp/bin/pip install --no-cache-dir -r requirements-mcp.txt
 
 # Copy application code
 COPY core/ ./core/
