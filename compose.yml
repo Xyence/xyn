@@ -3,6 +3,12 @@ services:
     image: traefik:v2.11
     container_name: xyn-traefik
     restart: unless-stopped
+    environment:
+      XYN_TRAEFIK_DASHBOARD: ${XYN_TRAEFIK_DASHBOARD:-false}
+      XYN_TRAEFIK_CERT_RESOLVER: ${XYN_TRAEFIK_CERT_RESOLVER:-letsencrypt}
+      XYN_TRAEFIK_ACME_EMAIL: ${XYN_TRAEFIK_ACME_EMAIL:-}
+      XYN_TRAEFIK_ACME_CHALLENGE: ${XYN_TRAEFIK_ACME_CHALLENGE:-http}
+      XYN_TRAEFIK_DNS_PROVIDER: ${XYN_TRAEFIK_DNS_PROVIDER:-route53}
     command: >
       /bin/sh -ec '
       set -e;
