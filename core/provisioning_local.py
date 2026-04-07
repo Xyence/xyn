@@ -317,17 +317,17 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
     traefik_network = str(os.getenv("XYN_TRAEFIK_NETWORK", "xyn_traefik")).strip() or "xyn_traefik"
     resolver = str(os.getenv("XYN_TRAEFIK_CERT_RESOLVER", "letsencrypt")).strip() or "letsencrypt"
     tls = _tls_enabled()
-    ui_scheme = "https" if tls else "http"
-    if ui_host == api_host:
-        api_rule = f"Host(`{ui_host}`) && (PathPrefix(`/xyn/api`) || PathPrefix(`/api`) || PathPrefix(`/auth`))"
-    else:
-        api_rule = (
-            f"Host(`{api_host}`) || "
-            f"(Host(`{ui_host}`) && (PathPrefix(`/xyn/api`) || PathPrefix(`/api`) || PathPrefix(`/auth`)))"
-        )
-    ui_rule = f"Host(`{ui_host}`)"
-    return f"""services:
-  postgres:
+    db_mode = str(os.getenv("XYN_DB_MODE", "local")).strip().lower()
+    use_external_db = db_mode == "external"
+    database_url = "${DATABASE_URL:-}" if use_external_db else "postgresql://xyn:xyn_dev_password@postgres:5432/xyn"
+    postgres_service = ""
+    postgres_backend_env = ""
+    postgres_migrate_env = ""
+    backend_postgres_dependency = ""
+    migrate_postgres_dependency = ""
+    volumes_block = "volumes:\n  postgres_data:\n\n"
+    if not use_external_db:
+        postgres_service = f"""  postgres:
     image: postgres:16-alpine
     container_name: {project}-postgres
     restart: unless-stopped
@@ -343,6 +343,31 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       timeout: 5s
       retries: 20
 
+"""
+        postgres_backend_env = """      POSTGRES_DB: xyn
+      POSTGRES_USER: xyn
+      POSTGRES_PASSWORD: xyn_dev_password
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+"""
+        postgres_migrate_env = postgres_backend_env
+        backend_postgres_dependency = """      postgres:
+        condition: service_healthy
+"""
+        migrate_postgres_dependency = backend_postgres_dependency
+    else:
+        volumes_block = ""
+    ui_scheme = "https" if tls else "http"
+    if ui_host == api_host:
+        api_rule = f"Host(`{ui_host}`) && (PathPrefix(`/xyn/api`) || PathPrefix(`/api`) || PathPrefix(`/auth`))"
+    else:
+        api_rule = (
+            f"Host(`{api_host}`) || "
+            f"(Host(`{ui_host}`) && (PathPrefix(`/xyn/api`) || PathPrefix(`/api`) || PathPrefix(`/auth`)))"
+        )
+    ui_rule = f"Host(`{ui_host}`)"
+    return f"""services:
+{postgres_service}\
   redis:
     image: redis:7-alpine
     container_name: {project}-redis
@@ -356,13 +381,9 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       - default
       - traefik
     environment:
-      DATABASE_URL: postgresql://xyn:xyn_dev_password@postgres:5432/xyn
+      DATABASE_URL: {database_url}
       REDIS_URL: redis://redis:6379/0
-      POSTGRES_DB: xyn
-      POSTGRES_USER: xyn
-      POSTGRES_PASSWORD: xyn_dev_password
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
+{postgres_backend_env}\
       XYN_ENV: local
       XYN_AUTH_MODE: {auth_mode}
       DJANGO_ALLOWED_HOSTS: ${{DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,backend,{ui_host},{api_host}}}
@@ -422,8 +443,7 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       - "traefik.http.routers.{project}-api-https.tls={str(tls).lower()}"
       - "traefik.http.routers.{project}-api-https.tls.certresolver={resolver}"
     depends_on:
-      postgres:
-        condition: service_healthy
+{backend_postgres_dependency}\
       redis:
         condition: service_started
       migrate:
@@ -436,13 +456,9 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
     networks:
       - default
     environment:
-      DATABASE_URL: postgresql://xyn:xyn_dev_password@postgres:5432/xyn
+      DATABASE_URL: {database_url}
       REDIS_URL: redis://redis:6379/0
-      POSTGRES_DB: xyn
-      POSTGRES_USER: xyn
-      POSTGRES_PASSWORD: xyn_dev_password
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
+{postgres_migrate_env}\
       XYN_ENV: local
       XYN_AUTH_MODE: {auth_mode}
       DJANGO_ALLOWED_HOSTS: ${{DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,backend,{ui_host},{api_host}}}
@@ -501,8 +517,7 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
         PY
         exec python manage.py migrate --noinput
     depends_on:
-      postgres:
-        condition: service_healthy
+{migrate_postgres_dependency}\
       redis:
         condition: service_started
 
@@ -532,8 +547,7 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
     depends_on:
       - backend
 
-volumes:
-  postgres_data:
+{volumes_block}\
 
 networks:
   traefik:
