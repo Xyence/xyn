@@ -237,7 +237,7 @@ services:
     networks:
       - default
       - traefik
-    command: python -m core.mcp.xyn_mcp_server
+    command: /opt/mcp/bin/python -m core.mcp.xyn_mcp_server
 
 volumes:
   postgres_data:
