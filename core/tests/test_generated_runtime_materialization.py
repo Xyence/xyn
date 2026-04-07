@@ -449,6 +449,21 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         self.assertIn("${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn-platform:/workspace/xyn-platform", compose_text)
         self.assertIn("XYN_AUTH_MODE: token", compose_text)
 
+    def test_compose_uses_external_db_without_local_postgres_when_db_mode_external(self):
+        with mock.patch.dict("os.environ", {"XYN_DB_MODE": "external"}, clear=False):
+            compose_text = _compose_yaml(
+                "xyn-local",
+                ui_image="xyn-ui:latest",
+                api_image="xyn-api:latest",
+                ui_host="xyn.xyence.io",
+                api_host="xyn.xyence.io",
+                auth_mode="oidc",
+            )
+        self.assertNotIn("image: postgres:16-alpine", compose_text)
+        self.assertNotIn("postgres_data:/var/lib/postgresql/data", compose_text)
+        self.assertIn("DATABASE_URL: ${DATABASE_URL:-}", compose_text)
+        self.assertNotIn("POSTGRES_HOST: postgres", compose_text)
+
 
 if __name__ == "__main__":
     unittest.main()
