@@ -1,0 +1,122 @@
+from __future__ import annotations
+
+import io
+import unittest
+import zipfile
+
+from core.artifact_code_review import (
+    analyze_codebase,
+    build_hierarchical_tree,
+    build_source_index,
+    compute_module_metrics,
+    parse_artifact_source_files,
+    read_file_chunk,
+    search_files,
+)
+
+
+def _zip_bytes(entries: dict[str, str]) -> bytes:
+    blob = io.BytesIO()
+    with zipfile.ZipFile(blob, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path, content in entries.items():
+            archive.writestr(path, content)
+    return blob.getvalue()
+
+
+class ArtifactCodeReviewTests(unittest.TestCase):
+    def test_parse_zip_and_build_tree(self) -> None:
+        payload = _zip_bytes(
+            {
+                "pkg/main.py": "import fastapi\n\napp = fastapi.FastAPI()\n",
+                "pkg/routes.py": "from fastapi import APIRouter\nrouter = APIRouter()\n",
+            }
+        )
+        files = parse_artifact_source_files(artifact_name="bundle.zip", artifact_bytes=payload)
+        self.assertIn("pkg/main.py", files)
+        index_rows = build_source_index(files, include_line_counts=True)
+        self.assertEqual(len(index_rows), 2)
+        tree = build_hierarchical_tree(index_rows)
+        self.assertEqual(tree["kind"], "dir")
+        self.assertTrue(any(child.get("name") == "pkg" for child in tree.get("children") or []))
+
+    def test_read_file_chunk_line_window(self) -> None:
+        files = {"app.py": b"line1\nline2\nline3\nline4\nline5\n"}
+        chunk = read_file_chunk(files=files, path="app.py", start_line=2, end_line=4)
+        self.assertEqual(chunk["returned_start_line"], 2)
+        self.assertEqual(chunk["returned_end_line"], 4)
+        self.assertEqual(chunk["total_lines"], 5)
+        self.assertIn("line2", chunk["content"])
+        self.assertNotIn("line1", chunk["content"])
+
+    def test_search_files_supports_regex_and_filters(self) -> None:
+        files = {
+            "a.py": b"from fastapi import APIRouter\n@router.get('/x')\n",
+            "b.txt": b"router.get not python",
+        }
+        result = search_files(
+            files=files,
+            query=r"router\.get",
+            regex=True,
+            file_extensions=[".py"],
+            case_sensitive=False,
+            limit=10,
+        )
+        self.assertGreaterEqual(result["total_hits"], 1)
+        self.assertEqual(len(result["files"]), 1)
+        self.assertEqual(result["files"][0]["path"], "a.py")
+
+    def test_compute_metrics_and_analysis_include_expected_fields(self) -> None:
+        files = {
+            "monolith.py": (
+                "import fastapi\n"
+                "import sqlalchemy\n"
+                "from pydantic import BaseModel\n\n"
+                "app = fastapi.FastAPI()\n\n"
+                "@app.get('/health')\n"
+                "def health():\n"
+                "    return {'ok': True}\n\n"
+                "def _unused_helper():\n"
+                "    return 1\n"
+            ).encode("utf-8"),
+            "small.py": b"import os\n",
+        }
+        metrics = compute_module_metrics(files)
+        self.assertTrue(any(str(row.get("path")) == "monolith.py" for row in metrics))
+        analysis = analyze_codebase(files)
+        self.assertIn("languages_detected", analysis)
+        self.assertTrue(any(item.get("framework") == "fastapi" for item in analysis["framework_fingerprint"]))
+        self.assertTrue(any(str(item.get("path")) == "monolith.py" for item in analysis["largest_files_by_line_count"]))
+
+    def test_python_api_mode_returns_specialized_assessment(self) -> None:
+        giant_lines = "\n".join(["def noop():", "    return 1"] * 2600)
+        files = {
+            "xyn_api.py": (
+                "from fastapi import FastAPI, APIRouter, Depends\n"
+                "from django.urls import path\n"
+                "from rest_framework.viewsets import ViewSet\n"
+                "app = FastAPI()\n"
+                "router = APIRouter()\n"
+                "@router.get('/health')\n"
+                "def health():\n"
+                "    return {'ok': True}\n"
+                "urlpatterns = [path('legacy/', lambda r: None)]\n"
+                + giant_lines
+            ).encode("utf-8"),
+            "services/auth.py": b"def login_user(token: str):\n    return token\n",
+        }
+        analysis = analyze_codebase(files, mode="python_api")
+        self.assertEqual(analysis.get("analysis_mode"), "python_api")
+        python_api = analysis.get("python_api_assessment") if isinstance(analysis.get("python_api_assessment"), dict) else {}
+        self.assertIn("oversized_file_report", python_api)
+        self.assertIn("framework_fingerprint", python_api)
+        self.assertTrue(bool(((python_api.get("framework_fingerprint") or {}).get("mixed_framework_detected"))))
+        routes = ((python_api.get("route_inventory") or {}).get("items")) or []
+        self.assertGreaterEqual(len(routes), 1)
+        risks = python_api.get("monolith_risk_scores") if isinstance(python_api.get("monolith_risk_scores"), dict) else {}
+        self.assertIn("file_size_risk", risks)
+        plan = python_api.get("suggested_extraction_plan") if isinstance(python_api.get("suggested_extraction_plan"), list) else []
+        self.assertGreaterEqual(len(plan), 3)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,8 +1,8 @@
-"""Artifact API endpoints"""
+"""Artifact API endpoints."""
 import datetime
 import os
 import uuid
-from typing import Optional
+from typing import Any, Optional
 from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, Response
 from pathlib import Path
@@ -10,6 +10,15 @@ from sqlalchemy.orm import Session
 
 from core.database import get_db
 from core import models, schemas
+from core.artifact_code_review import (
+    analyze_codebase,
+    build_hierarchical_tree,
+    build_source_index,
+    compute_module_metrics,
+    parse_artifact_source_files,
+    read_file_chunk,
+    search_files,
+)
 from core.access_control import (
     CAP_ARTIFACTS_READ,
     CAP_CAMPAIGNS_MANAGE,
@@ -110,6 +119,7 @@ async def create_artifact(
 @router.get("/artifacts", response_model=schemas.ArtifactListResponse)
 async def list_artifacts(
     limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     cursor: Optional[str] = None,
     workspace_id: Optional[uuid.UUID] = None,
     run_id: Optional[uuid.UUID] = None,
@@ -163,7 +173,12 @@ async def list_artifacts(
         except ValueError:
             pass  # Invalid cursor, ignore
 
-    # Fetch limit + 1 to determine if there are more results
+    # Offset-based pagination fallback for compatibility with clients expecting
+    # limit/offset semantics.
+    if offset:
+        query = query.offset(offset)
+
+    # Fetch limit + 1 to determine if there are more cursor results.
     artifacts = query.limit(limit + 1).all()
 
     # Determine next cursor
@@ -253,3 +268,219 @@ async def download_artifact(
                 filename=artifact.name
             )
     raise HTTPException(status_code=404, detail="Artifact content not found")
+
+
+def _artifact_slug(row: models.Artifact) -> str:
+    metadata = row.extra_metadata if isinstance(row.extra_metadata, dict) else {}
+    candidate = str(metadata.get("generated_artifact_slug") or "").strip()
+    if candidate:
+        return candidate
+    return str(row.name or "").strip()
+
+
+def _artifact_identity_payload(row: models.Artifact) -> dict[str, str]:
+    return {
+        "id": str(row.id),
+        "slug": _artifact_slug(row),
+    }
+
+
+def _resolve_artifact(
+    db: Session,
+    *,
+    artifact_id: Optional[uuid.UUID],
+    artifact_slug: Optional[str],
+) -> models.Artifact:
+    if artifact_id:
+        row = db.query(models.Artifact).filter(models.Artifact.id == artifact_id).first()
+        if row:
+            return row
+    slug = str(artifact_slug or "").strip()
+    if slug:
+        # First try direct name match.
+        row = (
+            db.query(models.Artifact)
+            .filter(models.Artifact.name == slug)
+            .order_by(models.Artifact.created_at.desc(), models.Artifact.id.desc())
+            .first()
+        )
+        if row:
+            return row
+        # Fallback: metadata-backed generated artifact slug.
+        # Keep this as a simple scan for MVP compatibility across DB backends.
+        rows = (
+            db.query(models.Artifact)
+            .order_by(models.Artifact.created_at.desc(), models.Artifact.id.desc())
+            .limit(5000)
+            .all()
+        )
+        for item in rows:
+            metadata = item.extra_metadata if isinstance(item.extra_metadata, dict) else {}
+            if str(metadata.get("generated_artifact_slug") or "").strip() == slug:
+                return item
+    raise HTTPException(status_code=404, detail="Artifact not found")
+
+
+async def _artifact_bytes(row: models.Artifact) -> bytes:
+    payload = await artifact_store.retrieve(row.id)
+    if payload is not None:
+        return bytes(payload)
+    artifact_path = artifact_store.get_path(row.id)
+    if artifact_path and artifact_path.exists():
+        return artifact_path.read_bytes()
+    if row.storage_path:
+        legacy = Path(str(row.storage_path))
+        if legacy.exists():
+            return legacy.read_bytes()
+    raise HTTPException(status_code=404, detail="Artifact content not found")
+
+
+def _normalize_extensions(raw: Optional[str]) -> list[str]:
+    if not raw:
+        return []
+    out: list[str] = []
+    for token in str(raw).split(","):
+        item = str(token or "").strip()
+        if not item:
+            continue
+        out.append(item if item.startswith(".") else f".{item}")
+    return out
+
+
+@router.get("/artifacts/source-tree")
+async def get_artifact_source_tree(
+    artifact_id: Optional[uuid.UUID] = Query(default=None),
+    artifact_slug: Optional[str] = Query(default=None),
+    include_line_counts: bool = Query(default=True),
+    principal: AccessPrincipal = Depends(require_capabilities(CAP_ARTIFACTS_READ)),
+    db: Session = Depends(get_db),
+):
+    row = _resolve_artifact(db, artifact_id=artifact_id, artifact_slug=artifact_slug)
+    payload = await _artifact_bytes(row)
+    files = parse_artifact_source_files(artifact_name=row.name, artifact_bytes=payload)
+    index_rows = build_source_index(files, include_line_counts=bool(include_line_counts))
+    tree = build_hierarchical_tree(index_rows)
+    return {
+        "artifact": _artifact_identity_payload(row),
+        "file_count": len(index_rows),
+        "tree": tree,
+        "files": index_rows,
+    }
+
+
+@router.get("/artifacts/source-file")
+async def read_artifact_source_file(
+    path: str = Query(..., min_length=1),
+    artifact_id: Optional[uuid.UUID] = Query(default=None),
+    artifact_slug: Optional[str] = Query(default=None),
+    start_line: Optional[int] = Query(default=None, ge=1),
+    end_line: Optional[int] = Query(default=None, ge=1),
+    principal: AccessPrincipal = Depends(require_capabilities(CAP_ARTIFACTS_READ)),
+    db: Session = Depends(get_db),
+):
+    row = _resolve_artifact(db, artifact_id=artifact_id, artifact_slug=artifact_slug)
+    payload = await _artifact_bytes(row)
+    files = parse_artifact_source_files(artifact_name=row.name, artifact_bytes=payload)
+    try:
+        chunk = read_file_chunk(files=files, path=path, start_line=start_line, end_line=end_line)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "artifact": _artifact_identity_payload(row),
+        **chunk,
+    }
+
+
+@router.get("/artifacts/source-search")
+async def search_artifact_source(
+    query: str = Query(..., min_length=1),
+    artifact_id: Optional[uuid.UUID] = Query(default=None),
+    artifact_slug: Optional[str] = Query(default=None),
+    path_glob: Optional[str] = Query(default=None),
+    file_extensions: Optional[str] = Query(default=None),
+    regex: bool = Query(default=False),
+    case_sensitive: bool = Query(default=False),
+    limit: int = Query(default=200, ge=1, le=2000),
+    principal: AccessPrincipal = Depends(require_capabilities(CAP_ARTIFACTS_READ)),
+    db: Session = Depends(get_db),
+):
+    row = _resolve_artifact(db, artifact_id=artifact_id, artifact_slug=artifact_slug)
+    payload = await _artifact_bytes(row)
+    files = parse_artifact_source_files(artifact_name=row.name, artifact_bytes=payload)
+    try:
+        results = search_files(
+            files=files,
+            query=query,
+            path_glob=path_glob,
+            file_extensions=_normalize_extensions(file_extensions),
+            regex=bool(regex),
+            case_sensitive=bool(case_sensitive),
+            limit=int(limit),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "artifact": _artifact_identity_payload(row),
+        **results,
+    }
+
+
+@router.get("/artifacts/analyze-codebase")
+async def analyze_artifact_codebase(
+    artifact_id: Optional[uuid.UUID] = Query(default=None),
+    artifact_slug: Optional[str] = Query(default=None),
+    mode: str = Query(default="general"),
+    principal: AccessPrincipal = Depends(require_capabilities(CAP_ARTIFACTS_READ)),
+    db: Session = Depends(get_db),
+):
+    row = _resolve_artifact(db, artifact_id=artifact_id, artifact_slug=artifact_slug)
+    payload = await _artifact_bytes(row)
+    files = parse_artifact_source_files(artifact_name=row.name, artifact_bytes=payload)
+    resolved_mode = str(mode or "general").strip().lower() or "general"
+    if resolved_mode not in {"general", "python_api"}:
+        raise HTTPException(status_code=400, detail="Unsupported analysis mode")
+    analysis = analyze_codebase(files, mode=resolved_mode)
+    return {
+        "artifact": _artifact_identity_payload(row),
+        "analysis_version": "mvp.v1",
+        **analysis,
+    }
+
+
+@router.get("/artifacts/analyze-python-api")
+async def analyze_python_api_artifact(
+    artifact_id: Optional[uuid.UUID] = Query(default=None),
+    artifact_slug: Optional[str] = Query(default=None),
+    principal: AccessPrincipal = Depends(require_capabilities(CAP_ARTIFACTS_READ)),
+    db: Session = Depends(get_db),
+):
+    row = _resolve_artifact(db, artifact_id=artifact_id, artifact_slug=artifact_slug)
+    payload = await _artifact_bytes(row)
+    files = parse_artifact_source_files(artifact_name=row.name, artifact_bytes=payload)
+    analysis = analyze_codebase(files, mode="python_api")
+    return {
+        "artifact": _artifact_identity_payload(row),
+        "analysis_version": "mvp.v1",
+        **analysis,
+    }
+
+
+@router.get("/artifacts/module-metrics")
+async def get_artifact_module_metrics(
+    artifact_id: Optional[uuid.UUID] = Query(default=None),
+    artifact_slug: Optional[str] = Query(default=None),
+    top_n: int = Query(default=200, ge=1, le=2000),
+    principal: AccessPrincipal = Depends(require_capabilities(CAP_ARTIFACTS_READ)),
+    db: Session = Depends(get_db),
+):
+    row = _resolve_artifact(db, artifact_id=artifact_id, artifact_slug=artifact_slug)
+    payload = await _artifact_bytes(row)
+    files = parse_artifact_source_files(artifact_name=row.name, artifact_bytes=payload)
+    rows = compute_module_metrics(files)
+    return {
+        "artifact": _artifact_identity_payload(row),
+        "count": len(rows),
+        "items": rows[: int(top_n)],
+    }

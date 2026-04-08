@@ -25,6 +25,155 @@ class XynMcpAdapterTests(TestCase):
 
         self.assertEqual(sorted(server.tools.keys()), sorted(TOOL_NAMES))
 
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_list_artifacts_default_call_no_parameters(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"artifacts": []}
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.list_artifacts()
+        self.assertTrue(result["ok"])
+        kwargs = mock_request.call_args.kwargs
+        self.assertEqual(kwargs["method"], "GET")
+        self.assertEqual(kwargs["url"], "http://xyn.local:8001/xyn/api/artifacts")
+        self.assertEqual(kwargs["params"], {"limit": 100, "offset": 0})
+        response_body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        self.assertEqual(response_body.get("artifacts"), [])
+        self.assertEqual(response_body.get("count"), 0)
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_get_artifact_source_tree_path(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"artifact": {"id": "a1", "slug": "app.demo"}, "files": []}
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.get_artifact_source_tree(artifact_slug="app.demo")
+        self.assertTrue(result["ok"])
+        kwargs = mock_request.call_args.kwargs
+        self.assertEqual(kwargs["method"], "GET")
+        self.assertEqual(kwargs["url"], "http://xyn.local:8001/api/v1/artifacts/source-tree")
+        self.assertEqual(kwargs["params"]["artifact_slug"], "app.demo")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_analyze_codebase_supports_mode_param(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"analysis_mode": "python_api"}
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.analyze_artifact_codebase(artifact_slug="app.demo", mode="python_api")
+        self.assertTrue(result["ok"])
+        kwargs = mock_request.call_args.kwargs
+        self.assertEqual(kwargs["method"], "GET")
+        self.assertEqual(kwargs["url"], "http://xyn.local:8001/api/v1/artifacts/analyze-codebase")
+        self.assertEqual(kwargs["params"]["artifact_slug"], "app.demo")
+        self.assertEqual(kwargs["params"]["mode"], "python_api")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_list_artifacts_accepts_api_v1_items_shape(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "items": [
+                {
+                    "id": "a1",
+                    "name": "app.net-inventory",
+                    "kind": "bundle",
+                    "status": "local",
+                    "metadata": {"generated_artifact_slug": "app.net-inventory"},
+                }
+            ],
+            "next_cursor": None,
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.list_artifacts(limit=10, offset=0)
+        self.assertTrue(result["ok"])
+        artifacts = (result.get("response") or {}).get("artifacts") or []
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0]["slug"], "app.net-inventory")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_list_artifacts_retries_without_offset_on_400(self, mock_request: mock.Mock) -> None:
+        first = mock.Mock()
+        first.status_code = 400
+        first.json.return_value = {"detail": "offset not supported"}
+        second = mock.Mock()
+        second.status_code = 200
+        second.json.return_value = {"artifacts": []}
+        mock_request.side_effect = [first, second]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.list_artifacts(limit=25, offset=0)
+        self.assertTrue(result["ok"])
+        self.assertEqual(mock_request.call_count, 2)
+        first_kwargs = mock_request.call_args_list[0].kwargs
+        second_kwargs = mock_request.call_args_list[1].kwargs
+        self.assertEqual(first_kwargs["url"], "http://xyn.local:8001/xyn/api/artifacts")
+        self.assertEqual(first_kwargs["params"], {"limit": 25, "offset": 0})
+        self.assertEqual(second_kwargs["url"], "http://xyn.local:8001/xyn/api/artifacts")
+        self.assertEqual(second_kwargs["params"], {"limit": 25})
+
+    def test_adapter_list_artifacts_invalid_pagination_parameters(self) -> None:
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        bad_limit = adapter.list_artifacts(limit=0, offset=0)
+        self.assertFalse(bad_limit["ok"])
+        self.assertEqual(bad_limit["status_code"], 400)
+        self.assertEqual((bad_limit.get("response") or {}).get("error"), "invalid_pagination")
+        bad_offset = adapter.list_artifacts(limit=10, offset=-1)
+        self.assertFalse(bad_offset["ok"])
+        self.assertEqual(bad_offset["status_code"], 400)
+        self.assertEqual((bad_offset.get("response") or {}).get("error"), "invalid_pagination")
+
     def test_registered_tool_calls_underlying_adapter_without_workflow_invention(self) -> None:
         adapter = mock.Mock()
         adapter.run_release_target_execution_step.return_value = {"ok": False, "status_code": 409, "response": {"status": "blocked"}}

@@ -22,6 +22,12 @@ TOOL_NAMES = [
     "create_release_target",
     "list_artifacts",
     "get_artifact",
+    "get_artifact_source_tree",
+    "read_artifact_source_file",
+    "search_artifact_source",
+    "analyze_artifact_codebase",
+    "analyze_python_api_artifact",
+    "get_artifact_module_metrics",
     "list_deployment_providers",
     "get_provider_capabilities",
     "inspect_change_session_control",
@@ -99,11 +105,82 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     def create_release_target(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
         return adapter.create_release_target(payload=payload)
 
-    def list_artifacts(limit: int = 100, offset: int = 0) -> Dict[str, Any]:
+    def list_artifacts(limit: int | None = None, offset: int | None = None) -> Dict[str, Any]:
         return adapter.list_artifacts(limit=limit, offset=offset)
 
     def get_artifact(artifact_id: str) -> Dict[str, Any]:
         return adapter.get_artifact(artifact_id=artifact_id)
+
+    def get_artifact_source_tree(
+        artifact_id: str = "",
+        artifact_slug: str = "",
+        include_line_counts: bool = True,
+    ) -> Dict[str, Any]:
+        return adapter.get_artifact_source_tree(
+            artifact_id=artifact_id,
+            artifact_slug=artifact_slug,
+            include_line_counts=include_line_counts,
+        )
+
+    def read_artifact_source_file(
+        path: str,
+        artifact_id: str = "",
+        artifact_slug: str = "",
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.read_artifact_source_file(
+            path=path,
+            artifact_id=artifact_id,
+            artifact_slug=artifact_slug,
+            start_line=start_line,
+            end_line=end_line,
+        )
+
+    def search_artifact_source(
+        query: str,
+        artifact_id: str = "",
+        artifact_slug: str = "",
+        path_glob: str = "",
+        file_extensions: str = "",
+        regex: bool = False,
+        case_sensitive: bool = False,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        return adapter.search_artifact_source(
+            query=query,
+            artifact_id=artifact_id,
+            artifact_slug=artifact_slug,
+            path_glob=path_glob,
+            file_extensions=file_extensions,
+            regex=regex,
+            case_sensitive=case_sensitive,
+            limit=limit,
+        )
+
+    def analyze_artifact_codebase(
+        artifact_id: str = "",
+        artifact_slug: str = "",
+        mode: str = "general",
+    ) -> Dict[str, Any]:
+        return adapter.analyze_artifact_codebase(artifact_id=artifact_id, artifact_slug=artifact_slug, mode=mode)
+
+    def analyze_python_api_artifact(
+        artifact_id: str = "",
+        artifact_slug: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.analyze_python_api_artifact(artifact_id=artifact_id, artifact_slug=artifact_slug)
+
+    def get_artifact_module_metrics(
+        artifact_id: str = "",
+        artifact_slug: str = "",
+        top_n: int = 200,
+    ) -> Dict[str, Any]:
+        return adapter.get_artifact_module_metrics(
+            artifact_id=artifact_id,
+            artifact_slug=artifact_slug,
+            top_n=top_n,
+        )
 
     def list_deployment_providers() -> Dict[str, Any]:
         return adapter.list_deployment_providers()
@@ -258,6 +335,42 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
         name="get_artifact",
         description="Get one artifact by id.",
         fn=get_artifact,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_artifact_source_tree",
+        description="Get artifact source file tree (supports artifact_id or artifact_slug).",
+        fn=get_artifact_source_tree,
+    )
+    _register_tool(
+        mcp_server,
+        name="read_artifact_source_file",
+        description="Read a line-range chunk from a source file in an artifact.",
+        fn=read_artifact_source_file,
+    )
+    _register_tool(
+        mcp_server,
+        name="search_artifact_source",
+        description="Search source files in an artifact with optional glob/extension/regex controls.",
+        fn=search_artifact_source,
+    )
+    _register_tool(
+        mcp_server,
+        name="analyze_artifact_codebase",
+        description="Return synthesized structural/refactor analysis for an artifact codebase (mode: general|python_api).",
+        fn=analyze_artifact_codebase,
+    )
+    _register_tool(
+        mcp_server,
+        name="analyze_python_api_artifact",
+        description="Specialized Python web/API monolith assessment for oversized files, framework overlap, routes, and extraction planning.",
+        fn=analyze_python_api_artifact,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_artifact_module_metrics",
+        description="Return per-file module metrics for an artifact codebase.",
+        fn=get_artifact_module_metrics,
     )
     _register_tool(
         mcp_server,
