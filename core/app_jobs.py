@@ -35,7 +35,13 @@ from core.database import SessionLocal
 from core.context_packs import default_instance_workspace_root
 from core.capability_manifest import build_manifest_suggestions, build_resolved_capability_manifest
 from core.execution_notes import create_execution_note, update_execution_note
-from core.models import Job, JobStatus, Workspace
+from core.environment_state import (
+    create_or_update_activation,
+    ensure_default_environment,
+    mark_activation_failed,
+    upsert_sibling_from_provision_output,
+)
+from core.models import Environment, Job, JobStatus, Workspace
 from core.appspec import entity_inference as appspec_entity_inference
 from core.appspec import canonicalize as appspec_canonicalize
 from core.appspec import consistency as appspec_consistency
@@ -47,6 +53,7 @@ from core.appspec import semantic_extractor as appspec_semantic_extractor
 from core.palette_engine import execute_palette_prompt
 from core.primitives import get_primitive_catalog
 from core.provisioning_local import provision_local_instance
+from core.db_tenancy import allocate_database
 from core.job_pipeline.stage_contracts import build_follow_up, build_stage_output, parse_stage_input
 from core.job_pipeline.execution_note_coordinator import (
     begin_stage_note,
@@ -2106,6 +2113,7 @@ def _handle_provision_sibling_xyn(db: Session, job: Job, logs: list[str]) -> tup
         parse_stage_input_fn=parse_stage_input,
         safe_slug_fn=_safe_slug,
         workspace_model=Workspace,
+        environment_model=Environment,
         find_revision_sibling_target_fn=_find_revision_sibling_target,
         append_job_log_fn=_append_job_log,
         provision_local_instance_fn=provision_local_instance,
@@ -2122,6 +2130,10 @@ def _handle_provision_sibling_xyn(db: Session, job: Job, logs: list[str]) -> tup
         update_execution_note_fn=update_execution_note,
         build_stage_output_fn=build_stage_output,
         build_follow_up_fn=build_follow_up,
+        ensure_default_environment_fn=ensure_default_environment,
+        upsert_sibling_from_provision_output_fn=upsert_sibling_from_provision_output,
+        create_or_update_activation_fn=create_or_update_activation,
+        allocate_database_fn=allocate_database,
     )
 
 
@@ -2264,6 +2276,8 @@ def _handle_smoke_test(db: Session, job: Job, logs: list[str]) -> tuple[dict[str
         finalize_stage_note_fn=finalize_stage_note,
         update_execution_note_fn=update_execution_note,
         build_stage_output_fn=build_stage_output,
+        upsert_sibling_from_provision_output_fn=upsert_sibling_from_provision_output,
+        create_or_update_activation_fn=create_or_update_activation,
     )
 
 
@@ -2361,6 +2375,20 @@ def _execute_job(job_id: uuid.UUID) -> None:
             output_json = output_json or {}
             output_json["error"] = str(exc)
             job.output_json = output_json
+            activation_id = (
+                str((job.input_json or {}).get("activation_id") or "").strip()
+                or str((output_json or {}).get("activation_id") or "").strip()
+            )
+            if activation_id:
+                try:
+                    mark_activation_failed(
+                        db,
+                        activation_id=activation_id,
+                        error_text=str(exc),
+                        source_job_id=job.id,
+                    )
+                except Exception:
+                    pass
             execution_note_artifact_id = resolve_execution_note_artifact_id(job.input_json, output_json)
             if execution_note_artifact_id:
                 try:

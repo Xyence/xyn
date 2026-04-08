@@ -73,6 +73,7 @@ def handle_provision_sibling_xyn(
     parse_stage_input_fn: Callable[[dict[str, Any]], Any],
     safe_slug_fn: Callable[..., str],
     workspace_model: Any,
+    environment_model: Any | None,
     find_revision_sibling_target_fn: Callable[..., dict[str, Any] | None],
     append_job_log_fn: Callable[[list[str], str], None],
     provision_local_instance_fn: Callable[[ProvisionLocalRequest], dict[str, Any]],
@@ -89,6 +90,10 @@ def handle_provision_sibling_xyn(
     update_execution_note_fn: Callable[..., Any],
     build_stage_output_fn: Callable[..., Any],
     build_follow_up_fn: Callable[..., Any],
+    ensure_default_environment_fn: Callable[..., Any],
+    upsert_sibling_from_provision_output_fn: Callable[..., Any],
+    create_or_update_activation_fn: Callable[..., Any],
+    allocate_database_fn: Callable[..., Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     payload = parse_stage_input_fn(job.input_json).to_dict()
     execution_note_artifact_id = str(payload.get("execution_note_artifact_id") or "").strip()
@@ -96,9 +101,70 @@ def handle_provision_sibling_xyn(
     app_spec = payload.get("app_spec") if isinstance(payload.get("app_spec"), dict) else {}
     app_slug = safe_slug_fn(str(app_spec.get("app_slug") or "net-inventory"), default="net-inventory")
     revision_anchor = app_spec.get("revision_anchor") if isinstance(app_spec.get("revision_anchor"), dict) else {}
+    requested_environment_id = str(payload.get("environment_id") or "").strip()
     workspace = db.query(workspace_model).filter(workspace_model.id == job.workspace_id).first()
     workspace_slug = str(getattr(workspace, "slug", "default") or "default")
+    environment_id = None
+    generated_artifact = payload.get("generated_artifact") if isinstance(payload.get("generated_artifact"), dict) else {}
+    generated_artifact_slug = str(generated_artifact.get("artifact_slug") or f"app.{app_slug}").strip() or f"app.{app_slug}"
+    generated_artifact_revision_id = str(
+        generated_artifact.get("revision_id") or generated_artifact.get("artifact_revision_id") or ""
+    ).strip()
+    generated_artifact_version = str(generated_artifact.get("artifact_version") or "").strip()
+    requested_activation_id = payload.get("activation_id")
+    requested_activation_uuid = None
+    if isinstance(requested_activation_id, uuid.UUID):
+        requested_activation_uuid = requested_activation_id
+    elif isinstance(requested_activation_id, str):
+        try:
+            requested_activation_uuid = uuid.UUID(requested_activation_id)
+        except Exception:
+            requested_activation_uuid = None
+    activation = None
+    state_write_enabled = True
+    try:
+        environment = None
+        if requested_environment_id and environment_model is not None:
+            try:
+                requested_environment_uuid = uuid.UUID(requested_environment_id)
+                environment = (
+                    db.query(environment_model)
+                    .filter(
+                        environment_model.id == requested_environment_uuid,
+                        environment_model.workspace_id == job.workspace_id,
+                    )
+                    .first()
+                )
+            except Exception:
+                environment = None
+        if environment is None:
+            environment = ensure_default_environment_fn(
+                db,
+                workspace_id=job.workspace_id,
+                workspace_slug=workspace_slug,
+            )
+        environment_id = getattr(environment, "id", None)
+        if not environment_id:
+            raise RuntimeError("missing environment id")
+        activation = create_or_update_activation_fn(
+            db,
+            environment_id=environment_id,
+            workspace_id=job.workspace_id,
+            artifact_slug=generated_artifact_slug,
+            artifact_revision_id=generated_artifact_revision_id,
+            artifact_version=generated_artifact_version,
+            activation_id=requested_activation_uuid,
+            status="provisioning",
+            source_job_id=job.id,
+            metadata={"revision_anchor": revision_anchor},
+        )
+    except Exception as exc:
+        state_write_enabled = False
+        append_job_log_fn(logs, f"Phase 0 environment state write-through skipped: {exc}")
+    activation_id = getattr(activation, "id", None) if activation else None
+    activation_id_text = str(activation_id) if activation_id else ""
     sibling: dict[str, Any]
+    database_allocation_public: dict[str, Any] = {}
     reused_sibling = find_revision_sibling_target_fn(
         db,
         root_workspace_id=job.workspace_id,
@@ -122,6 +188,33 @@ def handle_provision_sibling_xyn(
         ui_host = f"{sibling_name}.localhost"
         api_host = f"api.{sibling_name}.localhost"
         append_job_log_fn(logs, f"Provisioning sibling Xyn: name={sibling_name} ui_host={ui_host} api_host={api_host}")
+        database_url = ""
+        if allocate_database_fn and environment_id:
+            sibling_id_hint_raw = str(payload.get("sibling_id") or "").strip()
+            try:
+                sibling_id_hint = uuid.UUID(sibling_id_hint_raw) if sibling_id_hint_raw else uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"{job.id}:{sibling_name}",
+                )
+            except Exception:
+                sibling_id_hint = uuid.uuid5(uuid.NAMESPACE_URL, f"{job.id}:{sibling_name}")
+            allocation = allocate_database_fn(
+                environment_id=environment_id,
+                sibling_id=sibling_id_hint,
+                workspace_id=job.workspace_id,
+                sibling_name=sibling_name,
+            )
+            database_url = str(getattr(allocation, "database_url", "") or "").strip()
+            to_public_dict = getattr(allocation, "to_public_dict", None)
+            if callable(to_public_dict):
+                public_payload = to_public_dict()
+                if isinstance(public_payload, dict):
+                    database_allocation_public = public_payload
+            append_job_log_fn(
+                logs,
+                "Database allocation prepared for sibling provisioning "
+                f"mode={database_allocation_public.get('mode') or 'local'} tenancy={database_allocation_public.get('tenancy_mode') or 'local_compose'}",
+            )
         try:
             sibling = provision_local_instance_fn(
                 ProvisionLocalRequest(
@@ -131,18 +224,42 @@ def handle_provision_sibling_xyn(
                     ui_host=ui_host,
                     api_host=api_host,
                     prefer_local_images=prefer_local_platform_images_for_smoke_fn(),
+                    database_url=database_url or None,
                 )
             )
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
             raise RuntimeError(f"Sibling provisioning failed: {detail}") from exc
+        if database_allocation_public:
+            sibling["database_allocation"] = database_allocation_public
 
     sibling_output = {
         "deployment_id": sibling.get("deployment_id"),
         "compose_project": sibling.get("compose_project"),
         "ui_url": sibling.get("ui_url"),
         "api_url": sibling.get("api_url"),
+        "environment_id": str(environment_id or ""),
+        "activation_id": activation_id_text,
     }
+    if isinstance(sibling.get("database_allocation"), dict):
+        sibling_output["database_allocation"] = sibling.get("database_allocation")
+    if state_write_enabled and environment_id:
+        initial_sibling_state = upsert_sibling_from_provision_output_fn(
+            db,
+            environment_id=environment_id,
+            workspace_id=job.workspace_id,
+            sibling_name=str(sibling_output.get("compose_project") or f"sibling-{app_slug}"),
+            provision_output=sibling_output,
+            status="provisioning",
+            source_job_id=job.id,
+            revision_anchor=revision_anchor,
+            metadata={
+                "reused": bool(reused_sibling),
+                "database_allocation": database_allocation_public,
+            },
+        )
+        if getattr(initial_sibling_state, "id", None):
+            sibling_output["sibling_id"] = str(initial_sibling_state.id)
     policy_source = str(payload.get("policy_source") or "reconstructed").strip() or "reconstructed"
     policy_artifact_ref = payload.get("policy_artifact_ref") if isinstance(payload.get("policy_artifact_ref"), dict) else {}
     policy_compatibility = str(payload.get("policy_compatibility") or "unknown").strip() or "unknown"
@@ -157,7 +274,6 @@ def handle_provision_sibling_xyn(
     installed_artifact: dict[str, Any] | None = None
     sibling_runtime: dict[str, Any] | None = None
     sibling_registry_import: dict[str, Any] = {}
-    generated_artifact = payload.get("generated_artifact") if isinstance(payload.get("generated_artifact"), dict) else {}
     if sibling_api_container and docker_container_running_fn(sibling_api_container):
         preferred_artifact_slug = str(generated_artifact.get("artifact_slug") or "").strip()
         preferred_artifact_version = str(generated_artifact.get("artifact_version") or "").strip()
@@ -264,6 +380,51 @@ def handle_provision_sibling_xyn(
         "Registered sibling-owned runtime target "
         f"base_url={sibling_runtime.get('runtime_base_url')} workspace={installed_artifact.get('workspace_slug')}",
     )
+    sibling_id = None
+    if state_write_enabled and environment_id:
+        sibling_state = upsert_sibling_from_provision_output_fn(
+            db,
+            environment_id=environment_id,
+            workspace_id=job.workspace_id,
+            sibling_name=str(sibling_project or f"sibling-{app_slug}"),
+            provision_output=sibling_output,
+            status="ready",
+            source_job_id=job.id,
+            revision_anchor=revision_anchor,
+            metadata={
+                "reused": bool(reused_sibling),
+                "database_allocation": database_allocation_public,
+            },
+        )
+        sibling_id = getattr(sibling_state, "id", None)
+        registration_instance = (
+            (sibling_output.get("runtime_registration") or {}).get("instance")
+            if isinstance(sibling_output.get("runtime_registration"), dict)
+            else {}
+        )
+        registration_instance = registration_instance if isinstance(registration_instance, dict) else {}
+        workspace_instance_id = str(
+            registration_instance.get("id")
+            or getattr(sibling_state, "workspace_app_instance_id", "")
+            or ""
+        ).strip()
+        create_or_update_activation_fn(
+            db,
+            environment_id=environment_id,
+            workspace_id=job.workspace_id,
+            activation_id=activation_id if isinstance(activation_id, uuid.UUID) else None,
+            sibling_id=sibling_id if isinstance(sibling_id, uuid.UUID) else None,
+            artifact_slug=str((installed_artifact or {}).get("artifact_slug") or generated_artifact_slug),
+            artifact_revision_id=str((installed_artifact or {}).get("artifact_revision_id") or generated_artifact_revision_id),
+            artifact_version=str((installed_artifact or {}).get("artifact_version") or generated_artifact_version),
+            workspace_app_instance_id=workspace_instance_id,
+            status="runtime_registered",
+            source_job_id=job.id,
+            capability_entry=sibling_output.get("capability_entry") if isinstance(sibling_output.get("capability_entry"), dict) else {},
+            metadata={"sibling_id": str(sibling_id) if sibling_id else ""},
+        )
+    if sibling_id:
+        sibling_output["sibling_id"] = str(sibling_id)
     if execution_note_artifact_id:
         record_stage_metadata_fn(
             db,
@@ -307,6 +468,9 @@ def handle_provision_sibling_xyn(
                     "policy_compatibility": policy_compatibility,
                     "policy_compatibility_reason": policy_compatibility_reason,
                     "generated_artifact": generated_artifact,
+                    "environment_id": str(environment_id),
+                    "sibling_id": str(sibling_id) if sibling_id else "",
+                    "activation_id": activation_id_text,
                     "execution_note_artifact_id": execution_note_artifact_id,
                     "source_job_id": str(job.id),
                 },
