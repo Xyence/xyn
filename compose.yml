@@ -222,6 +222,12 @@ services:
         condition: service_started
       core:
         condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mcp/bin/python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8011/healthz', timeout=5).read()\""]
+      interval: 30s
+      timeout: 10s
+      start_period: 5s
+      retries: 3
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=${XYN_TRAEFIK_NETWORK:-xyn_traefik}"

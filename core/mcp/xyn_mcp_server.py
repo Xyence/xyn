@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import httpx
 from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 from core.mcp.xyn_api_adapter import XynApiAdapter, XynApiAdapterConfig
 
@@ -60,6 +60,13 @@ class McpAuthConfig:
             oidc_client_id=str(os.getenv("OIDC_CLIENT_ID", "")).strip()
             or str(os.getenv("XYN_OIDC_CLIENT_ID", "")).strip(),
         )
+
+    @property
+    def oidc_well_known_config_url(self) -> str:
+        issuer = self.oidc_issuer.rstrip("/")
+        if not issuer:
+            return ""
+        return f"{issuer}/.well-known/openid-configuration"
 
 
 def _register_tool(mcp_server: Any, *, name: str, description: str, fn: Callable[..., Dict[str, Any]]) -> None:
@@ -292,8 +299,39 @@ def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
             }
         )
 
-    def _unauthorized(message: str) -> JSONResponse:
-        return JSONResponse({"error": "unauthorized", "message": message}, status_code=401)
+    def _base_url_for(request) -> str:
+        proto = str(request.headers.get("x-forwarded-proto", "") or "").split(",")[0].strip() or str(request.url.scheme or "https")
+        host = str(request.headers.get("x-forwarded-host", "") or "").split(",")[0].strip() or str(request.headers.get("host", "")).strip()
+        if not host:
+            host = str(request.url.netloc or "").strip()
+        return f"{proto}://{host}" if host else ""
+
+    def _oauth_protected_resource_metadata(request) -> Dict[str, Any]:
+        base_url = _base_url_for(request)
+        resource = f"{base_url}/mcp" if base_url else "/mcp"
+        metadata: Dict[str, Any] = {
+            "resource": resource,
+            "bearer_methods_supported": ["header"],
+        }
+        if auth_config.oidc_issuer:
+            metadata["authorization_servers"] = [auth_config.oidc_issuer]
+        return metadata
+
+    def _oauth_www_authenticate_header(request) -> str:
+        params: Dict[str, str] = {"realm": "xyn-mcp"}
+        if auth_config.oidc_issuer:
+            params["authorization_uri"] = auth_config.oidc_issuer
+        base_url = _base_url_for(request)
+        if base_url:
+            params["resource_metadata"] = f"{base_url}/.well-known/oauth-protected-resource"
+        header_value = "Bearer " + ", ".join(f'{key}="{value}"' for key, value in params.items())
+        return header_value
+
+    def _unauthorized(request, message: str) -> JSONResponse:
+        headers = {}
+        if auth_config.mode == "oidc":
+            headers["WWW-Authenticate"] = _oauth_www_authenticate_header(request)
+        return JSONResponse({"error": "unauthorized", "message": message}, status_code=401, headers=headers)
 
     def _extract_bearer_token(header_value: str) -> Optional[str]:
         raw = str(header_value or "").strip()
@@ -308,42 +346,77 @@ def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
     async def _validate_oidc_bearer(token: str) -> Tuple[bool, str]:
         if not auth_config.oidc_issuer or not auth_config.oidc_client_id:
             return False, "OIDC auth mode requires OIDC_ISSUER and OIDC_CLIENT_ID"
+        timeout_seconds = min(float(configured_adapter.config.timeout_seconds), 10.0)
         try:
-            response = httpx.request(
+            config_response = httpx.request(
                 method="GET",
-                url=f"{configured_adapter.config.api_base_url}/xyn/api/me",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=min(float(configured_adapter.config.timeout_seconds), 10.0),
+                url=auth_config.oidc_well_known_config_url,
+                timeout=timeout_seconds,
             )
         except Exception:
-            return False, "OIDC token validation failed: unable to reach Xyn API auth verifier"
-        if response.status_code == 200:
-            return True, ""
-        return False, "Invalid OIDC bearer token"
+            return False, "OIDC token validation failed: unable to load issuer metadata"
+        if config_response.status_code >= 400:
+            return False, "OIDC token validation failed: issuer metadata unavailable"
+        try:
+            oidc_config = config_response.json()
+        except Exception:
+            return False, "OIDC token validation failed: issuer metadata was not valid JSON"
+
+        userinfo_endpoint = str(oidc_config.get("userinfo_endpoint") or "").strip()
+        if not userinfo_endpoint:
+            return False, "OIDC token validation failed: issuer did not provide userinfo_endpoint"
+        try:
+            userinfo_response = httpx.request(
+                method="GET",
+                url=userinfo_endpoint,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=timeout_seconds,
+            )
+        except Exception:
+            return False, "OIDC token validation failed: unable to reach userinfo endpoint"
+        if userinfo_response.status_code >= 400:
+            return False, "Invalid OIDC bearer token"
+        try:
+            claims = userinfo_response.json()
+        except Exception:
+            return False, "OIDC token validation failed: userinfo response was not valid JSON"
+
+        audience = claims.get("aud")
+        if isinstance(audience, str) and audience and audience != auth_config.oidc_client_id:
+            return False, "Invalid OIDC bearer token audience"
+        if isinstance(audience, list) and audience and auth_config.oidc_client_id not in [str(item) for item in audience]:
+            return False, "Invalid OIDC bearer token audience"
+        return True, ""
+
+    async def oauth_protected_resource(request) -> Response:
+        if auth_config.mode != "oidc":
+            return Response(status_code=404)
+        return JSONResponse(_oauth_protected_resource_metadata(request), status_code=200)
 
     async def _mcp_auth_guard(request, call_next):
         path = str(request.url.path or "")
-        if path == "/healthz" or not path.startswith("/mcp"):
+        if path in {"/healthz", "/.well-known/oauth-protected-resource"} or not path.startswith("/mcp"):
             return await call_next(request)
         if auth_config.mode == "none":
             return await call_next(request)
         token = _extract_bearer_token(request.headers.get("Authorization", ""))
         if not token:
-            return _unauthorized("Missing Authorization: Bearer <token> header")
+            return _unauthorized(request, "Missing Authorization: Bearer <token> header")
         if auth_config.mode == "token":
             if not auth_config.bearer_token:
-                return _unauthorized("MCP auth token mode is enabled but XYN_MCP_AUTH_BEARER_TOKEN is not configured")
+                return _unauthorized(request, "MCP auth token mode is enabled but XYN_MCP_AUTH_BEARER_TOKEN is not configured")
             if not secrets.compare_digest(token, auth_config.bearer_token):
-                return _unauthorized("Invalid bearer token")
+                return _unauthorized(request, "Invalid bearer token")
             return await call_next(request)
         ok, message = await _validate_oidc_bearer(token)
         if not ok:
-            return _unauthorized(message)
+            return _unauthorized(request, message)
         return await call_next(request)
     app.add_middleware(BaseHTTPMiddleware, dispatch=_mcp_auth_guard)
 
     # Add diagnostics route directly on the same MCP Starlette app so lifespan/task-group init stays intact.
     app.add_route("/healthz", healthz, methods=["GET"])
+    app.add_route("/.well-known/oauth-protected-resource", oauth_protected_resource, methods=["GET"])
     return app
 
 def main() -> None:
