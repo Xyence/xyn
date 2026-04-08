@@ -56,6 +56,11 @@ This script:
 1. Checks `schema_migrations` ledger
 2. Applies missing migrations in order
 3. Prints final ledger state
+4. Supports both local-dev and production/external DB execution targets:
+   - host `psql` + `DATABASE_URL`
+   - `docker compose exec core` (uses container `DATABASE_URL`)
+   - local compose `postgres` service fallback
+   - legacy `xyn-postgres` fallback
 
 ### Manual
 
@@ -68,6 +73,14 @@ Or via Docker:
 ```bash
 cat scripts/migrations/001_initial_schema.sql | docker exec -i xyn-postgres psql -U xyn -d xyn
 ```
+
+For production/external DB mode (`XYN_DB_MODE=external`), prefer:
+
+```bash
+DATABASE_URL=postgresql://... ./scripts/apply_migrations.sh
+```
+
+or run it from a host where `docker compose` `core` service is running with the correct `DATABASE_URL`.
 
 ## Development vs Production
 
