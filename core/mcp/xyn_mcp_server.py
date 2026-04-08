@@ -81,182 +81,274 @@ def _register_tool(mcp_server: Any, *, name: str, description: str, fn: Callable
 
 
 def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
+    def list_blueprints() -> Dict[str, Any]:
+        return adapter.list_blueprints()
+
+    def get_blueprint(blueprint_id: str) -> Dict[str, Any]:
+        return adapter.get_blueprint(blueprint_id=blueprint_id)
+
+    def create_blueprint(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return adapter.create_blueprint(payload=payload)
+
+    def list_release_targets() -> Dict[str, Any]:
+        return adapter.list_release_targets()
+
+    def get_release_target(target_id: str) -> Dict[str, Any]:
+        return adapter.get_release_target(target_id=target_id)
+
+    def create_release_target(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return adapter.create_release_target(payload=payload)
+
+    def list_artifacts(limit: int = 100, offset: int = 0) -> Dict[str, Any]:
+        return adapter.list_artifacts(limit=limit, offset=offset)
+
+    def get_artifact(artifact_id: str) -> Dict[str, Any]:
+        return adapter.get_artifact(artifact_id=artifact_id)
+
+    def list_deployment_providers() -> Dict[str, Any]:
+        return adapter.list_deployment_providers()
+
+    def get_provider_capabilities(provider_key: str) -> Dict[str, Any]:
+        return adapter.get_provider_capabilities(provider_key=provider_key)
+
+    def inspect_change_session_control(application_id: str, session_id: str) -> Dict[str, Any]:
+        return adapter.inspect_change_session_control(
+            application_id=application_id,
+            session_id=session_id,
+        )
+
+    def run_change_session_control_action(
+        application_id: str,
+        session_id: str,
+        operation: str,
+        action_payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.run_change_session_control_action(
+            application_id=application_id,
+            session_id=session_id,
+            operation=operation,
+            action_payload=action_payload,
+        )
+
+    def get_change_session_promotion_evidence(application_id: str, session_id: str) -> Dict[str, Any]:
+        return adapter.get_change_session_promotion_evidence(
+            application_id=application_id,
+            session_id=session_id,
+        )
+
+    def get_release_target_deployment_plan(target_id: str) -> Dict[str, Any]:
+        return adapter.get_release_target_deployment_plan(target_id=target_id)
+
+    def create_release_target_deployment_preparation_evidence(
+        target_id: str,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.create_release_target_deployment_preparation_evidence(
+            target_id=target_id,
+            payload=payload,
+        )
+
+    def get_release_target_deployment_preparation_evidence(target_id: str, limit: int = 10) -> Dict[str, Any]:
+        return adapter.get_release_target_deployment_preparation_evidence(
+            target_id=target_id,
+            limit=limit,
+        )
+
+    def create_release_target_execution_preparation_handoff(
+        target_id: str,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.create_release_target_execution_preparation_handoff(
+            target_id=target_id,
+            payload=payload,
+        )
+
+    def get_release_target_execution_preparation_handoff(target_id: str, limit: int = 10) -> Dict[str, Any]:
+        return adapter.get_release_target_execution_preparation_handoff(
+            target_id=target_id,
+            limit=limit,
+        )
+
+    def approve_release_target_execution_preparation(
+        target_id: str,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.approve_release_target_execution_preparation(
+            target_id=target_id,
+            payload=payload,
+        )
+
+    def consume_release_target_execution_preparation(
+        target_id: str,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.consume_release_target_execution_preparation(
+            target_id=target_id,
+            payload=payload,
+        )
+
+    def run_release_target_execution_step(
+        target_id: str,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.run_release_target_execution_step(
+            target_id=target_id,
+            payload=payload,
+        )
+
+    def approve_release_target_execution_step(
+        target_id: str,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.approve_release_target_execution_step(
+            target_id=target_id,
+            payload=payload,
+        )
+
+    def get_release_target_execution_step_history(target_id: str, limit: int = 10) -> Dict[str, Any]:
+        return adapter.get_release_target_execution_step_history(
+            target_id=target_id,
+            limit=limit,
+        )
+
     _register_tool(
         mcp_server,
         name="list_blueprints",
         description="List available blueprints for release-target binding.",
-        fn=lambda: adapter.list_blueprints(),
+        fn=list_blueprints,
     )
     _register_tool(
         mcp_server,
         name="get_blueprint",
         description="Get one blueprint by id.",
-        fn=lambda blueprint_id: adapter.get_blueprint(blueprint_id=blueprint_id),
+        fn=get_blueprint,
     )
     _register_tool(
         mcp_server,
         name="create_blueprint",
         description="Create or update a blueprint using existing blueprint API payload fields.",
-        fn=lambda payload=None: adapter.create_blueprint(payload=payload),
+        fn=create_blueprint,
     )
     _register_tool(
         mcp_server,
         name="list_release_targets",
         description="List discoverable release targets with provider and configuration summaries.",
-        fn=lambda: adapter.list_release_targets(),
+        fn=list_release_targets,
     )
     _register_tool(
         mcp_server,
         name="get_release_target",
         description="Get one release target by id.",
-        fn=lambda target_id: adapter.get_release_target(target_id=target_id),
+        fn=get_release_target,
     )
     _register_tool(
         mcp_server,
         name="create_release_target",
         description="Create a release target using the existing release-target API payload contract.",
-        fn=lambda payload=None: adapter.create_release_target(payload=payload),
+        fn=create_release_target,
     )
     _register_tool(
         mcp_server,
         name="list_artifacts",
         description="List discoverable artifacts using existing artifact registry models.",
-        fn=lambda limit=100, offset=0: adapter.list_artifacts(limit=limit, offset=offset),
+        fn=list_artifacts,
     )
     _register_tool(
         mcp_server,
         name="get_artifact",
         description="Get one artifact by id.",
-        fn=lambda artifact_id: adapter.get_artifact(artifact_id=artifact_id),
+        fn=get_artifact,
     )
     _register_tool(
         mcp_server,
         name="list_deployment_providers",
         description="List deployment provider/module capabilities available to release-target workflows.",
-        fn=lambda: adapter.list_deployment_providers(),
+        fn=list_deployment_providers,
     )
     _register_tool(
         mcp_server,
         name="get_provider_capabilities",
         description="Get deployment provider/module capability details by provider key.",
-        fn=lambda provider_key: adapter.get_provider_capabilities(provider_key=provider_key),
+        fn=get_provider_capabilities,
     )
 
     _register_tool(
         mcp_server,
         name="inspect_change_session_control",
         description="Inspect canonical control status for a solution change session.",
-        fn=lambda application_id, session_id: adapter.inspect_change_session_control(
-            application_id=application_id,
-            session_id=session_id,
-        ),
+        fn=inspect_change_session_control,
     )
     _register_tool(
         mcp_server,
         name="run_change_session_control_action",
         description="Execute a canonical control action for a change session.",
-        fn=lambda application_id, session_id, operation, action_payload=None: adapter.run_change_session_control_action(
-            application_id=application_id,
-            session_id=session_id,
-            operation=operation,
-            action_payload=action_payload,
-        ),
+        fn=run_change_session_control_action,
     )
     _register_tool(
         mcp_server,
         name="get_change_session_promotion_evidence",
         description="Fetch durable promotion/rollback evidence for a change session.",
-        fn=lambda application_id, session_id: adapter.get_change_session_promotion_evidence(
-            application_id=application_id,
-            session_id=session_id,
-        ),
+        fn=get_change_session_promotion_evidence,
     )
     _register_tool(
         mcp_server,
         name="get_release_target_deployment_plan",
         description="Fetch non-destructive seam-driven deployment plan for a release target.",
-        fn=lambda target_id: adapter.get_release_target_deployment_plan(target_id=target_id),
+        fn=get_release_target_deployment_plan,
     )
     _register_tool(
         mcp_server,
         name="create_release_target_deployment_preparation_evidence",
         description="Create deployment-preparation evidence for a release target.",
-        fn=lambda target_id, payload=None: adapter.create_release_target_deployment_preparation_evidence(
-            target_id=target_id,
-            payload=payload,
-        ),
+        fn=create_release_target_deployment_preparation_evidence,
     )
     _register_tool(
         mcp_server,
         name="get_release_target_deployment_preparation_evidence",
         description="Read deployment-preparation evidence history for a release target.",
-        fn=lambda target_id, limit=10: adapter.get_release_target_deployment_preparation_evidence(
-            target_id=target_id,
-            limit=limit,
-        ),
+        fn=get_release_target_deployment_preparation_evidence,
     )
     _register_tool(
         mcp_server,
         name="create_release_target_execution_preparation_handoff",
         description="Create execution-preparation handoff from deployment-preparation evidence.",
-        fn=lambda target_id, payload=None: adapter.create_release_target_execution_preparation_handoff(
-            target_id=target_id,
-            payload=payload,
-        ),
+        fn=create_release_target_execution_preparation_handoff,
     )
     _register_tool(
         mcp_server,
         name="get_release_target_execution_preparation_handoff",
         description="Read execution-preparation handoff history for a release target.",
-        fn=lambda target_id, limit=10: adapter.get_release_target_execution_preparation_handoff(
-            target_id=target_id,
-            limit=limit,
-        ),
+        fn=get_release_target_execution_preparation_handoff,
     )
     _register_tool(
         mcp_server,
         name="approve_release_target_execution_preparation",
         description="Approve execution-preparation handoff for a release target.",
-        fn=lambda target_id, payload=None: adapter.approve_release_target_execution_preparation(
-            target_id=target_id,
-            payload=payload,
-        ),
+        fn=approve_release_target_execution_preparation,
     )
     _register_tool(
         mcp_server,
         name="consume_release_target_execution_preparation",
         description="Consume execution-preparation handoff into prepared execution evidence.",
-        fn=lambda target_id, payload=None: adapter.consume_release_target_execution_preparation(
-            target_id=target_id,
-            payload=payload,
-        ),
+        fn=consume_release_target_execution_preparation,
     )
     _register_tool(
         mcp_server,
         name="run_release_target_execution_step",
         description="Run one explicitly approved bounded execution step for a release target.",
-        fn=lambda target_id, payload=None: adapter.run_release_target_execution_step(
-            target_id=target_id,
-            payload=payload,
-        ),
+        fn=run_release_target_execution_step,
     )
     _register_tool(
         mcp_server,
         name="approve_release_target_execution_step",
         description="Approve one prepared execution step for a release target.",
-        fn=lambda target_id, payload=None: adapter.approve_release_target_execution_step(
-            target_id=target_id,
-            payload=payload,
-        ),
+        fn=approve_release_target_execution_step,
     )
     _register_tool(
         mcp_server,
         name="get_release_target_execution_step_history",
         description="Read execution-step evidence history for a release target.",
-        fn=lambda target_id, limit=10: adapter.get_release_target_execution_step_history(
-            target_id=target_id,
-            limit=limit,
-        ),
+        fn=get_release_target_execution_step_history,
     )
 
 
