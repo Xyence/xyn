@@ -187,9 +187,13 @@ class XynMcpAdapterTests(TestCase):
 
     @mock.patch("core.mcp.xyn_mcp_server.httpx.request")
     def test_mcp_route_oidc_mode_rejects_invalid_token(self, mock_request: mock.Mock) -> None:
-        mock_response = mock.Mock()
-        mock_response.status_code = 401
-        mock_request.return_value = mock_response
+        discovery_response = mock.Mock()
+        discovery_response.status_code = 200
+        discovery_response.json.return_value = {"userinfo_endpoint": "https://issuer.example.com/userinfo"}
+        userinfo_response = mock.Mock()
+        userinfo_response.status_code = 401
+        userinfo_response.json.return_value = {}
+        mock_request.side_effect = [discovery_response, userinfo_response]
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
                 api_base_url="http://localhost",
@@ -214,6 +218,34 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(response.status_code, 401)
         payload = response.json()
         self.assertEqual(payload.get("error"), "unauthorized")
+        self.assertIn("WWW-Authenticate", response.headers)
+
+    def test_oidc_well_known_oauth_protected_resource_route_is_available(self) -> None:
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                api_base_url="http://localhost",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "XYN_MCP_AUTH_MODE": "oidc",
+                "OIDC_ISSUER": "https://issuer.example.com",
+                "OIDC_CLIENT_ID": "client-id",
+            },
+            clear=False,
+        ):
+            app = create_xyn_mcp_http_app(adapter)
+            with TestClient(app) as client:
+                response = client.get("/.well-known/oauth-protected-resource", headers={"Host": "mcp.example.com"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload.get("resource"), "http://mcp.example.com/mcp")
+        self.assertEqual(payload.get("authorization_servers"), ["https://issuer.example.com"])
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_list_discovery_endpoints_return_empty_lists_without_errors(self, mock_request: mock.Mock) -> None:
