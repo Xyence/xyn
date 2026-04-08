@@ -84,6 +84,23 @@ run_query_scalar() {
   esac
 }
 
+record_migration_if_signature_present() {
+  local migration_id="$1"
+  local signature_sql="$2"
+  local signature_present
+  local already_applied
+  signature_present="$(run_query_scalar "SELECT CASE WHEN (${signature_sql}) THEN 1 ELSE 0 END;" | tr -d '[:space:]' || echo "0")"
+  if [[ "${signature_present}" != "1" ]]; then
+    return 0
+  fi
+  already_applied="$(run_query_scalar "SELECT COUNT(*) FROM schema_migrations WHERE id='${migration_id}';" | tr -d '[:space:]' || echo "0")"
+  if [[ "${already_applied}" != "0" ]]; then
+    return 0
+  fi
+  run_query_scalar "INSERT INTO schema_migrations (id, applied_at) VALUES ('${migration_id}', NOW()) ON CONFLICT (id) DO NOTHING;" >/dev/null
+  echo "Backfilled migration ledger entry: ${migration_id}"
+}
+
 execute_sql_file() {
   local file="$1"
   case "${MODE}" in
@@ -114,6 +131,75 @@ if ! run_query_scalar "SELECT 1 FROM information_schema.tables WHERE table_name=
   echo "schema_migrations table not found. Applying 000_migrations_ledger.sql first..."
   execute_sql_file "scripts/migrations/000_migrations_ledger.sql"
 fi
+
+echo "Checking for legacy schema footprint to backfill migration ledger..."
+record_migration_if_signature_present "001_initial_schema" "
+  EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='blueprints')
+  AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='runs')
+  AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='drafts')
+"
+record_migration_if_signature_present "002_add_scheduling_and_priority" "
+  EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='runs' AND column_name='run_at')
+  AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='runs' AND column_name='priority')
+  AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='runs' AND column_name='attempt')
+  AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='runs' AND column_name='max_attempts')
+"
+record_migration_if_signature_present "003_add_run_edges_for_dag" "
+  EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='run_edges')
+  AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='runs' AND column_name='parent_run_id')
+"
+record_migration_if_signature_present "004_add_queue_claim_indexes" "
+  EXISTS (SELECT 1 FROM pg_indexes WHERE indexname='ix_runs_queue_claim')
+  AND EXISTS (SELECT 1 FROM pg_indexes WHERE indexname='ix_runs_queued_due')
+  AND EXISTS (SELECT 1 FROM pg_indexes WHERE indexname='ix_runs_running_expired')
+"
+record_migration_if_signature_present "005_steps_run_idx_constraints" "
+  EXISTS (SELECT 1 FROM pg_indexes WHERE indexname='uq_steps_run_idx')
+"
+record_migration_if_signature_present "006_normalize_core_timestamps_timestamptz" "
+  EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name='runs' AND column_name='created_at' AND data_type='timestamp with time zone'
+  )
+"
+record_migration_if_signature_present "007_artifact_registry" "
+  EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='workspace_settings')
+  AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='secrets')
+"
+record_migration_if_signature_present "008_workspace_drafts_jobs_phase1" "
+  EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='workspaces')
+  AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='jobs')
+  AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='drafts' AND column_name='workspace_id')
+  AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='drafts' AND column_name='type')
+  AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='drafts' AND column_name='title')
+  AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='drafts' AND column_name='content_json')
+  AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='drafts' AND column_name='created_by')
+"
+record_migration_if_signature_present "009_locations_primitive" "
+  EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='locations')
+"
+record_migration_if_signature_present "010_palette_commands_registry" "
+  EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='palette_commands')
+"
+record_migration_if_signature_present "011_artifact_scopes_and_context_packs" "
+  EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='artifacts' AND column_name='workspace_id')
+  AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='artifacts' AND column_name='storage_scope')
+  AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='artifacts' AND column_name='sync_state')
+  AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='workspace_settings' AND column_name='default_context_pack_artifact_ids_json')
+"
+record_migration_if_signature_present "012_runtime_execution_layer" "
+  EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='runtime_workers')
+  AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='runs' AND column_name='heartbeat_at')
+"
+record_migration_if_signature_present "013_lifecycle_transitions" "
+  EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='lifecycle_transitions')
+"
+record_migration_if_signature_present "014_environments_siblings_activations" "
+  EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='environments')
+  AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='siblings')
+  AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='activations')
+"
 
 # Iterate migrations in sorted order (critical for numeric sorting)
 mapfile -t MIGRATIONS < <(ls -1 scripts/migrations/*.sql | sort)

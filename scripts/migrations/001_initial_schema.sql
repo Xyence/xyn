@@ -245,7 +245,22 @@ CREATE INDEX IF NOT EXISTS ix_artifacts_step_id ON artifacts(step_id);
 CREATE INDEX IF NOT EXISTS ix_artifacts_created_at ON artifacts(created_at);
 
 -- Drafts indexes
-CREATE INDEX IF NOT EXISTS ix_drafts_name ON drafts(name);
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'drafts' AND column_name = 'name'
+  ) THEN
+    EXECUTE 'CREATE INDEX IF NOT EXISTS ix_drafts_name ON drafts(name)';
+  ELSIF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'drafts' AND column_name = 'title'
+  ) THEN
+    EXECUTE 'CREATE INDEX IF NOT EXISTS ix_drafts_title ON drafts(title)';
+  END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS ix_drafts_status ON drafts(status);
 
 -- Nodes indexes
