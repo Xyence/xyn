@@ -563,10 +563,11 @@ networks:
 """
 
 
-def _run(cmd: list[str], cwd: Optional[Path] = None) -> tuple[int, str, str]:
+def _run(cmd: list[str], cwd: Optional[Path] = None, env: Optional[Dict[str, str]] = None) -> tuple[int, str, str]:
     proc = subprocess.run(
         cmd,
         cwd=str(cwd) if cwd else None,
+        env=env,
         text=True,
         capture_output=True,
         check=False,
@@ -756,6 +757,7 @@ class ProvisionLocalRequest(BaseModel):
     auth_mode: Optional[str] = None
     prefer_local_images: bool = False
     prefer_local_sources: bool = False
+    database_url: Optional[str] = None
 
 
 def _compose_down_cmd(*, project: str, compose_path: Path, reset_state: bool = False) -> list[str]:
@@ -1065,12 +1067,16 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
         auth_mode=auth_mode,
     )
     compose_path.write_text(compose_yaml, encoding="utf-8")
+    compose_env = None
+    if str(request.database_url or "").strip():
+        compose_env = dict(os.environ)
+        compose_env["DATABASE_URL"] = str(request.database_url or "").strip()
     if request.force or request.reset_state:
-        _run(down_cmd, cwd=deploy_dir)
+        _run(down_cmd, cwd=deploy_dir, env=compose_env)
     pull_stdout = ""
     pull_stderr = ""
     if pull_cmd:
-        pull_code, pull_stdout, pull_stderr = _run(pull_cmd, cwd=deploy_dir)
+        pull_code, pull_stdout, pull_stderr = _run(pull_cmd, cwd=deploy_dir, env=compose_env)
         if pull_code != 0:
             raise HTTPException(
                 status_code=500,
@@ -1082,7 +1088,7 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
                 },
             )
         up_cmd.append("--force-recreate")
-    code, stdout, stderr = _run(up_cmd, cwd=deploy_dir)
+    code, stdout, stderr = _run(up_cmd, cwd=deploy_dir, env=compose_env)
     status = "succeeded" if code == 0 else "failed"
 
     ui_url = f"{scheme}://{ui_host}"

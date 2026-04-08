@@ -1,8 +1,8 @@
 """SQLAlchemy database models for Xyn Seed v0.0"""
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, DateTime, JSON, ForeignKey, Text, Enum, BigInteger, Index, UniqueConstraint, CheckConstraint
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, String, Integer, DateTime, JSON, ForeignKey, Text, Enum, BigInteger, Index, UniqueConstraint, CheckConstraint, Boolean
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 import enum
 
@@ -105,6 +105,110 @@ class Workspace(Base):
     jobs = relationship("Job", back_populates="workspace")
     locations = relationship("Location", back_populates="workspace")
     palette_commands = relationship("PaletteCommand", back_populates="workspace")
+    environments = relationship("Environment", back_populates="workspace")
+    siblings = relationship("Sibling", back_populates="workspace")
+    activations = relationship("Activation", back_populates="workspace")
+
+
+class Environment(Base):
+    """Workspace-scoped environment control record."""
+    __tablename__ = "environments"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "slug", name="uq_environments_workspace_slug"),
+        Index("ix_environments_workspace_kind", "workspace_id", "kind"),
+        Index("ix_environments_status", "status"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id = Column(UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False)
+    slug = Column(String(128), nullable=False)
+    title = Column(String(255), nullable=False)
+    kind = Column(String(32), nullable=False)
+    status = Column(String(32), nullable=False, default="active")
+    is_ephemeral = Column(Boolean, nullable=False, default=False)
+    ttl_expires_at = Column(DateTime(timezone=True), nullable=True)
+    metadata_json = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    workspace = relationship("Workspace", back_populates="environments")
+    siblings = relationship("Sibling", back_populates="environment")
+    activations = relationship("Activation", back_populates="environment")
+
+
+class Sibling(Base):
+    """Execution-plane sibling instance state."""
+    __tablename__ = "siblings"
+    __table_args__ = (
+        Index("ix_siblings_environment_status", "environment_id", "status"),
+        Index("ix_siblings_workspace_instance", "workspace_id", "workspace_app_instance_id"),
+        Index("ix_siblings_artifact_revision", "installed_artifact_slug", "installed_artifact_revision_id"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    environment_id = Column(UUID(as_uuid=True), ForeignKey("environments.id", ondelete="CASCADE"), nullable=False)
+    workspace_id = Column(UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(255), nullable=False)
+    status = Column(String(32), nullable=False, default="provisioning")
+    compose_project = Column(String(255), nullable=True)
+    deployment_id = Column(String(255), nullable=True)
+    ui_url = Column(Text, nullable=True)
+    api_url = Column(Text, nullable=True)
+    runtime_base_url = Column(Text, nullable=True)
+    runtime_public_url = Column(Text, nullable=True)
+    runtime_target_json = Column(JSONB, nullable=False, default=dict)
+    runtime_registration_json = Column(JSONB, nullable=False, default=dict)
+    installed_artifact_slug = Column(String(255), nullable=True)
+    installed_artifact_version = Column(String(64), nullable=True)
+    installed_artifact_revision_id = Column(String(255), nullable=True)
+    workspace_app_instance_id = Column(String(255), nullable=True)
+    source_job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True)
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    metadata_json = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    environment = relationship("Environment", back_populates="siblings")
+    workspace = relationship("Workspace", back_populates="siblings")
+    source_job = relationship("Job", foreign_keys=[source_job_id])
+    activations = relationship("Activation", back_populates="sibling")
+
+
+class Activation(Base):
+    """Artifact activation state tracked through the existing job chain."""
+    __tablename__ = "activations"
+    __table_args__ = (
+        UniqueConstraint("environment_id", "idempotency_key", name="uq_activations_environment_idempotency"),
+        Index("ix_activations_environment_status", "environment_id", "status"),
+        Index("ix_activations_artifact_revision", "artifact_slug", "artifact_revision_id"),
+        Index("ix_activations_workspace_instance", "workspace_id", "workspace_app_instance_id"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    environment_id = Column(UUID(as_uuid=True), ForeignKey("environments.id", ondelete="CASCADE"), nullable=False)
+    sibling_id = Column(UUID(as_uuid=True), ForeignKey("siblings.id", ondelete="SET NULL"), nullable=True)
+    workspace_id = Column(UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False)
+    artifact_slug = Column(String(255), nullable=False)
+    artifact_revision_id = Column(String(255), nullable=True)
+    artifact_version = Column(String(64), nullable=True)
+    workspace_app_instance_id = Column(String(255), nullable=True)
+    status = Column(String(32), nullable=False, default="pending")
+    source_job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True)
+    idempotency_key = Column(String(255), nullable=True)
+    capability_entry_json = Column(JSONB, nullable=False, default=dict)
+    error_text = Column(Text, nullable=True)
+    requested_by = Column(String(255), nullable=False, default="system")
+    requested_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    activated_at = Column(DateTime(timezone=True), nullable=True)
+    failed_at = Column(DateTime(timezone=True), nullable=True)
+    metadata_json = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    environment = relationship("Environment", back_populates="activations")
+    sibling = relationship("Sibling", back_populates="activations")
+    workspace = relationship("Workspace", back_populates="activations")
+    source_job = relationship("Job", foreign_keys=[source_job_id])
 
 
 class Draft(Base):

@@ -30,6 +30,8 @@ def handle_smoke_test(
     finalize_stage_note_fn: Callable[..., Any],
     update_execution_note_fn: Callable[..., Any],
     build_stage_output_fn: Callable[..., Any],
+    upsert_sibling_from_provision_output_fn: Callable[..., Any],
+    create_or_update_activation_fn: Callable[..., Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     payload = parse_stage_input_fn(job.input_json).to_dict()
     execution_note_artifact_id = str(payload.get("execution_note_artifact_id") or "").strip()
@@ -38,6 +40,9 @@ def handle_smoke_test(
     app_spec = payload.get("app_spec") if isinstance(payload.get("app_spec"), dict) else {}
     policy_bundle = payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {}
     generated_artifact = payload.get("generated_artifact") if isinstance(payload.get("generated_artifact"), dict) else {}
+    environment_id = str(payload.get("environment_id") or "").strip()
+    sibling_id = str(payload.get("sibling_id") or "").strip()
+    activation_id = str(payload.get("activation_id") or "").strip()
     app_container_name = str(deployment.get("app_container_name") or "").strip()
     if not app_container_name:
         raise RuntimeError("smoke_test missing deployment.app_container_name")
@@ -339,6 +344,49 @@ def handle_smoke_test(
             status="completed",
             update_note=update_execution_note_fn,
         )
+    sibling_state = None
+    if environment_id:
+        try:
+            sibling_state = upsert_sibling_from_provision_output_fn(
+                db,
+                environment_id=uuid.UUID(environment_id),
+                workspace_id=job.workspace_id,
+                sibling_name=str(sibling.get("compose_project") or "sibling"),
+                provision_output=sibling,
+                status="active",
+                source_job_id=job.id,
+                metadata={"smoke_status": "passed"},
+            )
+        except Exception:
+            sibling_state = None
+    if activation_id and environment_id:
+        try:
+            create_or_update_activation_fn(
+                db,
+                environment_id=uuid.UUID(environment_id),
+                workspace_id=job.workspace_id,
+                activation_id=uuid.UUID(activation_id),
+                sibling_id=(sibling_state.id if sibling_state else (uuid.UUID(sibling_id) if sibling_id else None)),
+                artifact_slug=str(generated_artifact.get("artifact_slug") or (sibling.get("installed_artifact") or {}).get("artifact_slug") or "unknown"),
+                artifact_revision_id=str(
+                    generated_artifact.get("revision_id")
+                    or generated_artifact.get("artifact_revision_id")
+                    or (sibling.get("installed_artifact") or {}).get("artifact_revision_id")
+                    or ""
+                ).strip(),
+                artifact_version=str(generated_artifact.get("artifact_version") or "").strip(),
+                workspace_app_instance_id=str(
+                    ((sibling.get("runtime_registration") or {}).get("instance") or {}).get("id")
+                    or (sibling.get("installed_artifact") or {}).get("workspace_app_instance_id")
+                    or ""
+                ).strip(),
+                status="smoke_passed",
+                source_job_id=job.id,
+                capability_entry=sibling.get("capability_entry") if isinstance(sibling.get("capability_entry"), dict) else {},
+                metadata={"smoke_status": "passed"},
+            )
+        except Exception:
+            pass
 
     stage_output = build_stage_output_fn(
         output_json={

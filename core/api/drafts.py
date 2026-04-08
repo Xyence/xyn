@@ -19,6 +19,7 @@ from core.access_control import (
 )
 from core.lifecycle.service import LifecycleError, apply_transition, transition_model_status
 from core.models import Draft, DraftStatus, Job, JobStatus
+from core.environment_state import ensure_default_environment
 from core.workspaces import ensure_default_workspace, resolve_workspace_by_context, workspace_context
 
 router = APIRouter()
@@ -245,6 +246,12 @@ async def submit_draft(
     row = db.query(Draft).filter(Draft.id == draft_id, Draft.workspace_id == workspace.id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Draft not found")
+    # Phase 0 write-through state only. Never block the existing submit flow if
+    # state tables are unavailable during rollout.
+    try:
+        ensure_default_environment(db, workspace_id=workspace.id, workspace_slug=workspace.slug)
+    except Exception:
+        pass
     try:
         transition_model_status(
             db,
