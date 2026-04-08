@@ -76,6 +76,28 @@ class XynApiAdapter:
             "response": body if isinstance(body, (dict, list)) else {"value": body},
         }
 
+    def _request_with_fallback_paths(
+        self,
+        *,
+        method: str,
+        paths: list[str],
+        json_payload: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        last_result: Dict[str, Any] = {"ok": False, "status_code": 404, "response": {"error": "not_found"}}
+        for path in paths:
+            result = self._request(method=method, path=path, json_payload=json_payload, params=params)
+            last_result = result
+            if bool(result.get("ok")):
+                return result
+            code = int(result.get("status_code") or 0)
+            # If request is structurally invalid on one endpoint flavor,
+            # continue to alternate path flavor for compatibility.
+            if code in {400, 404, 405}:
+                continue
+            return result
+        return last_result
+
     @staticmethod
     def _with_release_target_not_found_hint(result: Dict[str, Any], *, target_id: str) -> Dict[str, Any]:
         if int(result.get("status_code") or 0) != 404:
@@ -136,17 +158,25 @@ class XynApiAdapter:
     @staticmethod
     def _artifact_discovery_row(payload: Dict[str, Any]) -> Dict[str, Any]:
         artifact_type = payload.get("artifact_type") if isinstance(payload.get("artifact_type"), dict) else {}
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        inferred_slug = str(
+            payload.get("slug")
+            or metadata.get("generated_artifact_slug")
+            or payload.get("name")
+            or payload.get("label")
+            or ""
+        )
         return {
             "id": str(payload.get("id") or ""),
-            "slug": str(payload.get("slug") or ""),
-            "title": str(payload.get("title") or ""),
+            "slug": inferred_slug,
+            "title": str(payload.get("title") or payload.get("name") or payload.get("label") or ""),
             "artifact_type": str(
                 artifact_type.get("slug")
                 or payload.get("kind")
                 or payload.get("type")
                 or ""
             ),
-            "status": str(payload.get("artifact_state") or payload.get("status") or ""),
+            "status": str(payload.get("artifact_state") or payload.get("status") or payload.get("sync_state") or ""),
             "artifact_reference": {
                 "source_ref_type": str(payload.get("source_ref_type") or ""),
                 "source_ref_id": str(payload.get("source_ref_id") or ""),
@@ -286,27 +316,199 @@ class XynApiAdapter:
         result["response"] = {"release_target": self._release_target_discovery_row(body)}
         return result
 
-    def list_artifacts(self, *, limit: int = 100, offset: int = 0) -> Dict[str, Any]:
-        result = self._request(
-            method="GET",
-            path="/xyn/api/artifacts",
-            params={"limit": int(limit), "offset": int(offset)},
-        )
+    def list_artifacts(self, *, limit: Optional[int] = None, offset: Optional[int] = None) -> Dict[str, Any]:
+        resolved_limit = 100 if limit is None else int(limit)
+        resolved_offset = 0 if offset is None else int(offset)
+        if resolved_limit < 1 or resolved_limit > 500:
+            return {
+                "ok": False,
+                "status_code": 400,
+                "method": "GET",
+                "path": "/xyn/api/artifacts",
+                "response": {"error": "invalid_pagination", "detail": "limit must be between 1 and 500"},
+            }
+        if resolved_offset < 0:
+            return {
+                "ok": False,
+                "status_code": 400,
+                "method": "GET",
+                "path": "/xyn/api/artifacts",
+                "response": {"error": "invalid_pagination", "detail": "offset must be >= 0"},
+            }
+
+        # Compatibility strategy:
+        # - Prefer /xyn/api/artifacts for deployed MCP integrations.
+        # - Some handlers reject offset-style params; retry same path without offset.
+        # - Fall back to /api/v1/artifacts variants.
+        explicit_params = {"limit": resolved_limit, "offset": resolved_offset}
+        no_offset_params = {"limit": resolved_limit}
+        params_variants = [explicit_params]
+        if resolved_offset == 0:
+            params_variants.append(no_offset_params)
+
+        last_result: Dict[str, Any] = {"ok": False, "status_code": 404, "response": {"error": "not_found"}}
+        for path in ["/xyn/api/artifacts", "/api/v1/artifacts"]:
+            for params in params_variants:
+                result = self._request(method="GET", path=path, params=params)
+                last_result = result
+                if bool(result.get("ok")):
+                    body = result.get("response") if isinstance(result.get("response"), dict) else {}
+                    rows = (
+                        body.get("artifacts")
+                        if isinstance(body.get("artifacts"), list)
+                        else (body.get("items") if isinstance(body.get("items"), list) else [])
+                    )
+                    normalized = [self._artifact_discovery_row(row) for row in rows if isinstance(row, dict)]
+                    result["response"] = {
+                        "artifacts": normalized,
+                        "count": len(normalized),
+                        "next_cursor": body.get("next_cursor"),
+                    }
+                    return result
+                code = int(result.get("status_code") or 0)
+                if code in {400, 404, 405}:
+                    continue
+                return result
+        result = last_result
         if not result.get("ok"):
             return result
-        body = result.get("response") if isinstance(result.get("response"), dict) else {}
-        rows = body.get("artifacts") if isinstance(body.get("artifacts"), list) else []
-        normalized = [self._artifact_discovery_row(row) for row in rows if isinstance(row, dict)]
-        result["response"] = {"artifacts": normalized, "count": len(normalized)}
         return result
 
     def get_artifact(self, *, artifact_id: str) -> Dict[str, Any]:
-        result = self._request(method="GET", path=f"/xyn/api/artifacts/{artifact_id}")
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=[f"/xyn/api/artifacts/{artifact_id}", f"/api/v1/artifacts/{artifact_id}"],
+        )
         if not result.get("ok"):
             return result
         body = result.get("response") if isinstance(result.get("response"), dict) else {}
         result["response"] = {"artifact": self._artifact_discovery_row(body)}
         return result
+
+    def get_artifact_source_tree(
+        self,
+        *,
+        artifact_id: str = "",
+        artifact_slug: str = "",
+        include_line_counts: bool = True,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"include_line_counts": bool(include_line_counts)}
+        if str(artifact_id or "").strip():
+            params["artifact_id"] = str(artifact_id).strip()
+        if str(artifact_slug or "").strip():
+            params["artifact_slug"] = str(artifact_slug).strip()
+        return self._request(
+            method="GET",
+            path="/api/v1/artifacts/source-tree",
+            params=params,
+        )
+
+    def read_artifact_source_file(
+        self,
+        *,
+        path: str,
+        artifact_id: str = "",
+        artifact_slug: str = "",
+        start_line: Optional[int] = None,
+        end_line: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "path": str(path or ""),
+        }
+        if str(artifact_id or "").strip():
+            params["artifact_id"] = str(artifact_id).strip()
+        if str(artifact_slug or "").strip():
+            params["artifact_slug"] = str(artifact_slug).strip()
+        if start_line is not None:
+            params["start_line"] = int(start_line)
+        if end_line is not None:
+            params["end_line"] = int(end_line)
+        return self._request(method="GET", path="/api/v1/artifacts/source-file", params=params)
+
+    def search_artifact_source(
+        self,
+        *,
+        query: str,
+        artifact_id: str = "",
+        artifact_slug: str = "",
+        path_glob: str = "",
+        file_extensions: str = "",
+        regex: bool = False,
+        case_sensitive: bool = False,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "query": str(query or ""),
+            "regex": bool(regex),
+            "case_sensitive": bool(case_sensitive),
+            "limit": int(limit),
+        }
+        if str(artifact_id or "").strip():
+            params["artifact_id"] = str(artifact_id).strip()
+        if str(artifact_slug or "").strip():
+            params["artifact_slug"] = str(artifact_slug).strip()
+        if str(path_glob or "").strip():
+            params["path_glob"] = str(path_glob).strip()
+        if str(file_extensions or "").strip():
+            params["file_extensions"] = str(file_extensions).strip()
+        return self._request(
+            method="GET",
+            path="/api/v1/artifacts/source-search",
+            params=params,
+        )
+
+    def analyze_artifact_codebase(
+        self,
+        *,
+        artifact_id: str = "",
+        artifact_slug: str = "",
+        mode: str = "general",
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"mode": str(mode or "general").strip().lower() or "general"}
+        if str(artifact_id or "").strip():
+            params["artifact_id"] = str(artifact_id).strip()
+        if str(artifact_slug or "").strip():
+            params["artifact_slug"] = str(artifact_slug).strip()
+        return self._request(
+            method="GET",
+            path="/api/v1/artifacts/analyze-codebase",
+            params=params,
+        )
+
+    def analyze_python_api_artifact(
+        self,
+        *,
+        artifact_id: str = "",
+        artifact_slug: str = "",
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+        if str(artifact_id or "").strip():
+            params["artifact_id"] = str(artifact_id).strip()
+        if str(artifact_slug or "").strip():
+            params["artifact_slug"] = str(artifact_slug).strip()
+        return self._request(
+            method="GET",
+            path="/api/v1/artifacts/analyze-python-api",
+            params=params,
+        )
+
+    def get_artifact_module_metrics(
+        self,
+        *,
+        artifact_id: str = "",
+        artifact_slug: str = "",
+        top_n: int = 200,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"top_n": int(top_n)}
+        if str(artifact_id or "").strip():
+            params["artifact_id"] = str(artifact_id).strip()
+        if str(artifact_slug or "").strip():
+            params["artifact_slug"] = str(artifact_slug).strip()
+        return self._request(
+            method="GET",
+            path="/api/v1/artifacts/module-metrics",
+            params=params,
+        )
 
     def list_deployment_providers(self) -> Dict[str, Any]:
         return self._request(method="GET", path="/xyn/api/deployment-providers")
