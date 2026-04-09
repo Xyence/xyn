@@ -1,10 +1,26 @@
 from __future__ import annotations
 
 import os
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 import httpx
+
+_REQUEST_BEARER_TOKEN: ContextVar[str] = ContextVar("xyn_mcp_request_bearer_token", default="")
+
+
+def set_request_bearer_token(token: str) -> Token:
+    return _REQUEST_BEARER_TOKEN.set(str(token or "").strip())
+
+
+def reset_request_bearer_token(token: Token) -> None:
+    _REQUEST_BEARER_TOKEN.reset(token)
+
+
+def get_request_bearer_token() -> str:
+    return _REQUEST_BEARER_TOKEN.get()
 
 
 @dataclass(frozen=True)
@@ -14,15 +30,26 @@ class XynApiAdapterConfig:
     internal_token: str
     cookie: str
     timeout_seconds: float
+    upstream_host_header: str = ""
+    upstream_forwarded_proto: str = ""
 
     @classmethod
     def from_env(cls) -> "XynApiAdapterConfig":
+        public_base_url = str(os.getenv("XYN_PUBLIC_BASE_URL", "")).strip()
+        parsed_public = urlparse(public_base_url) if public_base_url else None
+        derived_host = str(parsed_public.netloc or "").strip() if parsed_public else ""
+        if ":" in derived_host:
+            derived_host = derived_host.split(":", 1)[0].strip()
+        derived_proto = str(parsed_public.scheme or "").strip() if parsed_public else ""
         return cls(
             api_base_url=str(os.getenv("XYN_MCP_XYN_API_BASE_URL", "http://localhost:8001")).strip(),
-            bearer_token=str(os.getenv("XYN_MCP_AUTH_BEARER_TOKEN", "")).strip(),
+            bearer_token=str(os.getenv("XYN_MCP_XYN_API_BEARER_TOKEN", "")).strip()
+            or str(os.getenv("XYN_MCP_AUTH_BEARER_TOKEN", "")).strip(),
             internal_token=str(os.getenv("XYN_MCP_INTERNAL_TOKEN", "")).strip(),
             cookie=str(os.getenv("XYN_MCP_COOKIE", "")).strip(),
             timeout_seconds=float(os.getenv("XYN_MCP_TIMEOUT_SECONDS", "30").strip() or "30"),
+            upstream_host_header=str(os.getenv("XYN_MCP_UPSTREAM_HOST_HEADER", "")).strip() or derived_host,
+            upstream_forwarded_proto=str(os.getenv("XYN_MCP_UPSTREAM_FORWARDED_PROTO", "")).strip() or derived_proto,
         )
 
 
@@ -38,12 +65,18 @@ class XynApiAdapter:
 
     def _headers(self) -> Dict[str, str]:
         headers: Dict[str, str] = {"Accept": "application/json"}
-        if self._config.bearer_token:
-            headers["Authorization"] = f"Bearer {self._config.bearer_token}"
+        bearer = self._config.bearer_token or get_request_bearer_token()
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
         if self._config.internal_token:
             headers["X-Internal-Token"] = self._config.internal_token
         if self._config.cookie:
             headers["Cookie"] = self._config.cookie
+        if self._config.upstream_host_header:
+            headers["Host"] = self._config.upstream_host_header
+            headers["X-Forwarded-Host"] = self._config.upstream_host_header
+        if self._config.upstream_forwarded_proto:
+            headers["X-Forwarded-Proto"] = self._config.upstream_forwarded_proto
         return headers
 
     def _request(
