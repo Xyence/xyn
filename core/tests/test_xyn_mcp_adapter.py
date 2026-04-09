@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any, Dict
 from unittest import TestCase, mock
 
+import httpx
+
 from core.mcp.xyn_api_adapter import (
     XynApiAdapter,
     XynApiAdapterConfig,
@@ -38,7 +40,7 @@ class XynMcpAdapterTests(TestCase):
         mock_request.return_value = response
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
-                api_base_url="http://xyn.local:8001",
+                control_api_base_url="http://xyn.local:8001",
                 bearer_token="",
                 internal_token="",
                 cookie="",
@@ -63,7 +65,7 @@ class XynMcpAdapterTests(TestCase):
         mock_request.return_value = response
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
-                api_base_url="http://xyn.local:8001",
+                control_api_base_url="http://xyn.local:8001",
                 bearer_token="",
                 internal_token="",
                 cookie="",
@@ -78,6 +80,88 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(kwargs["params"]["artifact_slug"], "app.demo")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_get_artifact_source_tree_prefers_code_api_base_url(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"artifact": {"id": "a1", "slug": "app.demo"}, "files": []}
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn-local-api:8000",
+                code_api_base_url="http://xyn-core:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.get_artifact_source_tree(artifact_slug="app.demo")
+        self.assertTrue(result["ok"])
+        kwargs = mock_request.call_args.kwargs
+        self.assertEqual(kwargs["url"], "http://xyn-core:8000/api/v1/artifacts/source-tree")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_get_artifact_source_tree_falls_back_from_code_api_base_url(self, mock_request: mock.Mock) -> None:
+        first = mock.Mock()
+        first.status_code = 404
+        first.json.return_value = {"detail": "Not Found"}
+        second = mock.Mock()
+        second.status_code = 404
+        second.json.return_value = {"detail": "Not Found"}
+        third = mock.Mock()
+        third.status_code = 200
+        third.json.return_value = {"artifact": {"id": "a1", "slug": "app.demo"}, "files": []}
+        mock_request.side_effect = [first, second, third]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn-local-api:8000",
+                code_api_base_url="http://xyn-core:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.get_artifact_source_tree(artifact_slug="app.demo")
+        self.assertTrue(result["ok"])
+        self.assertEqual(mock_request.call_count, 3)
+        first_kwargs = mock_request.call_args_list[0].kwargs
+        second_kwargs = mock_request.call_args_list[1].kwargs
+        third_kwargs = mock_request.call_args_list[2].kwargs
+        self.assertEqual(first_kwargs["url"], "http://xyn-core:8000/api/v1/artifacts/source-tree")
+        self.assertEqual(second_kwargs["url"], "http://xyn-core:8000/xyn/api/artifacts/source-tree")
+        self.assertEqual(third_kwargs["url"], "http://xyn-local-api:8000/api/v1/artifacts/source-tree")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_get_artifact_source_tree_falls_back_when_code_api_upstream_unreachable(self, mock_request: mock.Mock) -> None:
+        second = mock.Mock()
+        second.status_code = 200
+        second.json.return_value = {"artifact": {"id": "a1", "slug": "app.demo"}, "files": []}
+        first_fallback = mock.Mock()
+        first_fallback.status_code = 404
+        first_fallback.json.return_value = {"detail": "Not Found"}
+        mock_request.side_effect = [httpx.ConnectError("connect failed"), first_fallback, second]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn-local-api:8000",
+                code_api_base_url="http://xyn-core:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.get_artifact_source_tree(artifact_slug="app.demo")
+        self.assertTrue(result["ok"])
+        self.assertEqual(mock_request.call_count, 3)
+        first_kwargs = mock_request.call_args_list[0].kwargs
+        second_kwargs = mock_request.call_args_list[1].kwargs
+        third_kwargs = mock_request.call_args_list[2].kwargs
+        self.assertEqual(first_kwargs["url"], "http://xyn-core:8000/api/v1/artifacts/source-tree")
+        self.assertEqual(second_kwargs["url"], "http://xyn-core:8000/xyn/api/artifacts/source-tree")
+        self.assertEqual(third_kwargs["url"], "http://xyn-local-api:8000/api/v1/artifacts/source-tree")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_analyze_codebase_supports_mode_param(self, mock_request: mock.Mock) -> None:
         response = mock.Mock()
         response.status_code = 200
@@ -85,7 +169,7 @@ class XynMcpAdapterTests(TestCase):
         mock_request.return_value = response
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
-                api_base_url="http://xyn.local:8001",
+                control_api_base_url="http://xyn.local:8001",
                 bearer_token="",
                 internal_token="",
                 cookie="",
@@ -119,7 +203,7 @@ class XynMcpAdapterTests(TestCase):
         mock_request.return_value = response
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
-                api_base_url="http://xyn.local:8001",
+                control_api_base_url="http://xyn.local:8001",
                 bearer_token="",
                 internal_token="",
                 cookie="",
@@ -143,7 +227,7 @@ class XynMcpAdapterTests(TestCase):
         mock_request.side_effect = [first, second]
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
-                api_base_url="http://xyn.local:8001",
+                control_api_base_url="http://xyn.local:8001",
                 bearer_token="",
                 internal_token="",
                 cookie="",
@@ -163,7 +247,7 @@ class XynMcpAdapterTests(TestCase):
     def test_adapter_list_artifacts_invalid_pagination_parameters(self) -> None:
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
-                api_base_url="http://xyn.local:8001",
+                control_api_base_url="http://xyn.local:8001",
                 bearer_token="",
                 internal_token="",
                 cookie="",
@@ -239,7 +323,7 @@ class XynMcpAdapterTests(TestCase):
 
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
-                api_base_url="http://xyn.local:8001",
+                control_api_base_url="http://xyn.local:8001",
                 bearer_token="token-1",
                 internal_token="int-1",
                 cookie="sessionid=abc",
@@ -271,7 +355,7 @@ class XynMcpAdapterTests(TestCase):
 
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
-                api_base_url="http://xyn.local:8001",
+                control_api_base_url="http://xyn.local:8001",
                 bearer_token="",
                 internal_token="",
                 cookie="",
@@ -298,7 +382,7 @@ class XynMcpAdapterTests(TestCase):
 
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
-                api_base_url="http://xyn.local:8001",
+                control_api_base_url="http://xyn.local:8001",
                 bearer_token="",
                 internal_token="",
                 cookie="",
@@ -319,7 +403,7 @@ class XynMcpAdapterTests(TestCase):
     def test_healthz_surfaces_effective_xyn_api_base_and_auth_presence(self) -> None:
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
-                api_base_url="http://localhost",
+                control_api_base_url="http://localhost",
                 bearer_token="token-1",
                 internal_token="",
                 cookie="sessionid=abc",
@@ -331,7 +415,8 @@ class XynMcpAdapterTests(TestCase):
             response = client.get("/healthz")
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload.get("xyn_api_base_url"), "http://localhost")
+        self.assertEqual(payload.get("xyn_control_api_base_url"), "http://localhost")
+        self.assertEqual(payload.get("xyn_code_api_base_url"), "http://localhost")
         auth = payload.get("auth") if isinstance(payload.get("auth"), dict) else {}
         self.assertTrue(bool(auth.get("has_bearer_token")))
         self.assertFalse(bool(auth.get("has_internal_token")))
@@ -340,7 +425,7 @@ class XynMcpAdapterTests(TestCase):
     def test_healthz_remains_unauthenticated_when_mcp_auth_enabled(self) -> None:
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
-                api_base_url="http://localhost",
+                control_api_base_url="http://localhost",
                 bearer_token="",
                 internal_token="",
                 cookie="",
@@ -356,7 +441,7 @@ class XynMcpAdapterTests(TestCase):
     def test_mcp_route_rejects_missing_bearer_when_token_mode_enabled(self) -> None:
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
-                api_base_url="http://localhost",
+                control_api_base_url="http://localhost",
                 bearer_token="",
                 internal_token="",
                 cookie="",
@@ -374,7 +459,7 @@ class XynMcpAdapterTests(TestCase):
     def test_mcp_route_allows_valid_bearer_when_token_mode_enabled(self) -> None:
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
-                api_base_url="http://localhost",
+                control_api_base_url="http://localhost",
                 bearer_token="",
                 internal_token="",
                 cookie="",
@@ -404,7 +489,7 @@ class XynMcpAdapterTests(TestCase):
         mock_request.side_effect = [discovery_response, userinfo_response]
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
-                api_base_url="http://localhost",
+                control_api_base_url="http://localhost",
                 bearer_token="",
                 internal_token="",
                 cookie="",
@@ -431,7 +516,7 @@ class XynMcpAdapterTests(TestCase):
     def test_oidc_well_known_oauth_protected_resource_route_is_available(self) -> None:
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
-                api_base_url="http://localhost",
+                control_api_base_url="http://localhost",
                 bearer_token="",
                 internal_token="",
                 cookie="",
@@ -467,7 +552,7 @@ class XynMcpAdapterTests(TestCase):
 
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
-                api_base_url="http://localhost",
+                control_api_base_url="http://localhost",
                 bearer_token="",
                 internal_token="",
                 cookie="",
@@ -499,7 +584,7 @@ class XynMcpAdapterTests(TestCase):
 
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
-                api_base_url="http://localhost",
+                control_api_base_url="http://localhost",
                 bearer_token="",
                 internal_token="",
                 cookie="",

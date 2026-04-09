@@ -30,6 +30,16 @@ All endpoints require existing artifact read capability (`app.artifacts.read`).
 
 All tools support `artifact_id` or `artifact_slug`.
 
+## MCP Upstream Routing
+
+If your MCP adapter points to `xyn-api` for control/discovery but code-review routes live on `xyn-core`, set:
+
+```bash
+XYN_MCP_XYN_CODE_API_BASE_URL=http://<xyn-core-host>:<port>
+```
+
+Code-plane tools (`get_artifact_source_tree`, `read_artifact_source_file`, `search_artifact_source`, `analyze_*`, `get_artifact_module_metrics`) prefer this upstream and fall back to `XYN_MCP_XYN_CONTROL_API_BASE_URL`.
+
 ## Example: `get_artifact_source_tree`
 
 ```json

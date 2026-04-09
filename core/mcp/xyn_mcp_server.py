@@ -497,7 +497,9 @@ def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
                 "service": "xyn-mcp-adapter",
                 "tool_count": len(TOOL_NAMES),
                 "tools": TOOL_NAMES,
-                "xyn_api_base_url": configured_adapter.config.api_base_url,
+                "xyn_control_api_base_url": configured_adapter.config.control_api_base_url,
+                "xyn_code_api_base_url": configured_adapter.config.code_api_base_url
+                or configured_adapter.config.control_api_base_url,
                 "auth": {
                     "has_bearer_token": bool(configured_adapter.config.bearer_token),
                     "has_internal_token": bool(configured_adapter.config.internal_token),

@@ -25,13 +25,14 @@ def get_request_bearer_token() -> str:
 
 @dataclass(frozen=True)
 class XynApiAdapterConfig:
-    api_base_url: str
+    control_api_base_url: str
     bearer_token: str
     internal_token: str
     cookie: str
     timeout_seconds: float
     upstream_host_header: str = ""
     upstream_forwarded_proto: str = ""
+    code_api_base_url: str = ""
 
     @classmethod
     def from_env(cls) -> "XynApiAdapterConfig":
@@ -42,7 +43,8 @@ class XynApiAdapterConfig:
             derived_host = derived_host.split(":", 1)[0].strip()
         derived_proto = str(parsed_public.scheme or "").strip() if parsed_public else ""
         return cls(
-            api_base_url=str(os.getenv("XYN_MCP_XYN_API_BASE_URL", "http://localhost:8001")).strip(),
+            control_api_base_url=str(os.getenv("XYN_MCP_XYN_CONTROL_API_BASE_URL", "http://localhost:8001")).strip(),
+            code_api_base_url=str(os.getenv("XYN_MCP_XYN_CODE_API_BASE_URL", "")).strip(),
             bearer_token=str(os.getenv("XYN_MCP_XYN_API_BEARER_TOKEN", "")).strip()
             or str(os.getenv("XYN_MCP_AUTH_BEARER_TOKEN", "")).strip(),
             internal_token=str(os.getenv("XYN_MCP_INTERNAL_TOKEN", "")).strip(),
@@ -86,16 +88,28 @@ class XynApiAdapter:
         path: str,
         json_payload: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
+        base_url: Optional[str] = None,
     ) -> Dict[str, Any]:
-        url = f"{self._config.api_base_url.rstrip('/')}{path}"
-        response = httpx.request(
-            method=method.upper(),
-            url=url,
-            headers=self._headers(),
-            json=json_payload,
-            params=params,
-            timeout=self._config.timeout_seconds,
-        )
+        resolved_base_url = str(base_url or self._config.control_api_base_url).rstrip("/")
+        url = f"{resolved_base_url}{path}"
+        try:
+            response = httpx.request(
+                method=method.upper(),
+                url=url,
+                headers=self._headers(),
+                json=json_payload,
+                params=params,
+                timeout=self._config.timeout_seconds,
+            )
+        except httpx.RequestError as exc:
+            return {
+                "ok": False,
+                "status_code": 503,
+                "method": method.upper(),
+                "path": path,
+                "base_url": resolved_base_url,
+                "response": {"error": "upstream_unreachable", "detail": str(exc)},
+            }
         body: Any
         try:
             body = response.json()
@@ -106,6 +120,7 @@ class XynApiAdapter:
             "status_code": int(response.status_code),
             "method": method.upper(),
             "path": path,
+            "base_url": resolved_base_url,
             "response": body if isinstance(body, (dict, list)) else {"value": body},
         }
 
@@ -116,20 +131,45 @@ class XynApiAdapter:
         paths: list[str],
         json_payload: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
+        base_urls: Optional[list[str]] = None,
     ) -> Dict[str, Any]:
         last_result: Dict[str, Any] = {"ok": False, "status_code": 404, "response": {"error": "not_found"}}
-        for path in paths:
-            result = self._request(method=method, path=path, json_payload=json_payload, params=params)
-            last_result = result
-            if bool(result.get("ok")):
-                return result
-            code = int(result.get("status_code") or 0)
-            # If request is structurally invalid on one endpoint flavor,
-            # continue to alternate path flavor for compatibility.
-            if code in {400, 404, 405}:
+        deduped_base_urls: list[str] = []
+        for candidate in (base_urls or [self._config.control_api_base_url]):
+            base = str(candidate or "").strip()
+            if not base or base in deduped_base_urls:
                 continue
-            return result
+            deduped_base_urls.append(base)
+        if not deduped_base_urls:
+            deduped_base_urls = [self._config.control_api_base_url]
+        for base_url in deduped_base_urls:
+            for path in paths:
+                result = self._request(
+                    method=method,
+                    path=path,
+                    json_payload=json_payload,
+                    params=params,
+                    base_url=base_url,
+                )
+                last_result = result
+                if bool(result.get("ok")):
+                    return result
+                code = int(result.get("status_code") or 0)
+                # Continue searching across endpoint/base-url variants for compatibility.
+                if code in {400, 404, 405, 503}:
+                    continue
+                return result
         return last_result
+
+    def _code_api_base_urls(self) -> list[str]:
+        out: list[str] = []
+        code_api = str(self._config.code_api_base_url or "").strip()
+        control_api = str(self._config.control_api_base_url or "").strip()
+        if code_api:
+            out.append(code_api)
+        if control_api and control_api not in out:
+            out.append(control_api)
+        return out
 
     @staticmethod
     def _with_release_target_not_found_hint(result: Dict[str, Any], *, target_id: str) -> Dict[str, Any]:
@@ -430,10 +470,14 @@ class XynApiAdapter:
             params["artifact_id"] = str(artifact_id).strip()
         if str(artifact_slug or "").strip():
             params["artifact_slug"] = str(artifact_slug).strip()
-        return self._request(
+        return self._request_with_fallback_paths(
             method="GET",
-            path="/api/v1/artifacts/source-tree",
+            paths=[
+                "/api/v1/artifacts/source-tree",
+                "/xyn/api/artifacts/source-tree",
+            ],
             params=params,
+            base_urls=self._code_api_base_urls(),
         )
 
     def read_artifact_source_file(
@@ -456,7 +500,15 @@ class XynApiAdapter:
             params["start_line"] = int(start_line)
         if end_line is not None:
             params["end_line"] = int(end_line)
-        return self._request(method="GET", path="/api/v1/artifacts/source-file", params=params)
+        return self._request_with_fallback_paths(
+            method="GET",
+            paths=[
+                "/api/v1/artifacts/source-file",
+                "/xyn/api/artifacts/source-file",
+            ],
+            params=params,
+            base_urls=self._code_api_base_urls(),
+        )
 
     def search_artifact_source(
         self,
@@ -484,10 +536,14 @@ class XynApiAdapter:
             params["path_glob"] = str(path_glob).strip()
         if str(file_extensions or "").strip():
             params["file_extensions"] = str(file_extensions).strip()
-        return self._request(
+        return self._request_with_fallback_paths(
             method="GET",
-            path="/api/v1/artifacts/source-search",
+            paths=[
+                "/api/v1/artifacts/source-search",
+                "/xyn/api/artifacts/source-search",
+            ],
             params=params,
+            base_urls=self._code_api_base_urls(),
         )
 
     def analyze_artifact_codebase(
@@ -502,10 +558,14 @@ class XynApiAdapter:
             params["artifact_id"] = str(artifact_id).strip()
         if str(artifact_slug or "").strip():
             params["artifact_slug"] = str(artifact_slug).strip()
-        return self._request(
+        return self._request_with_fallback_paths(
             method="GET",
-            path="/api/v1/artifacts/analyze-codebase",
+            paths=[
+                "/api/v1/artifacts/analyze-codebase",
+                "/xyn/api/artifacts/analyze-codebase",
+            ],
             params=params,
+            base_urls=self._code_api_base_urls(),
         )
 
     def analyze_python_api_artifact(
@@ -519,10 +579,14 @@ class XynApiAdapter:
             params["artifact_id"] = str(artifact_id).strip()
         if str(artifact_slug or "").strip():
             params["artifact_slug"] = str(artifact_slug).strip()
-        return self._request(
+        return self._request_with_fallback_paths(
             method="GET",
-            path="/api/v1/artifacts/analyze-python-api",
+            paths=[
+                "/api/v1/artifacts/analyze-python-api",
+                "/xyn/api/artifacts/analyze-python-api",
+            ],
             params=params,
+            base_urls=self._code_api_base_urls(),
         )
 
     def get_artifact_module_metrics(
@@ -537,10 +601,14 @@ class XynApiAdapter:
             params["artifact_id"] = str(artifact_id).strip()
         if str(artifact_slug or "").strip():
             params["artifact_slug"] = str(artifact_slug).strip()
-        return self._request(
+        return self._request_with_fallback_paths(
             method="GET",
-            path="/api/v1/artifacts/module-metrics",
+            paths=[
+                "/api/v1/artifacts/module-metrics",
+                "/xyn/api/artifacts/module-metrics",
+            ],
             params=params,
+            base_urls=self._code_api_base_urls(),
         )
 
     def list_deployment_providers(self) -> Dict[str, Any]:
