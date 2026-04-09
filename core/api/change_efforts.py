@@ -21,11 +21,21 @@ from core.access_control import (
 )
 from core.artifact_provenance import extract_provenance_metadata
 from core.database import get_db
-from core.models import Artifact, ChangeEffort, Environment, Sibling, Workspace
+from core.models import (
+    Artifact,
+    ChangeEffort,
+    ChangeEffortPromotion,
+    Environment,
+    ReleaseDeclaration,
+    Sibling,
+    Workspace,
+)
 
 router = APIRouter()
 
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+_IMAGE_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _utc_now() -> datetime:
@@ -54,6 +64,24 @@ def _validate_branch_name(value: str, *, field_name: str) -> str:
     if branch.startswith("xyn/") and field_name == "target_branch":
         raise HTTPException(status_code=400, detail="target_branch cannot be an effort branch namespace")
     return branch
+
+
+def _validate_commit_sha(value: str, *, field_name: str) -> str:
+    token = str(value or "").strip().lower()
+    if not token:
+        raise HTTPException(status_code=400, detail=f"{field_name} is required")
+    if not _COMMIT_SHA_RE.match(token):
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a 7-40 hex git SHA")
+    return token
+
+
+def _validate_image_digest(value: str, *, field_name: str) -> str:
+    token = str(value or "").strip().lower()
+    if not token:
+        raise HTTPException(status_code=400, detail=f"{field_name} is required")
+    if not _IMAGE_DIGEST_RE.match(token):
+        raise HTTPException(status_code=400, detail=f"{field_name} must be sha256:<64 hex>")
+    return token
 
 
 def _payload(row: ChangeEffort) -> dict[str, Any]:
@@ -143,6 +171,77 @@ class AllocateBranchRequest(BaseModel):
 class AllocateWorktreeRequest(BaseModel):
     root_path: Optional[str] = None
     owner: Optional[str] = Field(default=None, max_length=255)
+
+
+class PromoteEffortRequest(BaseModel):
+    to_branch: str = Field(default="develop", min_length=1, max_length=255)
+    strategy: str = Field(default="merge_commit", min_length=1, max_length=64)
+    approval_metadata: dict[str, Any] = Field(default_factory=dict)
+    merge_commit_sha: Optional[str] = Field(default=None, max_length=64)
+
+
+class PromoteEffortResponse(BaseModel):
+    change_effort: dict[str, Any]
+    promotion: dict[str, Any]
+
+
+class DeclareReleaseRequest(BaseModel):
+    workspace_id: uuid.UUID
+    artifact_slug: str = Field(min_length=1, max_length=255)
+    target_commit_sha: str = Field(min_length=7, max_length=64)
+    artifact_revision_map: dict[str, str] = Field(default_factory=dict)
+    image_digest_map: dict[str, str] = Field(default_factory=dict)
+    environment_id: Optional[uuid.UUID] = None
+    effort_id: Optional[uuid.UUID] = None
+    pipeline_provider: str = Field(default="github_actions", min_length=1, max_length=64)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class DeclareReleaseResponse(BaseModel):
+    release: dict[str, Any]
+
+
+def _promotion_payload(row: ChangeEffortPromotion) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "effort_id": str(row.effort_id),
+        "workspace_id": str(row.workspace_id),
+        "artifact_slug": str(row.artifact_slug or ""),
+        "from_branch": str(row.from_branch or ""),
+        "to_branch": str(row.to_branch or ""),
+        "strategy": str(row.strategy or ""),
+        "status": str(row.status or ""),
+        "preflight": row.preflight_json if isinstance(row.preflight_json, dict) else {},
+        "approval": row.approval_json if isinstance(row.approval_json, dict) else {},
+        "result": row.result_json if isinstance(row.result_json, dict) else {},
+        "merge_commit_sha": str(row.merge_commit_sha or ""),
+        "requested_by": str(row.requested_by or ""),
+        "approved_by": str(row.approved_by or ""),
+        "requested_at": row.requested_at.isoformat() if row.requested_at else None,
+        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def _release_payload(row: ReleaseDeclaration) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "workspace_id": str(row.workspace_id),
+        "environment_id": str(row.environment_id) if row.environment_id else None,
+        "effort_id": str(row.effort_id) if row.effort_id else None,
+        "artifact_slug": str(row.artifact_slug or ""),
+        "target_commit_sha": str(row.target_commit_sha or ""),
+        "artifact_revision_map": row.artifact_revision_map_json if isinstance(row.artifact_revision_map_json, dict) else {},
+        "image_digest_map": row.image_digest_map_json if isinstance(row.image_digest_map_json, dict) else {},
+        "pipeline_provider": str(row.pipeline_provider or ""),
+        "status": str(row.status or ""),
+        "declared_by": str(row.declared_by or ""),
+        "declared_at": row.declared_at.isoformat() if row.declared_at else None,
+        "metadata_json": row.metadata_json if isinstance(row.metadata_json, dict) else {},
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
 
 
 @router.post("/change-efforts", response_model=ChangeEffortResponse, status_code=201)
@@ -341,3 +440,230 @@ async def allocate_change_effort_worktree(
     db.commit()
     db.refresh(row)
     return ChangeEffortResponse(change_effort=_payload(row))
+
+
+@router.post("/change-efforts/{effort_id}/promote", response_model=PromoteEffortResponse)
+async def promote_change_effort(
+    effort_id: uuid.UUID,
+    payload: PromoteEffortRequest,
+    principal: AccessPrincipal = Depends(require_capabilities(CAP_CAMPAIGNS_MANAGE)),
+    db: Session = Depends(get_db),
+):
+    row = _resolve_effort_or_404(db, effort_id)
+    enforce_access_or_403(principal, required_capabilities=[CAP_CAMPAIGNS_MANAGE], workspace_id=row.workspace_id)
+
+    to_branch = _validate_branch_name(payload.to_branch, field_name="to_branch")
+    if to_branch != "develop":
+        raise HTTPException(status_code=400, detail="only promotion to develop is supported in this phase")
+    if not str(row.work_branch or "").strip():
+        raise HTTPException(status_code=409, detail="effort has no work_branch allocated")
+    if str(row.status or "") not in {"branch_allocated", "worktree_allocated", "ready_for_promotion", "promotion_requested"}:
+        raise HTTPException(status_code=409, detail=f"effort status {row.status} is not promotable")
+    if str(row.target_branch or "").strip() not in {"", "develop"}:
+        raise HTTPException(status_code=409, detail=f"effort target_branch {row.target_branch} is not promotable in this phase")
+
+    actor = str(getattr(principal, "subject_id", "") or "").strip() or "system"
+    strategy = str(payload.strategy or "").strip().lower() or "merge_commit"
+    if strategy not in {"merge_commit", "squash", "rebase"}:
+        raise HTTPException(status_code=400, detail="strategy must be merge_commit|squash|rebase")
+
+    preflight = {
+        "branch_exists": bool(str(row.work_branch or "").strip()),
+        "effort_status_promotable": True,
+        "target_branch_valid": True,
+        "conflict_check": {
+            "status": "not_implemented",
+            "result": "unknown",
+            "note": "Merge conflict detection hook not implemented in this phase.",
+        },
+    }
+    existing = (
+        db.query(ChangeEffortPromotion)
+        .filter(
+            ChangeEffortPromotion.effort_id == row.id,
+            ChangeEffortPromotion.from_branch == row.work_branch,
+            ChangeEffortPromotion.to_branch == to_branch,
+            ChangeEffortPromotion.strategy == strategy,
+            ChangeEffortPromotion.status.in_(["requested", "preflight_passed", "merge_pending"]),
+        )
+        .order_by(ChangeEffortPromotion.created_at.desc())
+        .first()
+    )
+    if existing:
+        return PromoteEffortResponse(change_effort=_payload(row), promotion=_promotion_payload(existing))
+
+    promotion_status = "preflight_passed"
+    merge_commit_sha = ""
+    completed_at = None
+    result_json: dict[str, Any] = {"merge_execution": "pending_external"}
+    if payload.merge_commit_sha:
+        merge_commit_sha = _validate_commit_sha(payload.merge_commit_sha, field_name="merge_commit_sha")
+        promotion_status = "completed"
+        completed_at = _utc_now()
+        result_json = {"merge_execution": "recorded_external", "merge_commit_sha": merge_commit_sha}
+
+    promotion = ChangeEffortPromotion(
+        id=uuid.uuid4(),
+        effort_id=row.id,
+        workspace_id=row.workspace_id,
+        artifact_slug=row.artifact_slug,
+        from_branch=str(row.work_branch or ""),
+        to_branch=to_branch,
+        strategy=strategy,
+        status=promotion_status,
+        preflight_json=preflight,
+        approval_json=payload.approval_metadata if isinstance(payload.approval_metadata, dict) else {},
+        result_json=result_json,
+        merge_commit_sha=merge_commit_sha or None,
+        requested_by=actor,
+        approved_by=actor if payload.approval_metadata else None,
+        requested_at=_utc_now(),
+        completed_at=completed_at,
+        created_at=_utc_now(),
+        updated_at=_utc_now(),
+    )
+    db.add(promotion)
+    row.status = "promoted_to_develop" if promotion_status == "completed" else "promotion_requested"
+    row.updated_at = _utc_now()
+    db.commit()
+    db.refresh(row)
+    db.refresh(promotion)
+    return PromoteEffortResponse(change_effort=_payload(row), promotion=_promotion_payload(promotion))
+
+
+@router.post("/releases/declare", response_model=DeclareReleaseResponse)
+async def declare_release(
+    payload: DeclareReleaseRequest,
+    principal: AccessPrincipal = Depends(require_capabilities(CAP_CAMPAIGNS_MANAGE)),
+    db: Session = Depends(get_db),
+):
+    workspace = db.query(Workspace).filter(Workspace.id == payload.workspace_id).first()
+    if not workspace:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    enforce_access_or_403(principal, required_capabilities=[CAP_CAMPAIGNS_MANAGE], workspace_id=workspace.id)
+    actor = str(getattr(principal, "subject_id", "") or "").strip() or "system"
+
+    target_commit_sha = _validate_commit_sha(payload.target_commit_sha, field_name="target_commit_sha")
+    if not isinstance(payload.artifact_revision_map, dict) or not payload.artifact_revision_map:
+        raise HTTPException(status_code=400, detail="artifact_revision_map must contain at least one artifact entry")
+    if not isinstance(payload.image_digest_map, dict) or not payload.image_digest_map:
+        raise HTTPException(status_code=400, detail="image_digest_map must contain at least one artifact entry")
+    normalized_revisions: dict[str, str] = {}
+    for key, value in payload.artifact_revision_map.items():
+        artifact_key = str(key or "").strip()
+        revision_id = str(value or "").strip()
+        if not artifact_key or not revision_id:
+            raise HTTPException(status_code=400, detail="artifact_revision_map keys and values must be non-empty")
+        normalized_revisions[artifact_key] = revision_id
+    normalized_digests: dict[str, str] = {}
+    for key, value in payload.image_digest_map.items():
+        artifact_key = str(key or "").strip()
+        digest = _validate_image_digest(str(value or ""), field_name=f"image_digest_map[{artifact_key}]")
+        normalized_digests[artifact_key] = digest
+
+    artifact_slug = str(payload.artifact_slug or "").strip()
+    if artifact_slug not in normalized_revisions:
+        raise HTTPException(status_code=400, detail="artifact_slug must be present in artifact_revision_map")
+
+    for slug in normalized_revisions.keys():
+        artifact = _latest_artifact_for_slug(db, workspace_id=workspace.id, artifact_slug=slug)
+        if not artifact:
+            raise HTTPException(status_code=409, detail=f"artifact not found for slug={slug}")
+        provenance = extract_provenance_metadata(artifact.extra_metadata if isinstance(artifact.extra_metadata, dict) else {})
+        source = provenance.get("source") if isinstance(provenance.get("source"), dict) else {}
+        build = provenance.get("build") if isinstance(provenance.get("build"), dict) else {}
+        if not source and not build:
+            raise HTTPException(status_code=409, detail=f"artifact provenance missing for slug={slug}")
+
+    environment_id = payload.environment_id
+    if environment_id:
+        env = db.query(Environment).filter(Environment.id == environment_id).first()
+        if not env or env.workspace_id != workspace.id:
+            raise HTTPException(status_code=400, detail="environment_id is invalid for workspace")
+
+    effort_id = payload.effort_id
+    if effort_id:
+        effort = db.query(ChangeEffort).filter(ChangeEffort.id == effort_id).first()
+        if not effort or effort.workspace_id != workspace.id:
+            raise HTTPException(status_code=400, detail="effort_id is invalid for workspace")
+
+    row = ReleaseDeclaration(
+        id=uuid.uuid4(),
+        workspace_id=workspace.id,
+        environment_id=environment_id,
+        effort_id=effort_id,
+        artifact_slug=artifact_slug,
+        target_commit_sha=target_commit_sha,
+        artifact_revision_map_json=normalized_revisions,
+        image_digest_map_json=normalized_digests,
+        pipeline_provider=str(payload.pipeline_provider or "github_actions").strip() or "github_actions",
+        status="declared",
+        declared_by=actor,
+        declared_at=_utc_now(),
+        metadata_json=payload.metadata if isinstance(payload.metadata, dict) else {},
+        created_at=_utc_now(),
+        updated_at=_utc_now(),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return DeclareReleaseResponse(release=_release_payload(row))
+
+
+@router.get("/provenance/{artifact_slug}")
+async def get_artifact_provenance(
+    artifact_slug: str,
+    workspace_id: uuid.UUID,
+    principal: AccessPrincipal = Depends(require_capabilities(CAP_APP_READ)),
+    db: Session = Depends(get_db),
+):
+    workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    if not workspace:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    enforce_access_or_403(principal, required_capabilities=[CAP_APP_READ], workspace_id=workspace.id)
+
+    slug = str(artifact_slug or "").strip()
+    if not slug:
+        raise HTTPException(status_code=400, detail="artifact_slug is required")
+
+    efforts = (
+        db.query(ChangeEffort)
+        .filter(ChangeEffort.workspace_id == workspace.id, ChangeEffort.artifact_slug == slug)
+        .order_by(ChangeEffort.created_at.desc())
+        .limit(100)
+        .all()
+    )
+    promotions = (
+        db.query(ChangeEffortPromotion)
+        .filter(ChangeEffortPromotion.workspace_id == workspace.id, ChangeEffortPromotion.artifact_slug == slug)
+        .order_by(ChangeEffortPromotion.created_at.desc())
+        .limit(200)
+        .all()
+    )
+    release_rows = (
+        db.query(ReleaseDeclaration)
+        .filter(ReleaseDeclaration.workspace_id == workspace.id)
+        .order_by(ReleaseDeclaration.created_at.desc())
+        .limit(200)
+        .all()
+    )
+    releases = []
+    for row in release_rows:
+        rev_map = row.artifact_revision_map_json if isinstance(row.artifact_revision_map_json, dict) else {}
+        digest_map = row.image_digest_map_json if isinstance(row.image_digest_map_json, dict) else {}
+        if row.artifact_slug == slug or slug in rev_map or slug in digest_map:
+            releases.append(_release_payload(row))
+
+    artifact = _latest_artifact_for_slug(db, workspace_id=workspace.id, artifact_slug=slug)
+    artifact_provenance = {}
+    if artifact:
+        artifact_provenance = extract_provenance_metadata(artifact.extra_metadata if isinstance(artifact.extra_metadata, dict) else {})
+
+    return {
+        "artifact_slug": slug,
+        "workspace_id": str(workspace.id),
+        "artifact_provenance": artifact_provenance,
+        "efforts": [_payload(row) for row in efforts],
+        "promotions": [_promotion_payload(row) for row in promotions],
+        "releases": releases,
+    }

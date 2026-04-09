@@ -41,6 +41,8 @@ class ChangeEffortsApiTests(unittest.TestCase):
             self.db.close()
             raise unittest.SkipTest(f"PostgreSQL unavailable for API tests: {exc}") from exc
         models.ChangeEffort.__table__.create(bind=self.db.get_bind(), checkfirst=True)
+        models.ChangeEffortPromotion.__table__.create(bind=self.db.get_bind(), checkfirst=True)
+        models.ReleaseDeclaration.__table__.create(bind=self.db.get_bind(), checkfirst=True)
         self.app = FastAPI()
         from core.api.change_efforts import router as change_efforts_router
         self.app.include_router(change_efforts_router, prefix="/api/v1")
@@ -57,6 +59,8 @@ class ChangeEffortsApiTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory(prefix="xyn-effort-worktree-")
 
     def tearDown(self):
+        self.db.query(models.ReleaseDeclaration).filter(models.ReleaseDeclaration.workspace_id == self.workspace.id).delete(synchronize_session=False)
+        self.db.query(models.ChangeEffortPromotion).filter(models.ChangeEffortPromotion.workspace_id == self.workspace.id).delete(synchronize_session=False)
         self.db.query(models.ChangeEffort).filter(models.ChangeEffort.workspace_id == self.workspace.id).delete(synchronize_session=False)
         self.db.query(models.Artifact).filter(models.Artifact.workspace_id == self.workspace.id).delete(synchronize_session=False)
         self.db.query(models.Workspace).filter(models.Workspace.id == self.workspace.id).delete(synchronize_session=False)
@@ -148,6 +152,138 @@ class ChangeEffortsApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("target_branch", response.json()["detail"])
+
+    def _insert_artifact_with_git_provenance(self, slug: str = "xyn-api") -> models.Artifact:
+        artifact = models.Artifact(
+            id=uuid.uuid4(),
+            workspace_id=self.workspace.id,
+            name=slug,
+            kind="bundle",
+            storage_scope="instance-local",
+            sync_state="local",
+            content_type="application/zip",
+            byte_length=10,
+            created_by="test",
+            storage_path="/tmp/nope",
+            extra_metadata={
+                "generated_artifact_slug": slug,
+                "provenance": {
+                    "source": {
+                        "kind": "git",
+                        "repo_key": "xyn-platform",
+                        "repo_url": "https://github.com/xyn-platform",
+                        "commit_sha": "abcdef0123456789",
+                        "branch_hint": "develop",
+                        "monorepo_subpath": "services/xyn-api",
+                    },
+                    "build": {
+                        "pipeline_provider": "github_actions",
+                        "image_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        "built_from_commit_sha": "abcdef0123456789",
+                    },
+                },
+            },
+        )
+        self.db.add(artifact)
+        self.db.commit()
+        self.db.refresh(artifact)
+        return artifact
+
+    def test_promote_effort_requires_promotable_state(self):
+        effort = self._create_effort()
+        response = self.client.post(f"/api/v1/change-efforts/{effort['id']}/promote", json={})
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no work_branch", response.json()["detail"])
+
+    def test_promote_effort_invalid_target_branch(self):
+        effort = self._create_effort()
+        self.client.post(f"/api/v1/change-efforts/{effort['id']}/allocate-branch", json={})
+        response = self.client.post(
+            f"/api/v1/change-efforts/{effort['id']}/promote",
+            json={"to_branch": "main"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("develop", response.json()["detail"])
+
+    def test_promote_effort_records_preflight(self):
+        effort = self._create_effort()
+        self.client.post(f"/api/v1/change-efforts/{effort['id']}/allocate-branch", json={})
+        response = self.client.post(
+            f"/api/v1/change-efforts/{effort['id']}/promote",
+            json={"to_branch": "develop", "strategy": "merge_commit"},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["promotion"]["status"], "preflight_passed")
+        self.assertEqual(payload["promotion"]["to_branch"], "develop")
+        self.assertEqual(payload["promotion"]["preflight"]["conflict_check"]["status"], "not_implemented")
+
+    def test_release_declare_validates_and_persists(self):
+        self._insert_artifact_with_git_provenance("xyn-api")
+        response = self.client.post(
+            "/api/v1/releases/declare",
+            json={
+                "workspace_id": str(self.workspace.id),
+                "artifact_slug": "xyn-api",
+                "target_commit_sha": "abcdef0123456789",
+                "artifact_revision_map": {"xyn-api": "rev-1"},
+                "image_digest_map": {
+                    "xyn-api": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                },
+                "pipeline_provider": "github_actions",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["release"]["artifact_slug"], "xyn-api")
+        self.assertEqual(payload["release"]["target_commit_sha"], "abcdef0123456789")
+        self.assertEqual(payload["release"]["pipeline_provider"], "github_actions")
+
+    def test_release_declare_rejects_invalid_provenance(self):
+        effort = self._create_effort()
+        # No artifact row with provenance exists.
+        response = self.client.post(
+            "/api/v1/releases/declare",
+            json={
+                "workspace_id": str(self.workspace.id),
+                "artifact_slug": "xyn-api",
+                "target_commit_sha": "abcdef0123456789",
+                "artifact_revision_map": {"xyn-api": "rev-1"},
+                "image_digest_map": {
+                    "xyn-api": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                },
+                "effort_id": effort["id"],
+            },
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("artifact not found", response.json()["detail"])
+
+    def test_provenance_query_returns_release_and_promotion(self):
+        self._insert_artifact_with_git_provenance("xyn-api")
+        effort = self._create_effort("xyn-api")
+        self.client.post(f"/api/v1/change-efforts/{effort['id']}/allocate-branch", json={})
+        self.client.post(f"/api/v1/change-efforts/{effort['id']}/promote", json={"to_branch": "develop"})
+        self.client.post(
+            "/api/v1/releases/declare",
+            json={
+                "workspace_id": str(self.workspace.id),
+                "artifact_slug": "xyn-api",
+                "target_commit_sha": "abcdef0123456789",
+                "artifact_revision_map": {"xyn-api": "rev-1"},
+                "image_digest_map": {
+                    "xyn-api": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                },
+            },
+        )
+        response = self.client.get(
+            "/api/v1/provenance/xyn-api",
+            params={"workspace_id": str(self.workspace.id)},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["artifact_slug"], "xyn-api")
+        self.assertGreaterEqual(len(payload["promotions"]), 1)
+        self.assertGreaterEqual(len(payload["releases"]), 1)
 
 
 if __name__ == "__main__":
