@@ -363,6 +363,76 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(artifacts[0]["slug"], "app.net-inventory")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_list_artifacts_normalizes_control_plane_title_shape(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "artifacts": [
+                {
+                    "id": "row-1",
+                    "artifact_id": "5787f1dd-e10e-4f93-b028-d49521d7fcdb",
+                    "artifact_type": "module",
+                    "title": "xyn-api",
+                    "status": "published",
+                }
+            ]
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.list_artifacts(limit=10, offset=0)
+        self.assertTrue(result["ok"])
+        artifacts = (result.get("response") or {}).get("artifacts") or []
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0]["id"], "5787f1dd-e10e-4f93-b028-d49521d7fcdb")
+        self.assertEqual(artifacts[0]["slug"], "xyn-api")
+
+    def test_adapter_get_artifact_source_tree_falls_back_on_400(self) -> None:
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        with mock.patch.object(
+            adapter,
+            "_request_with_fallback_paths",
+            return_value={"ok": False, "status_code": 400, "path": "/api/v1/artifacts/source-tree"},
+        ), mock.patch.object(
+            adapter,
+            "_artifact_files_via_export_package",
+            return_value={
+                "artifact_id": "a1",
+                "artifact_slug": "xyn-api",
+                "files": {"README.md": b"hello\n"},
+                "source_mode": "packaged_fallback",
+                "source_origin": "packaged_fallback",
+                "resolution_branch": "packaged_fallback",
+                "resolution_details": {},
+                "provenance": {},
+                "resolved_source_roots": [],
+                "warnings": ["fallback"],
+            },
+        ):
+            result = adapter.get_artifact_source_tree(artifact_slug="xyn-api")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status_code"], 200)
+        response = result.get("response") if isinstance(result.get("response"), dict) else {}
+        files = response.get("files") if isinstance(response.get("files"), list) else []
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].get("path"), "README.md")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_list_artifacts_retries_without_offset_on_400(self, mock_request: mock.Mock) -> None:
         first = mock.Mock()
         first.status_code = 400
