@@ -423,6 +423,7 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       XYN_BOOTSTRAP_IF_MISSING_ONLY: ${{XYN_BOOTSTRAP_IF_MISSING_ONLY:-true}}
       XYN_BOOTSTRAP_SOLUTION_WORKSPACE_SLUG: ${{XYN_BOOTSTRAP_SOLUTION_WORKSPACE_SLUG:-}}
       XYN_RUNTIME_REPO_MAP: '${{XYN_RUNTIME_REPO_MAP:-{{"xyn":["/workspace/xyn"],"xyn-platform":["/workspace/xyn-platform"]}}}}'
+      XYN_RUNTIME_REPO_MAP_VALIDATION: ${{XYN_RUNTIME_REPO_MAP_VALIDATION:-warn}}
       AWS_ACCESS_KEY_ID: ${{AWS_ACCESS_KEY_ID:-}}
       AWS_SECRET_ACCESS_KEY: ${{AWS_SECRET_ACCESS_KEY:-}}
       AWS_SESSION_TOKEN: ${{AWS_SESSION_TOKEN:-}}
@@ -434,6 +435,7 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       XYN_CREDENTIALS_ENCRYPTION_KEY: ${{XYN_CREDENTIALS_ENCRYPTION_KEY:-}}
     volumes:
       - ${{XYN_HOST_SRC_ROOT:-${{PWD}}/..}}/xyn:/workspace/xyn
+      - ${{XYN_HOST_SRC_ROOT:-${{PWD}}/..}}/xyn-platform:/workspace/xyn-platform
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network={traefik_network}"

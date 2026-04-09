@@ -142,11 +142,22 @@ Manual validation:
   - `xyn -> /workspace/xyn`
   - `xyn-platform -> /workspace/xyn-platform`
 - The map can be overridden with `XYN_RUNTIME_REPO_MAP`
+- Startup validation mode is controlled by `XYN_RUNTIME_REPO_MAP_VALIDATION`:
+  - `warn` (default): log warnings when configured targets are missing
+  - `fail`: abort startup when configured targets are missing or map JSON is invalid
+  - `off`: disable startup validation
 - Absolute paths are allowed as explicit local overrides for tests/dev execution
 - Repo resolution validates:
   - path exists
   - path is a directory
   - path is a git repository
+
+Runtime deployment requirement for source review:
+
+- Ensure your deployment mounts the source checkout/mirror paths referenced by `XYN_RUNTIME_REPO_MAP`.
+- Default expected mounts inside `xyn-core`:
+  - `/workspace/xyn`
+  - `/workspace/xyn-platform`
 
 Failure semantics:
 

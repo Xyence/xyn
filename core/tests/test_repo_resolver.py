@@ -6,7 +6,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from core.repo_resolver import RepoResolutionBlocked, RepoResolutionFailed, resolve_runtime_repo
+from core.repo_resolver import (
+    RepoResolutionBlocked,
+    RepoResolutionFailed,
+    resolve_runtime_repo,
+    validate_runtime_repo_map_targets,
+)
 
 
 class RepoResolverTests(unittest.TestCase):
@@ -60,6 +65,19 @@ class RepoResolverTests(unittest.TestCase):
         repo = self._temp_repo()
         resolved = resolve_runtime_repo(str(repo))
         self.assertEqual(resolved.path, repo.resolve())
+
+    def test_validate_runtime_repo_map_targets_reports_missing_candidates(self):
+        os.environ["XYN_RUNTIME_REPO_MAP"] = '{"xyn":["/definitely/missing/path"],"xyn-platform":["/also/missing"]}'
+        warnings = validate_runtime_repo_map_targets()
+        self.assertEqual(len(warnings), 2)
+        self.assertTrue(any("repo 'xyn'" in row for row in warnings))
+        self.assertTrue(any("repo 'xyn-platform'" in row for row in warnings))
+
+    def test_validate_runtime_repo_map_targets_accepts_existing_git_candidate(self):
+        repo = self._temp_repo()
+        os.environ["XYN_RUNTIME_REPO_MAP"] = f'{{"xyn":["/definitely/missing/path","{repo}"]}}'
+        warnings = validate_runtime_repo_map_targets()
+        self.assertEqual(warnings, [])
 
 
 if __name__ == "__main__":

@@ -61,6 +61,34 @@ def runtime_repo_map() -> Dict[str, List[Path]]:
     return result
 
 
+def validate_runtime_repo_map_targets() -> List[str]:
+    warnings: List[str] = []
+    repo_map = runtime_repo_map()
+    for repo_key, candidates in repo_map.items():
+        resolved_candidates = [Path(path).expanduser().resolve() for path in candidates]
+        valid = False
+        invalid_reasons: List[str] = []
+        for candidate in resolved_candidates:
+            if not candidate.exists():
+                invalid_reasons.append(f"{candidate} (missing)")
+                continue
+            if not candidate.is_dir():
+                invalid_reasons.append(f"{candidate} (not_a_directory)")
+                continue
+            if not (candidate / ".git").exists():
+                invalid_reasons.append(f"{candidate} (not_a_git_repo)")
+                continue
+            valid = True
+            break
+        if not valid:
+            candidate_text = ", ".join(str(path) for path in resolved_candidates) or "(none)"
+            reason_text = ", ".join(invalid_reasons) if invalid_reasons else "no candidates configured"
+            warnings.append(
+                f"Runtime repo map target missing for repo '{repo_key}'. candidates=[{candidate_text}] details=[{reason_text}]"
+            )
+    return warnings
+
+
 def resolve_runtime_repo(repo_ref: str) -> ResolvedRuntimeRepo:
     token = str(repo_ref or "").strip()
     if not token:
