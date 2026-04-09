@@ -1,5 +1,6 @@
 """Artifact API endpoints."""
 import datetime
+import logging
 import os
 import uuid
 from typing import Any, Optional
@@ -35,6 +36,7 @@ from core.access_control import (
 from core.artifact_store import get_runtime_artifact_store
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Initialize artifact store
 artifact_store = get_runtime_artifact_store()
@@ -278,6 +280,18 @@ def _resolved_artifact_source_payload(row: models.Artifact, payload: bytes) -> d
         metadata=merged_metadata,
         packaged_files=packaged_files,
     )
+    if resolved.source_mode == "packaged_fallback":
+        source = resolved.provenance.get("source") if isinstance(resolved.provenance.get("source"), dict) else {}
+        repo_key = str(source.get("repo_key") or "").strip() or "unknown"
+        warnings = [str(item) for item in (resolved.warnings or []) if str(item).strip()]
+        logger.warning(
+            "artifact source fallback used artifact_id=%s artifact_slug=%s repo_key=%s source_origin=%s warnings=%s",
+            row.id,
+            _artifact_slug(row),
+            repo_key,
+            resolved.source_origin,
+            warnings[:4],
+        )
     return {
         "files": resolved.files,
         "source_mode": resolved.source_mode,

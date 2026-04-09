@@ -1,0 +1,9 @@
+services:
+  core:
+    volumes:
+      # Optional source-backed mode:
+      # Mount a real xyn-platform checkout/mirror into runtime for deterministic source review.
+      # Enable with:
+      #   XYN_PLATFORM_HOST_SRC_PATH=/abs/path/to/xyn-platform
+      #   docker compose -f compose.yml -f compose.source-backed.yml up -d
+      - ${XYN_PLATFORM_HOST_SRC_PATH:?Set XYN_PLATFORM_HOST_SRC_PATH to enable source-backed mode}:/workspace/xyn-platform:z

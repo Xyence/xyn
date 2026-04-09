@@ -6,7 +6,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Tuple
 
 
 DEFAULT_RUNTIME_REPO_MAP = {
@@ -42,13 +42,7 @@ class RepoResolutionFailed(RepoResolutionError):
 
 def runtime_repo_map() -> Dict[str, List[Path]]:
     raw = str(os.getenv("XYN_RUNTIME_REPO_MAP", "")).strip()
-    if raw:
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise RepoResolutionBlocked(f"Invalid XYN_RUNTIME_REPO_MAP JSON: {exc}", "repo_map_invalid") from exc
-    else:
-        payload = DEFAULT_RUNTIME_REPO_MAP
+    payload = _parse_runtime_repo_map(raw)
     result: Dict[str, List[Path]] = {}
     for repo_key, value in dict(payload or {}).items():
         if isinstance(value, str):
@@ -61,24 +55,60 @@ def runtime_repo_map() -> Dict[str, List[Path]]:
     return result
 
 
+def inspect_runtime_repo_map_targets() -> List[dict]:
+    repo_map = runtime_repo_map()
+    rows: List[dict] = []
+    for repo_key, candidates in repo_map.items():
+        for candidate in [Path(path).expanduser().resolve() for path in candidates]:
+            exists = candidate.exists()
+            is_dir = candidate.is_dir() if exists else False
+            has_git = bool((candidate / ".git").exists()) if is_dir else False
+            readable = bool(os.access(candidate, os.R_OK | os.X_OK)) if is_dir else False
+            is_empty = False
+            if is_dir and readable:
+                try:
+                    is_empty = next(candidate.iterdir(), None) is None
+                except Exception:
+                    is_empty = False
+            rows.append(
+                {
+                    "repo_key": str(repo_key),
+                    "path": str(candidate),
+                    "exists": bool(exists),
+                    "is_dir": bool(is_dir),
+                    "is_empty": bool(is_empty),
+                    "has_git": bool(has_git),
+                    "readable": bool(readable),
+                    "valid": bool(exists and is_dir and has_git and readable),
+                }
+            )
+    return rows
+
+
 def validate_runtime_repo_map_targets() -> List[str]:
     warnings: List[str] = []
-    repo_map = runtime_repo_map()
-    for repo_key, candidates in repo_map.items():
-        resolved_candidates = [Path(path).expanduser().resolve() for path in candidates]
+    target_rows = inspect_runtime_repo_map_targets()
+    by_repo: Dict[str, List[dict]] = {}
+    for row in target_rows:
+        by_repo.setdefault(str(row.get("repo_key") or ""), []).append(row)
+    for repo_key, rows in by_repo.items():
+        resolved_candidates = [Path(str(row.get("path") or "")).expanduser().resolve() for row in rows]
         valid = False
         invalid_reasons: List[str] = []
-        for candidate in resolved_candidates:
-            if not candidate.exists():
+        for row in rows:
+            candidate = str(row.get("path") or "")
+            if not bool(row.get("exists")):
                 invalid_reasons.append(f"{candidate} (missing)")
                 continue
-            if not candidate.is_dir():
+            if not bool(row.get("is_dir")):
                 invalid_reasons.append(f"{candidate} (not_a_directory)")
                 continue
-            if not (candidate / ".git").exists():
+            if bool(row.get("is_empty")):
+                invalid_reasons.append(f"{candidate} (empty_directory)")
+            if not bool(row.get("has_git")):
                 invalid_reasons.append(f"{candidate} (not_a_git_repo)")
                 continue
-            if not os.access(candidate, os.R_OK | os.X_OK):
+            if not bool(row.get("readable")):
                 invalid_reasons.append(f"{candidate} (not_readable)")
                 continue
             valid = True
@@ -90,6 +120,41 @@ def validate_runtime_repo_map_targets() -> List[str]:
                 f"Runtime repo map target missing for repo '{repo_key}'. candidates=[{candidate_text}] details=[{reason_text}]"
             )
     return warnings
+
+
+def _parse_runtime_repo_map(raw: str) -> Dict[str, List[str]]:
+    token = str(raw or "").strip()
+    if not token:
+        return dict(DEFAULT_RUNTIME_REPO_MAP)
+    if token.startswith("{"):
+        try:
+            payload = json.loads(token)
+        except json.JSONDecodeError as exc:
+            raise RepoResolutionBlocked(f"Invalid XYN_RUNTIME_REPO_MAP JSON: {exc}", "repo_map_invalid") from exc
+        if not isinstance(payload, dict):
+            raise RepoResolutionBlocked("XYN_RUNTIME_REPO_MAP JSON must be an object.", "repo_map_invalid")
+        return dict(payload)
+
+    parsed_pairs: List[Tuple[str, str]] = []
+    for part in token.replace(";", ",").split(","):
+        entry = str(part or "").strip()
+        if not entry:
+            continue
+        repo_key, sep, repo_path = entry.partition(":")
+        key = str(repo_key or "").strip()
+        value = str(repo_path or "").strip()
+        if not sep or not key or not value:
+            raise RepoResolutionBlocked(
+                "XYN_RUNTIME_REPO_MAP must be JSON or 'repo_key:/path' pairs separated by commas.",
+                "repo_map_invalid",
+            )
+        parsed_pairs.append((key, value))
+    if not parsed_pairs:
+        raise RepoResolutionBlocked("XYN_RUNTIME_REPO_MAP is empty after parsing.", "repo_map_invalid")
+    result: Dict[str, List[str]] = {}
+    for key, value in parsed_pairs:
+        result.setdefault(key, []).append(value)
+    return result
 
 
 def resolve_runtime_repo(repo_ref: str) -> ResolvedRuntimeRepo:

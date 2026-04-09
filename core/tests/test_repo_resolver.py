@@ -9,7 +9,9 @@ from unittest import mock
 from core.repo_resolver import (
     RepoResolutionBlocked,
     RepoResolutionFailed,
+    inspect_runtime_repo_map_targets,
     resolve_runtime_repo,
+    runtime_repo_map,
     validate_runtime_repo_map_targets,
 )
 
@@ -86,6 +88,24 @@ class RepoResolverTests(unittest.TestCase):
             warnings = validate_runtime_repo_map_targets()
         self.assertEqual(len(warnings), 1)
         self.assertIn("not_readable", warnings[0])
+
+    def test_runtime_repo_map_supports_colon_pair_syntax(self):
+        repo = self._temp_repo()
+        os.environ["XYN_RUNTIME_REPO_MAP"] = f"xyn:{repo}"
+        parsed = runtime_repo_map()
+        self.assertIn("xyn", parsed)
+        self.assertEqual(parsed["xyn"][0], repo.resolve())
+
+    def test_inspect_runtime_repo_map_targets_reports_empty_directory(self):
+        tmpdir = tempfile.mkdtemp(prefix="repo-resolver-empty-")
+        self.tempdirs.append(tmpdir)
+        os.environ["XYN_RUNTIME_REPO_MAP"] = f"xyn-platform:{tmpdir}"
+        rows = inspect_runtime_repo_map_targets()
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["exists"])
+        self.assertTrue(rows[0]["is_dir"])
+        self.assertTrue(rows[0]["is_empty"])
+        self.assertFalse(rows[0]["valid"])
 
 
 if __name__ == "__main__":

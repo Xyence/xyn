@@ -435,7 +435,6 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       XYN_CREDENTIALS_ENCRYPTION_KEY: ${{XYN_CREDENTIALS_ENCRYPTION_KEY:-}}
     volumes:
       - ${{XYN_HOST_SRC_ROOT:-${{PWD}}/..}}/xyn:/workspace/xyn
-      - ${{XYN_PLATFORM_HOST_SRC_PATH:-${{XYN_HOST_SRC_ROOT:-${{PWD}}/..}}/xyn-platform}}:/workspace/xyn-platform
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network={traefik_network}"

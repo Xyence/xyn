@@ -85,6 +85,15 @@ chmod +x xynctl
 - Stop local stack:
   - `docker compose down`
 
+## Source-Backed Runtime (Optional, Staged)
+
+- Default (safe/non-breaking): run `compose.yml` only; source review falls back to packaged files when repo roots are unavailable.
+- Enable source-backed mode for `xyn-platform`:
+  - `export XYN_PLATFORM_HOST_SRC_PATH=/abs/path/to/xyn-platform`
+  - `docker compose -f compose.yml -f compose.source-backed.yml up -d`
+- Verify runtime repo-map visibility:
+  - `python scripts/check_runtime_repo_map.py`
+
 ## MCP Adapter (Thin API Wrapper)
 
 Xyn includes a thin MCP server adapter that exposes existing Xyn control/evidence/release-target APIs as MCP tools.

@@ -110,6 +110,33 @@ class ArtifactSourceResolutionTests(TestCase):
             )
         )
 
+    def test_resolve_uses_colon_pair_runtime_repo_map_syntax(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "xyn-platform"
+            service_root = repo_root / "services" / "xyn-api"
+            service_root.mkdir(parents=True, exist_ok=True)
+            (service_root / "xyn_api.py").write_text("app = 'ok'\n", encoding="utf-8")
+            os.environ["XYN_RUNTIME_REPO_MAP"] = f"xyn-platform:{repo_root}"
+            resolved = resolve_artifact_source(
+                artifact_slug="xyn-api",
+                metadata={
+                    "provenance": {
+                        "source": {
+                            "kind": "git",
+                            "repo_key": "xyn-platform",
+                            "repo_url": "https://github.com/xyn-platform",
+                            "commit_sha": "abcdef0123456789",
+                            "monorepo_subpath": "services/xyn-api",
+                            "branch_hint": "develop",
+                        }
+                    }
+                },
+                packaged_files={"manifest.json": b"{}"},
+            )
+        self.assertEqual(resolved.source_mode, "resolved_source")
+        self.assertEqual(resolved.resolution_branch, "provenance_backed")
+        self.assertIn("xyn_api.py", resolved.files)
+
     def test_resolve_rejects_unsafe_monorepo_subpath(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp) / "xyn-platform"
