@@ -332,6 +332,10 @@ class XynApiAdapter:
             "artifact_slug": resolved_artifact_slug,
             "files": resolved.files,
             "source_mode": resolved.source_mode,
+            "source_origin": resolved.source_origin,
+            "resolution_branch": resolved.resolution_branch,
+            "resolution_details": resolved.resolution_details,
+            "provenance": resolved.provenance,
             "resolved_source_roots": resolved.resolved_source_roots,
             "warnings": resolved.warnings,
         }
@@ -717,6 +721,14 @@ class XynApiAdapter:
                             "slug": str(resolved.get("artifact_slug") or artifact_slug or ""),
                         },
                         "source_mode": str(resolved.get("source_mode") or "packaged_fallback"),
+                        "source_origin": str(resolved.get("source_origin") or "packaged_fallback"),
+                        "resolution_branch": str(resolved.get("resolution_branch") or "packaged_fallback"),
+                        "resolution_details": (
+                            resolved.get("resolution_details")
+                            if isinstance(resolved.get("resolution_details"), dict)
+                            else {}
+                        ),
+                        "provenance": resolved.get("provenance") if isinstance(resolved.get("provenance"), dict) else {},
                         "resolved_source_roots": list(resolved.get("resolved_source_roots") or []),
                         "warnings": list(resolved.get("warnings") or []),
                         "files": index_rows,
@@ -785,6 +797,14 @@ class XynApiAdapter:
                             "slug": str(resolved.get("artifact_slug") or artifact_slug or ""),
                         },
                         "source_mode": str(resolved.get("source_mode") or "packaged_fallback"),
+                        "source_origin": str(resolved.get("source_origin") or "packaged_fallback"),
+                        "resolution_branch": str(resolved.get("resolution_branch") or "packaged_fallback"),
+                        "resolution_details": (
+                            resolved.get("resolution_details")
+                            if isinstance(resolved.get("resolution_details"), dict)
+                            else {}
+                        ),
+                        "provenance": resolved.get("provenance") if isinstance(resolved.get("provenance"), dict) else {},
                         "resolved_source_roots": list(resolved.get("resolved_source_roots") or []),
                         "warnings": list(resolved.get("warnings") or []),
                         **payload,
@@ -862,6 +882,14 @@ class XynApiAdapter:
                             "slug": str(resolved.get("artifact_slug") or artifact_slug or ""),
                         },
                         "source_mode": str(resolved.get("source_mode") or "packaged_fallback"),
+                        "source_origin": str(resolved.get("source_origin") or "packaged_fallback"),
+                        "resolution_branch": str(resolved.get("resolution_branch") or "packaged_fallback"),
+                        "resolution_details": (
+                            resolved.get("resolution_details")
+                            if isinstance(resolved.get("resolution_details"), dict)
+                            else {}
+                        ),
+                        "provenance": resolved.get("provenance") if isinstance(resolved.get("provenance"), dict) else {},
                         "resolved_source_roots": list(resolved.get("resolved_source_roots") or []),
                         "warnings": list(resolved.get("warnings") or []),
                         **payload,
@@ -906,6 +934,14 @@ class XynApiAdapter:
                             "slug": str(resolved.get("artifact_slug") or artifact_slug or ""),
                         },
                         "source_mode": str(resolved.get("source_mode") or "packaged_fallback"),
+                        "source_origin": str(resolved.get("source_origin") or "packaged_fallback"),
+                        "resolution_branch": str(resolved.get("resolution_branch") or "packaged_fallback"),
+                        "resolution_details": (
+                            resolved.get("resolution_details")
+                            if isinstance(resolved.get("resolution_details"), dict)
+                            else {}
+                        ),
+                        "provenance": resolved.get("provenance") if isinstance(resolved.get("provenance"), dict) else {},
                         "resolved_source_roots": list(resolved.get("resolved_source_roots") or []),
                         "warnings": list(resolved.get("warnings") or []),
                         **payload,
@@ -949,6 +985,14 @@ class XynApiAdapter:
                             "slug": str(resolved.get("artifact_slug") or artifact_slug or ""),
                         },
                         "source_mode": str(resolved.get("source_mode") or "packaged_fallback"),
+                        "source_origin": str(resolved.get("source_origin") or "packaged_fallback"),
+                        "resolution_branch": str(resolved.get("resolution_branch") or "packaged_fallback"),
+                        "resolution_details": (
+                            resolved.get("resolution_details")
+                            if isinstance(resolved.get("resolution_details"), dict)
+                            else {}
+                        ),
+                        "provenance": resolved.get("provenance") if isinstance(resolved.get("provenance"), dict) else {},
                         "resolved_source_roots": list(resolved.get("resolved_source_roots") or []),
                         "warnings": list(resolved.get("warnings") or []),
                         **payload,
@@ -993,6 +1037,14 @@ class XynApiAdapter:
                             "slug": str(resolved.get("artifact_slug") or artifact_slug or ""),
                         },
                         "source_mode": str(resolved.get("source_mode") or "packaged_fallback"),
+                        "source_origin": str(resolved.get("source_origin") or "packaged_fallback"),
+                        "resolution_branch": str(resolved.get("resolution_branch") or "packaged_fallback"),
+                        "resolution_details": (
+                            resolved.get("resolution_details")
+                            if isinstance(resolved.get("resolution_details"), dict)
+                            else {}
+                        ),
+                        "provenance": resolved.get("provenance") if isinstance(resolved.get("provenance"), dict) else {},
                         "resolved_source_roots": list(resolved.get("resolved_source_roots") or []),
                         "warnings": list(resolved.get("warnings") or []),
                         "metrics": metrics,

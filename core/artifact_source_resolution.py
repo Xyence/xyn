@@ -36,6 +36,8 @@ class ResolvedArtifactSource:
     files: dict[str, bytes]
     source_mode: str
     source_origin: str
+    resolution_branch: str
+    resolution_details: dict[str, Any]
     provenance: dict[str, Any]
     resolved_source_roots: list[str]
     warnings: list[str]
@@ -54,12 +56,23 @@ def resolve_artifact_source(
     normalized_metadata = merge_provenance_metadata(metadata if isinstance(metadata, dict) else {})
     provenance = extract_provenance_metadata(normalized_metadata)
     candidate_roots: list[Path] = []
+    provenance_root_set: set[str] = set()
     source_origin = "filesystem_hint"
+    resolution_branch = "filesystem_hint"
+    resolution_details: dict[str, Any] = {
+        "artifact_slug": str(artifact_slug or "").strip(),
+        "artifact_id": str(artifact_id or "").strip(),
+        "source_ref_type": str(source_ref_type or "").strip(),
+        "source_ref_id": str(source_ref_id or "").strip(),
+    }
 
-    provenance_roots, provenance_warnings = _candidate_provenance_roots(provenance)
+    provenance_roots, provenance_warnings, provenance_details = _candidate_provenance_roots(provenance)
+    resolution_details["provenance"] = provenance_details
     if provenance_roots:
         candidate_roots.extend(provenance_roots)
+        provenance_root_set = {str(path.resolve()) for path in provenance_roots}
         source_origin = "mirror"
+        resolution_branch = "provenance_backed"
     warnings.extend(provenance_warnings)
 
     hint_roots = _candidate_source_roots(
@@ -68,25 +81,41 @@ def resolve_artifact_source(
         source_ref_id=source_ref_id,
         metadata=normalized_metadata,
     )
+    resolution_details["filesystem_hint_roots"] = [str(path.resolve()) for path in hint_roots]
     for root in hint_roots:
         if root not in candidate_roots:
             candidate_roots.append(root)
 
     files, selected_roots, scan_warnings = _read_source_roots(candidate_roots)
+    selected_root_set = {str(Path(item).resolve()) for item in selected_roots}
+    resolution_details["candidate_roots"] = [
+        {
+            "path": str(path.resolve()),
+            "selected": str(path.resolve()) in selected_root_set,
+            "origin": "provenance_backed" if str(path.resolve()) in provenance_root_set else "filesystem_hint",
+        }
+        for path in candidate_roots
+    ]
+    resolution_details["selected_source_roots"] = list(selected_roots)
     warnings.extend(scan_warnings)
     if files:
         if provenance_roots and selected_roots:
-            selected_set = {str(Path(item).resolve()) for item in selected_roots}
-            provenance_set = {str(Path(item).resolve()) for item in provenance_roots}
-            if selected_set.intersection(provenance_set):
+            if selected_root_set.intersection(provenance_root_set):
                 repo_url = str((provenance.get("source") or {}).get("repo_url") or "").strip()
                 source_origin = "github" if repo_url else "mirror"
+                resolution_branch = "provenance_backed"
             else:
                 source_origin = "filesystem_hint"
+                resolution_branch = "filesystem_hint"
+        elif selected_roots:
+            resolution_branch = "filesystem_hint"
+        resolution_details["selected_branch"] = resolution_branch
         return ResolvedArtifactSource(
             files=files,
             source_mode="resolved_source",
             source_origin=source_origin,
+            resolution_branch=resolution_branch,
+            resolution_details=resolution_details,
             provenance=provenance,
             resolved_source_roots=selected_roots,
             warnings=warnings,
@@ -95,32 +124,44 @@ def resolve_artifact_source(
         warnings.append(
             "Falling back to packaged artifact files because deterministic/provenance source resolution failed."
         )
+        resolution_branch = "packaged_fallback"
+        resolution_details["selected_branch"] = resolution_branch
         return ResolvedArtifactSource(
             files=dict(packaged_files),
             source_mode="packaged_fallback",
             source_origin="packaged_fallback",
+            resolution_branch=resolution_branch,
+            resolution_details=resolution_details,
             provenance=provenance,
             resolved_source_roots=[],
             warnings=warnings,
         )
     warnings.append("No source files could be resolved from provenance hints, filesystem hints, or packaged payload.")
+    resolution_branch = "packaged_fallback"
+    resolution_details["selected_branch"] = resolution_branch
     return ResolvedArtifactSource(
         files={},
         source_mode="packaged_fallback",
         source_origin="packaged_fallback",
+        resolution_branch=resolution_branch,
+        resolution_details=resolution_details,
         provenance=provenance,
         resolved_source_roots=[],
         warnings=warnings,
     )
 
 
-def _candidate_provenance_roots(provenance: dict[str, Any]) -> tuple[list[Path], list[str]]:
+def _candidate_provenance_roots(provenance: dict[str, Any]) -> tuple[list[Path], list[str], dict[str, Any]]:
     warnings: list[str] = []
+    details: dict[str, Any] = {}
     source = provenance.get("source") if isinstance(provenance.get("source"), dict) else {}
     if not source:
-        return [], warnings
+        details["reason"] = "missing_source_block"
+        return [], warnings, details
     if str(source.get("kind") or "").strip().lower() != "git":
-        return [], warnings
+        details["reason"] = "non_git_source"
+        details["source_kind"] = str(source.get("kind") or "")
+        return [], warnings, details
 
     repo_key = str(source.get("repo_key") or "").strip()
     repo_url = str(source.get("repo_url") or "").strip()
@@ -128,24 +169,43 @@ def _candidate_provenance_roots(provenance: dict[str, Any]) -> tuple[list[Path],
     monorepo_subpath = str(source.get("monorepo_subpath") or "").strip()
     branch_hint = str(source.get("branch_hint") or "").strip()
     manifest_ref = str(source.get("manifest_ref") or "").strip()
+    details.update(
+        {
+            "repo_key": repo_key,
+            "repo_url": repo_url,
+            "commit_sha": commit_sha,
+            "branch_hint": branch_hint,
+            "monorepo_subpath": monorepo_subpath,
+            "manifest_ref": manifest_ref,
+        }
+    )
 
     if not repo_key and repo_url:
         repo_key = _repo_key_from_url(repo_url)
+        details["repo_key"] = repo_key
     if not repo_key:
         warnings.append("Provenance source missing repo_key/repo_url; cannot deterministically resolve source root.")
-        return [], warnings
+        details["reason"] = "missing_repo_key"
+        return [], warnings, details
 
+    details["candidate_repo_roots"] = []
     candidates: list[Path] = []
     seen: set[str] = set()
-    for token in _provenance_repo_root_candidates(repo_key):
+    for token, origin in _provenance_repo_root_candidates(repo_key):
         candidate = token.resolve()
-        if not candidate.exists() or not candidate.is_dir():
+        exists = candidate.exists()
+        is_dir = candidate.is_dir() if exists else False
+        (details["candidate_repo_roots"]).append(
+            {"path": str(candidate), "origin": origin, "exists": bool(exists), "is_dir": bool(is_dir)}
+        )
+        if not exists or not is_dir:
             continue
         key = str(candidate)
         if key in seen:
             continue
         seen.add(key)
         candidates.append(candidate)
+    details["resolved_repo_roots"] = [str(item) for item in candidates]
 
     if not candidates:
         detail = f"repo_key={repo_key}"
@@ -157,7 +217,8 @@ def _candidate_provenance_roots(provenance: dict[str, Any]) -> tuple[list[Path],
             "No local mirror/checkout found for provenance-backed source resolution "
             f"({detail}). GitHub/mirror fetch integration is not implemented in this phase."
         )
-        return [], warnings
+        details["reason"] = "repo_roots_missing"
+        return [], warnings, details
 
     roots: list[Path] = []
     path_candidates: list[str] = []
@@ -179,11 +240,18 @@ def _candidate_provenance_roots(provenance: dict[str, Any]) -> tuple[list[Path],
                 path_candidates.append(safe_manifest)
     if not path_candidates:
         path_candidates.append("")
+    details["path_candidates"] = list(path_candidates)
 
+    details["candidate_source_roots"] = []
     for repo_root in candidates:
         for rel in path_candidates:
             target = repo_root if not rel else (repo_root / rel).resolve()
-            if target.exists() and target.is_dir():
+            exists = target.exists()
+            is_dir = target.is_dir() if exists else False
+            details["candidate_source_roots"].append(
+                {"path": str(target), "exists": bool(exists), "is_dir": bool(is_dir), "repo_root": str(repo_root)}
+            )
+            if exists and is_dir:
                 roots.append(target)
 
     if not roots:
@@ -191,7 +259,11 @@ def _candidate_provenance_roots(provenance: dict[str, Any]) -> tuple[list[Path],
             "Provenance repo root resolved but monorepo_subpath/manifest_ref directory was not found; "
             "falling back to filesystem hints."
         )
-    return roots, warnings
+        details["reason"] = "provenance_subpath_missing"
+    else:
+        details["reason"] = "resolved"
+    details["resolved_source_roots"] = [str(item) for item in roots]
+    return roots, warnings, details
 
 
 def _candidate_source_roots(
@@ -298,10 +370,6 @@ def _slug_candidates(slug: str) -> list[Path]:
                 base / "apps" / token,
             ]
         )
-    # Compatibility alias for platform runtime artifacts that are packaged
-    # without provenance/source_ref metadata.
-    if token in {"xyn-api", "xyn.api"}:
-        out.append(Path(__file__).resolve().parents[1])
     return out
 
 
@@ -332,8 +400,8 @@ def _repo_key_from_url(repo_url: str) -> str:
     return tail[:-4] if tail.endswith(".git") else tail
 
 
-def _provenance_repo_root_candidates(repo_key: str) -> list[Path]:
-    out: list[Path] = []
+def _provenance_repo_root_candidates(repo_key: str) -> list[tuple[Path, str]]:
+    out: list[tuple[Path, str]] = []
     runtime_map_raw = str(os.getenv("XYN_RUNTIME_REPO_MAP", "")).strip()
     if runtime_map_raw:
         try:
@@ -341,21 +409,29 @@ def _provenance_repo_root_candidates(repo_key: str) -> list[Path]:
             if isinstance(parsed, dict):
                 value = parsed.get(repo_key)
                 if isinstance(value, str):
-                    out.append(Path(value).expanduser())
+                    out.append((Path(value).expanduser(), "runtime_repo_map"))
                 elif isinstance(value, list):
                     for item in value:
                         if isinstance(item, str) and item.strip():
-                            out.append(Path(item).expanduser())
+                            out.append((Path(item).expanduser(), "runtime_repo_map"))
         except Exception:
             pass
     for base in _base_roots():
         out.extend(
             [
-                base / repo_key,
-                base / "xyn-platform" if repo_key == "xyn-platform" else base / repo_key,
+                (base / repo_key, "heuristic_base_repo_key"),
+                (base / "xyn-platform" if repo_key == "xyn-platform" else base / repo_key, "heuristic_base_repo_key"),
             ]
         )
-    return out
+    deduped: list[tuple[Path, str]] = []
+    seen: set[str] = set()
+    for path, origin in out:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((path, origin))
+    return deduped
 
 
 def _base_roots() -> list[Path]:
