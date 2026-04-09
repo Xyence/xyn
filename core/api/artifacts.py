@@ -23,6 +23,7 @@ from core.artifact_source_resolution import (
     parse_packaged_artifact_metadata,
     resolve_artifact_source,
 )
+from core.artifact_provenance import extract_provenance_metadata, merge_provenance_metadata
 from core.access_control import (
     CAP_ARTIFACTS_READ,
     CAP_CAMPAIGNS_MANAGE,
@@ -205,10 +206,12 @@ def _artifact_slug(row: models.Artifact) -> str:
     return str(row.name or "").strip()
 
 
-def _artifact_identity_payload(row: models.Artifact) -> dict[str, str]:
+def _artifact_identity_payload(row: models.Artifact) -> dict[str, Any]:
+    metadata = merge_provenance_metadata(row.extra_metadata if isinstance(row.extra_metadata, dict) else {})
     return {
         "id": str(row.id),
         "slug": _artifact_slug(row),
+        "provenance": extract_provenance_metadata(metadata),
     }
 
 
@@ -264,9 +267,9 @@ async def _artifact_bytes(row: models.Artifact) -> bytes:
 
 def _resolved_artifact_source_payload(row: models.Artifact, payload: bytes) -> dict[str, Any]:
     packaged_files = parse_artifact_source_files(artifact_name=row.name, artifact_bytes=payload)
-    row_metadata = row.extra_metadata if isinstance(row.extra_metadata, dict) else {}
-    packaged_metadata = parse_packaged_artifact_metadata(packaged_files)
-    merged_metadata = {**row_metadata, **packaged_metadata}
+    row_metadata = merge_provenance_metadata(row.extra_metadata if isinstance(row.extra_metadata, dict) else {})
+    packaged_metadata = merge_provenance_metadata(parse_packaged_artifact_metadata(packaged_files))
+    merged_metadata = merge_provenance_metadata({**row_metadata, **packaged_metadata})
     resolved = resolve_artifact_source(
         artifact_slug=_artifact_slug(row),
         artifact_id=str(row.id),
@@ -278,6 +281,8 @@ def _resolved_artifact_source_payload(row: models.Artifact, payload: bytes) -> d
     return {
         "files": resolved.files,
         "source_mode": resolved.source_mode,
+        "source_origin": resolved.source_origin,
+        "provenance": resolved.provenance,
         "resolved_source_roots": resolved.resolved_source_roots,
         "warnings": resolved.warnings,
     }
@@ -312,6 +317,8 @@ async def get_artifact_source_tree(
     return {
         "artifact": _artifact_identity_payload(row),
         "source_mode": resolved.get("source_mode") or "packaged_fallback",
+        "source_origin": resolved.get("source_origin") or "packaged_fallback",
+        "provenance": resolved.get("provenance") if isinstance(resolved.get("provenance"), dict) else {},
         "resolved_source_roots": resolved.get("resolved_source_roots") or [],
         "warnings": resolved.get("warnings") or [],
         "file_count": len(index_rows),
@@ -343,6 +350,8 @@ async def read_artifact_source_file(
     return {
         "artifact": _artifact_identity_payload(row),
         "source_mode": resolved.get("source_mode") or "packaged_fallback",
+        "source_origin": resolved.get("source_origin") or "packaged_fallback",
+        "provenance": resolved.get("provenance") if isinstance(resolved.get("provenance"), dict) else {},
         "resolved_source_roots": resolved.get("resolved_source_roots") or [],
         "warnings": resolved.get("warnings") or [],
         **chunk,
@@ -381,6 +390,8 @@ async def search_artifact_source(
     return {
         "artifact": _artifact_identity_payload(row),
         "source_mode": resolved.get("source_mode") or "packaged_fallback",
+        "source_origin": resolved.get("source_origin") or "packaged_fallback",
+        "provenance": resolved.get("provenance") if isinstance(resolved.get("provenance"), dict) else {},
         "resolved_source_roots": resolved.get("resolved_source_roots") or [],
         "warnings": resolved.get("warnings") or [],
         **results,
@@ -406,6 +417,8 @@ async def analyze_artifact_codebase(
     return {
         "artifact": _artifact_identity_payload(row),
         "source_mode": resolved.get("source_mode") or "packaged_fallback",
+        "source_origin": resolved.get("source_origin") or "packaged_fallback",
+        "provenance": resolved.get("provenance") if isinstance(resolved.get("provenance"), dict) else {},
         "resolved_source_roots": resolved.get("resolved_source_roots") or [],
         "warnings": resolved.get("warnings") or [],
         "analysis_version": "mvp.v1",
@@ -428,6 +441,8 @@ async def analyze_python_api_artifact(
     return {
         "artifact": _artifact_identity_payload(row),
         "source_mode": resolved.get("source_mode") or "packaged_fallback",
+        "source_origin": resolved.get("source_origin") or "packaged_fallback",
+        "provenance": resolved.get("provenance") if isinstance(resolved.get("provenance"), dict) else {},
         "resolved_source_roots": resolved.get("resolved_source_roots") or [],
         "warnings": resolved.get("warnings") or [],
         "analysis_version": "mvp.v1",
@@ -451,6 +466,8 @@ async def get_artifact_module_metrics(
     return {
         "artifact": _artifact_identity_payload(row),
         "source_mode": resolved.get("source_mode") or "packaged_fallback",
+        "source_origin": resolved.get("source_origin") or "packaged_fallback",
+        "provenance": resolved.get("provenance") if isinstance(resolved.get("provenance"), dict) else {},
         "resolved_source_roots": resolved.get("resolved_source_roots") or [],
         "warnings": resolved.get("warnings") or [],
         "count": len(rows),

@@ -140,6 +140,32 @@ class GeneratedArtifactPersistenceTests(unittest.TestCase):
         self.assertEqual(link_generated_artifact_memberships(_db=db), [])
         self.assertEqual(link_generated_artifact_memberships(_db=db), [])
 
+    def test_persist_generated_json_artifact_normalizes_provenance_metadata(self):
+        workspace_id = uuid.uuid4()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = _FakeDB()
+            persist_generated_json_artifact(
+                db,
+                workspace_id=workspace_id,
+                name="appspec.demo",
+                kind="app_spec",
+                payload={"ok": True},
+                metadata={
+                    "source": {
+                        "kind": "git",
+                        "repo_key": "xyn-platform",
+                        "commit_sha": "ABCDEF0123456789",
+                    }
+                },
+                workspace_root_factory=lambda: Path(tmpdir),
+                now_fn=lambda: datetime(2026, 3, 27, 12, 0, tzinfo=timezone.utc),
+            )
+            row = db.rows[0]
+            provenance = row.extra_metadata.get("provenance") if isinstance(row.extra_metadata.get("provenance"), dict) else {}
+            source = provenance.get("source") if isinstance(provenance.get("source"), dict) else {}
+            self.assertEqual(source.get("repo_key"), "xyn-platform")
+            self.assertEqual(source.get("commit_sha"), "abcdef0123456789")
+
 
 if __name__ == "__main__":
     unittest.main()

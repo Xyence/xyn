@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 from pydantic import BaseModel, Field
+from core.artifact_provenance import extract_provenance_metadata, merge_provenance_metadata
 
 
 # Health Schemas
@@ -219,6 +220,7 @@ class Artifact(BaseModel):
     step_id: Optional[UUID] = None
     sha256: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    provenance: Dict[str, Any] = Field(default_factory=dict)
 
     class Config:
         from_attributes = True
@@ -227,6 +229,8 @@ class Artifact(BaseModel):
     @classmethod
     def from_orm_model(cls, artifact):
         """Convert ORM model to schema."""
+        metadata = merge_provenance_metadata(artifact.extra_metadata or {})
+        provenance = extract_provenance_metadata(metadata)
         return cls(
             id=artifact.id,
             workspace_id=artifact.workspace_id,
@@ -244,7 +248,8 @@ class Artifact(BaseModel):
             run_id=artifact.run_id,
             step_id=artifact.step_id,
             sha256=artifact.sha256,
-            metadata=artifact.extra_metadata or {}
+            metadata=metadata,
+            provenance=provenance,
         )
 
 
