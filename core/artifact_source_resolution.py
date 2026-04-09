@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from core.artifact_code_review import detect_language
+from core.artifact_provenance import extract_provenance_metadata, merge_provenance_metadata
 
 
 _DEFAULT_EXCLUDE_DIRS = {
@@ -34,6 +35,8 @@ _DEFAULT_MAX_FILES = int(os.getenv("XYN_SOURCE_REVIEW_MAX_FILES", "5000"))
 class ResolvedArtifactSource:
     files: dict[str, bytes]
     source_mode: str
+    source_origin: str
+    provenance: dict[str, Any]
     resolved_source_roots: list[str]
     warnings: list[str]
 
@@ -48,38 +51,147 @@ def resolve_artifact_source(
     packaged_files: Optional[dict[str, bytes]] = None,
 ) -> ResolvedArtifactSource:
     warnings: list[str] = []
-    candidate_roots = _candidate_source_roots(
+    normalized_metadata = merge_provenance_metadata(metadata if isinstance(metadata, dict) else {})
+    provenance = extract_provenance_metadata(normalized_metadata)
+    candidate_roots: list[Path] = []
+    source_origin = "filesystem_hint"
+
+    provenance_roots, provenance_warnings = _candidate_provenance_roots(provenance)
+    if provenance_roots:
+        candidate_roots.extend(provenance_roots)
+        source_origin = "mirror"
+    warnings.extend(provenance_warnings)
+
+    hint_roots = _candidate_source_roots(
         artifact_slug=artifact_slug,
         source_ref_type=source_ref_type,
         source_ref_id=source_ref_id,
-        metadata=metadata,
+        metadata=normalized_metadata,
     )
+    for root in hint_roots:
+        if root not in candidate_roots:
+            candidate_roots.append(root)
+
     files, selected_roots, scan_warnings = _read_source_roots(candidate_roots)
     warnings.extend(scan_warnings)
     if files:
+        if provenance_roots and selected_roots:
+            selected_set = {str(Path(item).resolve()) for item in selected_roots}
+            provenance_set = {str(Path(item).resolve()) for item in provenance_roots}
+            if selected_set.intersection(provenance_set):
+                repo_url = str((provenance.get("source") or {}).get("repo_url") or "").strip()
+                source_origin = "github" if repo_url else "mirror"
+            else:
+                source_origin = "filesystem_hint"
         return ResolvedArtifactSource(
             files=files,
             source_mode="resolved_source",
+            source_origin=source_origin,
+            provenance=provenance,
             resolved_source_roots=selected_roots,
             warnings=warnings,
         )
     if packaged_files:
         warnings.append(
-            "Falling back to packaged artifact files because no filesystem source roots were resolved."
+            "Falling back to packaged artifact files because deterministic/provenance source resolution failed."
         )
         return ResolvedArtifactSource(
             files=dict(packaged_files),
             source_mode="packaged_fallback",
+            source_origin="packaged_fallback",
+            provenance=provenance,
             resolved_source_roots=[],
             warnings=warnings,
         )
-    warnings.append("No source files could be resolved from filesystem roots or packaged payload.")
+    warnings.append("No source files could be resolved from provenance hints, filesystem hints, or packaged payload.")
     return ResolvedArtifactSource(
         files={},
         source_mode="packaged_fallback",
+        source_origin="packaged_fallback",
+        provenance=provenance,
         resolved_source_roots=[],
         warnings=warnings,
     )
+
+
+def _candidate_provenance_roots(provenance: dict[str, Any]) -> tuple[list[Path], list[str]]:
+    warnings: list[str] = []
+    source = provenance.get("source") if isinstance(provenance.get("source"), dict) else {}
+    if not source:
+        return [], warnings
+    if str(source.get("kind") or "").strip().lower() != "git":
+        return [], warnings
+
+    repo_key = str(source.get("repo_key") or "").strip()
+    repo_url = str(source.get("repo_url") or "").strip()
+    commit_sha = str(source.get("commit_sha") or "").strip()
+    monorepo_subpath = str(source.get("monorepo_subpath") or "").strip()
+    branch_hint = str(source.get("branch_hint") or "").strip()
+    manifest_ref = str(source.get("manifest_ref") or "").strip()
+
+    if not repo_key and repo_url:
+        repo_key = _repo_key_from_url(repo_url)
+    if not repo_key:
+        warnings.append("Provenance source missing repo_key/repo_url; cannot deterministically resolve source root.")
+        return [], warnings
+
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    for token in _provenance_repo_root_candidates(repo_key):
+        candidate = token.resolve()
+        if not candidate.exists() or not candidate.is_dir():
+            continue
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+
+    if not candidates:
+        detail = f"repo_key={repo_key}"
+        if commit_sha:
+            detail += f" commit_sha={commit_sha}"
+        if branch_hint:
+            detail += f" branch_hint={branch_hint}"
+        warnings.append(
+            "No local mirror/checkout found for provenance-backed source resolution "
+            f"({detail}). GitHub/mirror fetch integration is not implemented in this phase."
+        )
+        return [], warnings
+
+    roots: list[Path] = []
+    path_candidates: list[str] = []
+    if monorepo_subpath:
+        safe = _safe_subpath(monorepo_subpath)
+        if not safe:
+            warnings.append(f"Ignoring unsafe monorepo_subpath from provenance: {monorepo_subpath}")
+        else:
+            path_candidates.append(safe)
+    if manifest_ref:
+        safe_manifest = _safe_subpath(manifest_ref)
+        if safe_manifest:
+            manifest_path = Path(safe_manifest)
+            if manifest_path.suffix:
+                parent = manifest_path.parent.as_posix()
+                if parent and parent != ".":
+                    path_candidates.append(parent)
+            else:
+                path_candidates.append(safe_manifest)
+    if not path_candidates:
+        path_candidates.append("")
+
+    for repo_root in candidates:
+        for rel in path_candidates:
+            target = repo_root if not rel else (repo_root / rel).resolve()
+            if target.exists() and target.is_dir():
+                roots.append(target)
+
+    if not roots:
+        warnings.append(
+            "Provenance repo root resolved but monorepo_subpath/manifest_ref directory was not found; "
+            "falling back to filesystem hints."
+        )
+    return roots, warnings
 
 
 def _candidate_source_roots(
@@ -186,9 +298,59 @@ def _slug_candidates(slug: str) -> list[Path]:
                 base / "apps" / token,
             ]
         )
-    # Common mapping: xyn-api artifact often maps to the running backend codebase.
-    if token in {"xyn-api", "xyn.api"}:
-        out.append(Path(__file__).resolve().parents[1])
+    return out
+
+
+def _safe_subpath(value: str) -> str:
+    token = str(value or "").strip().replace("\\", "/")
+    if not token:
+        return ""
+    path = Path(token)
+    if path.is_absolute():
+        return ""
+    parts = [part for part in path.parts if part not in {"", "."}]
+    if any(part == ".." for part in parts):
+        return ""
+    return "/".join(parts)
+
+
+def _repo_key_from_url(repo_url: str) -> str:
+    token = str(repo_url or "").strip().rstrip("/")
+    if not token:
+        return ""
+    # Supports https://.../org/repo(.git) and git@host:org/repo(.git)
+    if ":" in token and token.startswith("git@"):
+        token = token.split(":", 1)[-1]
+    else:
+        token = token.split("/")[-1]
+        return token[:-4] if token.endswith(".git") else token
+    tail = token.split("/")[-1]
+    return tail[:-4] if tail.endswith(".git") else tail
+
+
+def _provenance_repo_root_candidates(repo_key: str) -> list[Path]:
+    out: list[Path] = []
+    runtime_map_raw = str(os.getenv("XYN_RUNTIME_REPO_MAP", "")).strip()
+    if runtime_map_raw:
+        try:
+            parsed = json.loads(runtime_map_raw)
+            if isinstance(parsed, dict):
+                value = parsed.get(repo_key)
+                if isinstance(value, str):
+                    out.append(Path(value).expanduser())
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, str) and item.strip():
+                            out.append(Path(item).expanduser())
+        except Exception:
+            pass
+    for base in _base_roots():
+        out.extend(
+            [
+                base / repo_key,
+                base / "xyn-platform" if repo_key == "xyn-platform" else base / repo_key,
+            ]
+        )
     return out
 
 
@@ -341,13 +503,23 @@ def parse_packaged_artifact_metadata(files: dict[str, bytes]) -> dict[str, Any]:
                 metadata[key] = value
         if content_ref:
             metadata["content_ref"] = content_ref
+        # Preserve canonical provenance envelopes when present.
+        source_block = inner_metadata.get("source") if isinstance(inner_metadata.get("source"), dict) else {}
+        if source_block:
+            metadata["source"] = source_block
+        build_block = inner_metadata.get("build") if isinstance(inner_metadata.get("build"), dict) else {}
+        if build_block:
+            metadata["build"] = build_block
+        provenance_block = inner_metadata.get("provenance") if isinstance(inner_metadata.get("provenance"), dict) else {}
+        if provenance_block:
+            metadata["provenance"] = provenance_block
         artifact_block = artifact_payload.get("artifact") if isinstance(artifact_payload.get("artifact"), dict) else {}
         for key in ("slug", "title", "type"):
             value = artifact_block.get(key)
             if isinstance(value, str) and value.strip():
                 metadata.setdefault(key, value)
         break
-    return metadata
+    return merge_provenance_metadata(metadata)
 
 
 def _load_json_from_files(files: dict[str, bytes], path: str) -> Any:

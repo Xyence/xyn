@@ -108,6 +108,9 @@ class Workspace(Base):
     environments = relationship("Environment", back_populates="workspace")
     siblings = relationship("Sibling", back_populates="workspace")
     activations = relationship("Activation", back_populates="workspace")
+    change_efforts = relationship("ChangeEffort", back_populates="workspace")
+    change_effort_promotions = relationship("ChangeEffortPromotion", back_populates="workspace")
+    release_declarations = relationship("ReleaseDeclaration", back_populates="workspace")
 
 
 class Environment(Base):
@@ -209,6 +212,102 @@ class Activation(Base):
     sibling = relationship("Sibling", back_populates="activations")
     workspace = relationship("Workspace", back_populates="activations")
     source_job = relationship("Job", foreign_keys=[source_job_id])
+
+
+class ChangeEffort(Base):
+    """Minimal branch/worktree effort state for AI-managed development."""
+    __tablename__ = "change_efforts"
+    __table_args__ = (
+        Index("ix_change_efforts_workspace_status", "workspace_id", "status"),
+        Index("ix_change_efforts_artifact_status", "artifact_slug", "status"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id = Column(UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False)
+    environment_id = Column(UUID(as_uuid=True), ForeignKey("environments.id", ondelete="SET NULL"), nullable=True)
+    sibling_id = Column(UUID(as_uuid=True), ForeignKey("siblings.id", ondelete="SET NULL"), nullable=True)
+    artifact_slug = Column(String(255), nullable=False)
+    repo_key = Column(String(255), nullable=True)
+    repo_url = Column(Text, nullable=True)
+    repo_subpath = Column(Text, nullable=True)
+    base_branch = Column(String(255), nullable=False, default="develop")
+    work_branch = Column(String(255), nullable=True)
+    target_branch = Column(String(255), nullable=False, default="develop")
+    worktree_path = Column(Text, nullable=True)
+    status = Column(String(32), nullable=False, default="created")
+    owner = Column(String(255), nullable=True)
+    created_by = Column(String(255), nullable=False, default="system")
+    metadata_json = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    workspace = relationship("Workspace", back_populates="change_efforts")
+    environment = relationship("Environment", foreign_keys=[environment_id])
+    sibling = relationship("Sibling", foreign_keys=[sibling_id])
+    promotions = relationship("ChangeEffortPromotion", back_populates="effort")
+    releases = relationship("ReleaseDeclaration", back_populates="effort")
+
+
+class ChangeEffortPromotion(Base):
+    """Promotion intent + preflight/result metadata for change efforts."""
+    __tablename__ = "change_effort_promotions"
+    __table_args__ = (
+        Index("ix_change_effort_promotions_effort", "effort_id", "created_at"),
+        Index("ix_change_effort_promotions_workspace_status", "workspace_id", "status"),
+        Index("ix_change_effort_promotions_artifact", "artifact_slug", "created_at"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    effort_id = Column(UUID(as_uuid=True), ForeignKey("change_efforts.id", ondelete="CASCADE"), nullable=False)
+    workspace_id = Column(UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False)
+    artifact_slug = Column(String(255), nullable=False)
+    from_branch = Column(String(255), nullable=False)
+    to_branch = Column(String(255), nullable=False)
+    strategy = Column(String(64), nullable=False, default="merge_commit")
+    status = Column(String(32), nullable=False, default="requested")
+    preflight_json = Column(JSONB, nullable=False, default=dict)
+    approval_json = Column(JSONB, nullable=False, default=dict)
+    result_json = Column(JSONB, nullable=False, default=dict)
+    merge_commit_sha = Column(String(64), nullable=True)
+    requested_by = Column(String(255), nullable=False, default="system")
+    approved_by = Column(String(255), nullable=True)
+    requested_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    effort = relationship("ChangeEffort", back_populates="promotions")
+    workspace = relationship("Workspace", back_populates="change_effort_promotions")
+
+
+class ReleaseDeclaration(Base):
+    """Explicit release declaration binding commit/revision/image provenance."""
+    __tablename__ = "release_declarations"
+    __table_args__ = (
+        Index("ix_release_declarations_workspace_created", "workspace_id", "created_at"),
+        Index("ix_release_declarations_artifact_created", "artifact_slug", "created_at"),
+        Index("ix_release_declarations_target_commit", "target_commit_sha"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id = Column(UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False)
+    environment_id = Column(UUID(as_uuid=True), ForeignKey("environments.id", ondelete="SET NULL"), nullable=True)
+    effort_id = Column(UUID(as_uuid=True), ForeignKey("change_efforts.id", ondelete="SET NULL"), nullable=True)
+    artifact_slug = Column(String(255), nullable=False)
+    target_commit_sha = Column(String(64), nullable=False)
+    artifact_revision_map_json = Column(JSONB, nullable=False, default=dict)
+    image_digest_map_json = Column(JSONB, nullable=False, default=dict)
+    pipeline_provider = Column(String(64), nullable=False, default="github_actions")
+    status = Column(String(32), nullable=False, default="declared")
+    declared_by = Column(String(255), nullable=False, default="system")
+    declared_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    metadata_json = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    workspace = relationship("Workspace", back_populates="release_declarations")
+    environment = relationship("Environment", foreign_keys=[environment_id])
+    effort = relationship("ChangeEffort", back_populates="releases")
 
 
 class Draft(Base):

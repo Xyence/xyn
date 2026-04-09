@@ -1,6 +1,7 @@
 """Palette prompt execution via command registry."""
 from __future__ import annotations
 
+import os
 import uuid as uuidlib
 import uuid
 import re
@@ -56,6 +57,14 @@ def _resolve_value(
             return f"demo-device-{uuidlib.uuid4().hex[:8]}"
         if token == "$generated.location_name":
             return f"demo-location-{uuidlib.uuid4().hex[:8]}"
+        if token == "$xyn.control_api_url":
+            return str(
+                os.getenv("XYN_CONTROL_API_BASE_URL")
+                or os.getenv("XYN_API_BASE_URL")
+                or "http://localhost:8000"
+            ).rstrip("/")
+        if token == "$parsed.artifact_slug":
+            return ""
     return value
 
 
@@ -111,6 +120,63 @@ def _parse_device_create_prompt(prompt: str) -> tuple[dict[str, Any], list[str]]
     }
     missing = [] if str(payload.get("name") or "").strip() else ["name"]
     return payload, missing
+
+
+def _parse_start_effort_prompt(prompt: str) -> tuple[dict[str, Any], list[str]]:
+    normalized = str(prompt or "").strip()
+    base = "start development effort on artifact"
+    remainder = normalized[len(base):].strip() if normalized.lower().startswith(base) else normalized
+    remainder = remainder.strip(": ").strip()
+    if not remainder:
+        return {}, ["artifact_slug"]
+    return {"artifact_slug": remainder}, []
+
+
+def _parse_effort_id_prompt(prompt: str, prefix: str) -> tuple[dict[str, Any], list[str]]:
+    normalized = str(prompt or "").strip()
+    remainder = normalized[len(prefix):].strip() if normalized.lower().startswith(prefix) else normalized
+    if not remainder:
+        return {}, ["effort_id"]
+    return {"effort_id": remainder.split()[0]}, []
+
+
+def _parse_provenance_prompt(prompt: str) -> tuple[dict[str, Any], list[str]]:
+    normalized = str(prompt or "").strip()
+    base = "show artifact provenance"
+    remainder = normalized[len(base):].strip() if normalized.lower().startswith(base) else normalized
+    if not remainder:
+        return {}, ["artifact_slug"]
+    return {"artifact_slug": remainder.split()[0]}, []
+
+
+def _parse_declare_release_prompt(prompt: str) -> tuple[dict[str, Any], list[str]]:
+    text = str(prompt or "").strip()
+    pattern = re.compile(
+        r"^declare\s+release(?:\s+for)?\s+(?P<artifact>[^\s]+)\s+commit\s+(?P<commit>[0-9a-fA-F]{7,40})\s+revision\s+(?P<revision>[^\s]+)\s+digest\s+(?P<digest>sha256:[0-9a-fA-F]{64})\s*$",
+        re.IGNORECASE,
+    )
+    match = pattern.match(text)
+    if not match:
+        return {}, ["artifact_slug", "target_commit_sha", "revision_id", "image_digest"]
+    artifact_slug = str(match.group("artifact") or "").strip()
+    commit = str(match.group("commit") or "").strip().lower()
+    revision = str(match.group("revision") or "").strip()
+    digest = str(match.group("digest") or "").strip().lower()
+    if not artifact_slug or not commit or not revision or not digest:
+        return {}, ["artifact_slug", "target_commit_sha", "revision_id", "image_digest"]
+    return {
+        "artifact_slug": artifact_slug,
+        "target_commit_sha": commit,
+        "revision_id": revision,
+        "image_digest": digest,
+    }, []
+
+
+def _render_path_template(path: str, values: dict[str, Any]) -> str:
+    rendered = str(path or "/").strip() or "/"
+    for key, value in values.items():
+        rendered = rendered.replace(f"{{{{{key}}}}}", str(value))
+    return rendered
 
 
 def _completion_response(
@@ -217,6 +283,7 @@ def execute_palette_prompt(
         for key, value in body_map.items()
     }
     normalized_prompt = _normalize_prompt_key(prompt)
+    parsed_tokens: dict[str, Any] = {}
     if command.command_key == "create location" and normalized_prompt.startswith("create location"):
         parsed_payload, missing_fields = _parse_location_create_prompt(prompt)
         if missing_fields:
@@ -247,6 +314,98 @@ def execute_palette_prompt(
             )
         resolved_body.update(parsed_payload)
         resolved_body["workspace_id"] = str(workspace.id)
+    elif command.command_key == "start development effort on artifact" and normalized_prompt.startswith("start development effort on artifact"):
+        parsed_payload, missing_fields = _parse_start_effort_prompt(prompt)
+        if missing_fields:
+            return _completion_response(
+                workspace_id=workspace.id,
+                command_id=command.id,
+                command_key=command.command_key,
+                missing_fields=missing_fields,
+                example="start development effort on artifact xyn-api",
+                context_pack_artifact_ids=[str(pack.id) for pack in context_packs],
+                context_pack_slugs=[str((pack.extra_metadata or {}).get("pack_slug") or pack.name) for pack in context_packs],
+                context_warnings=context_warnings,
+            )
+        parsed_tokens.update(parsed_payload)
+        resolved_body["workspace_id"] = str(workspace.id)
+        resolved_body["artifact_slug"] = str(parsed_payload.get("artifact_slug") or "")
+        resolved_body.setdefault("base_branch", "develop")
+        resolved_body.setdefault("target_branch", "develop")
+    elif command.command_key == "open effort source" and normalized_prompt.startswith("open effort source"):
+        parsed_payload, missing_fields = _parse_effort_id_prompt(prompt, "open effort source")
+        if missing_fields:
+            return _completion_response(
+                workspace_id=workspace.id,
+                command_id=command.id,
+                command_key=command.command_key,
+                missing_fields=missing_fields,
+                example="open effort source <effort_id>",
+                context_pack_artifact_ids=[str(pack.id) for pack in context_packs],
+                context_pack_slugs=[str((pack.extra_metadata or {}).get("pack_slug") or pack.name) for pack in context_packs],
+                context_warnings=context_warnings,
+            )
+        parsed_tokens.update(parsed_payload)
+    elif command.command_key == "promote effort to develop" and normalized_prompt.startswith("promote effort to develop"):
+        parsed_payload, missing_fields = _parse_effort_id_prompt(prompt, "promote effort to develop")
+        if missing_fields:
+            return _completion_response(
+                workspace_id=workspace.id,
+                command_id=command.id,
+                command_key=command.command_key,
+                missing_fields=missing_fields,
+                example="promote effort to develop <effort_id>",
+                context_pack_artifact_ids=[str(pack.id) for pack in context_packs],
+                context_pack_slugs=[str((pack.extra_metadata or {}).get("pack_slug") or pack.name) for pack in context_packs],
+                context_warnings=context_warnings,
+            )
+        parsed_tokens.update(parsed_payload)
+        resolved_body.setdefault("to_branch", "develop")
+    elif command.command_key == "show artifact provenance" and normalized_prompt.startswith("show artifact provenance"):
+        parsed_payload, missing_fields = _parse_provenance_prompt(prompt)
+        if missing_fields:
+            return _completion_response(
+                workspace_id=workspace.id,
+                command_id=command.id,
+                command_key=command.command_key,
+                missing_fields=missing_fields,
+                example="show artifact provenance xyn-api",
+                context_pack_artifact_ids=[str(pack.id) for pack in context_packs],
+                context_pack_slugs=[str((pack.extra_metadata or {}).get("pack_slug") or pack.name) for pack in context_packs],
+                context_warnings=context_warnings,
+            )
+        parsed_tokens.update(parsed_payload)
+    elif command.command_key == "declare release" and normalized_prompt.startswith("declare release"):
+        parsed_payload, missing_fields = _parse_declare_release_prompt(prompt)
+        if missing_fields:
+            return _completion_response(
+                workspace_id=workspace.id,
+                command_id=command.id,
+                command_key=command.command_key,
+                missing_fields=missing_fields,
+                example=(
+                    "declare release xyn-api commit abcdef0123456789 "
+                    "revision rev-1 digest sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                ),
+                context_pack_artifact_ids=[str(pack.id) for pack in context_packs],
+                context_pack_slugs=[str((pack.extra_metadata or {}).get("pack_slug") or pack.name) for pack in context_packs],
+                context_warnings=context_warnings,
+            )
+        parsed_tokens.update(parsed_payload)
+        artifact_slug = str(parsed_payload.get("artifact_slug") or "")
+        revision_id = str(parsed_payload.get("revision_id") or "")
+        image_digest = str(parsed_payload.get("image_digest") or "")
+        resolved_body = {
+            "workspace_id": str(workspace.id),
+            "artifact_slug": artifact_slug,
+            "target_commit_sha": str(parsed_payload.get("target_commit_sha") or ""),
+            "artifact_revision_map": {artifact_slug: revision_id},
+            "image_digest_map": {artifact_slug: image_digest},
+            "pipeline_provider": "github_actions",
+        }
+
+    template_values = {**resolved_query, **resolved_body, **parsed_tokens}
+    path = _render_path_template(path, template_values)
 
     if deployment is not None and str(base_url).rstrip("/") == str(deployment.get("app_url") or "").rstrip("/"):
         code, body, raw = deployment_request_json(

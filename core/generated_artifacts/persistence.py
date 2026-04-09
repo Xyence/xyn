@@ -8,6 +8,7 @@ from typing import Any, Callable, Optional
 from sqlalchemy.orm import Session
 
 from core.generated_artifacts.lifecycle import STAGE_PROMOTED
+from core.artifact_provenance import merge_provenance_metadata
 from core.models import Artifact
 
 
@@ -15,7 +16,7 @@ PersistJsonArtifactFn = Callable[..., str]
 
 
 def _base_metadata(*, workspace_id: uuid.UUID, metadata: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-    return {"workspace_id": str(workspace_id), **(metadata or {})}
+    return merge_provenance_metadata({"workspace_id": str(workspace_id), **(metadata or {})})
 
 
 def persist_generated_json_artifact(

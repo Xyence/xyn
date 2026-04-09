@@ -48,6 +48,14 @@ TOOL_NAMES = [
     "approve_release_target_execution_step",
     "run_release_target_execution_step",
     "get_release_target_execution_step_history",
+    "create_change_effort",
+    "get_change_effort",
+    "resolve_effort_source",
+    "allocate_effort_branch",
+    "allocate_effort_worktree",
+    "promote_change_effort",
+    "declare_release",
+    "get_artifact_provenance",
 ]
 
 
@@ -293,6 +301,30 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
             limit=limit,
         )
 
+    def create_change_effort(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return adapter.create_change_effort(payload=payload)
+
+    def get_change_effort(effort_id: str) -> Dict[str, Any]:
+        return adapter.get_change_effort(effort_id=effort_id)
+
+    def resolve_effort_source(effort_id: str) -> Dict[str, Any]:
+        return adapter.resolve_effort_source(effort_id=effort_id)
+
+    def allocate_effort_branch(effort_id: str, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return adapter.allocate_effort_branch(effort_id=effort_id, payload=payload)
+
+    def allocate_effort_worktree(effort_id: str, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return adapter.allocate_effort_worktree(effort_id=effort_id, payload=payload)
+
+    def promote_change_effort(effort_id: str, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return adapter.promote_change_effort(effort_id=effort_id, payload=payload)
+
+    def declare_release(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return adapter.declare_release(payload=payload)
+
+    def get_artifact_provenance(artifact_slug: str, workspace_id: str) -> Dict[str, Any]:
+        return adapter.get_artifact_provenance(artifact_slug=artifact_slug, workspace_id=workspace_id)
+
     _register_tool(
         mcp_server,
         name="list_blueprints",
@@ -467,6 +499,54 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
         name="get_release_target_execution_step_history",
         description="Read execution-step evidence history for a release target.",
         fn=get_release_target_execution_step_history,
+    )
+    _register_tool(
+        mcp_server,
+        name="create_change_effort",
+        description="Create a change effort for branch/worktree-scoped artifact development.",
+        fn=create_change_effort,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_change_effort",
+        description="Get one change effort by id.",
+        fn=get_change_effort,
+    )
+    _register_tool(
+        mcp_server,
+        name="resolve_effort_source",
+        description="Resolve artifact provenance-backed source metadata into a change effort.",
+        fn=resolve_effort_source,
+    )
+    _register_tool(
+        mcp_server,
+        name="allocate_effort_branch",
+        description="Allocate deterministic branch metadata for a change effort.",
+        fn=allocate_effort_branch,
+    )
+    _register_tool(
+        mcp_server,
+        name="allocate_effort_worktree",
+        description="Allocate deterministic isolated worktree metadata for a change effort.",
+        fn=allocate_effort_worktree,
+    )
+    _register_tool(
+        mcp_server,
+        name="promote_change_effort",
+        description="Create promotion intent/preflight metadata for effort branch promotion to develop.",
+        fn=promote_change_effort,
+    )
+    _register_tool(
+        mcp_server,
+        name="declare_release",
+        description="Declare an explicit release binding commit, artifact revisions, and image digests.",
+        fn=declare_release,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_artifact_provenance",
+        description="Read artifact provenance timeline across efforts, promotions, and release declarations.",
+        fn=get_artifact_provenance,
     )
 
 
