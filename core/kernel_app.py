@@ -41,6 +41,7 @@ from core.env_config import export_runtime_env, load_seed_config
 from core.kernel_loader import load_workspace_artifacts_into_app
 from core.context_packs import ensure_runtime_context_pack_artifacts
 from core.api.artifact_registries import router as artifact_registry_router
+from core.repo_resolver import RepoResolutionBlocked, validate_runtime_repo_map_targets
 from core.workspaces import ensure_default_workspace
 from core.runtime_loop import RuntimeWorkerLoopHandle, start_runtime_worker_loop, stop_runtime_worker_loop
 
@@ -72,6 +73,27 @@ logger = logging.getLogger(__name__)
 _STARTUP_TS = time.time()
 
 
+def _validate_runtime_repo_map_startup() -> None:
+    mode = str(os.getenv("XYN_RUNTIME_REPO_MAP_VALIDATION", "warn")).strip().lower() or "warn"
+    if mode in {"off", "false", "0", "disabled"}:
+        return
+    should_fail = mode in {"fail", "strict", "error"}
+    try:
+        warnings = validate_runtime_repo_map_targets()
+    except RepoResolutionBlocked as exc:
+        message = f"Runtime repo map configuration is invalid: {exc}"
+        if should_fail:
+            raise RuntimeError(message) from exc
+        logger.warning(message)
+        return
+    if not warnings:
+        return
+    for warning in warnings:
+        logger.warning(warning)
+    if should_fail:
+        raise RuntimeError("Runtime repo map validation failed; missing repo-map targets.")
+
+
 async def _bootstrap_ai_agent_with_retry(*, max_attempts: int = 6, initial_delay_seconds: float = 0.5) -> None:
     """Retry AI bootstrap after server startup to avoid localhost bind races."""
     delay = max(0.1, float(initial_delay_seconds))
@@ -101,6 +123,7 @@ async def _lifespan(app: FastAPI):
         config.ai_model,
         config.ai_enabled,
     )
+    _validate_runtime_repo_map_startup()
     logger.info("starting xyn-seed kernel v%s", __version__)
     init_db()
     db = SessionLocal()
