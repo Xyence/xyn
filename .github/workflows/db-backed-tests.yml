@@ -61,8 +61,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
+          if ! command -v psql >/dev/null 2>&1; then
+            # github-hosted ubuntu images may include Microsoft apt repos that intermittently
+            # return 403 in restricted environments; remove them before apt-get update.
+            sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
+          fi
 
       - name: Bootstrap DB schema for tests
         run: |
