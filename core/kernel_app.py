@@ -41,7 +41,7 @@ from core.env_config import export_runtime_env, load_seed_config
 from core.kernel_loader import load_workspace_artifacts_into_app
 from core.context_packs import ensure_runtime_context_pack_artifacts
 from core.api.artifact_registries import router as artifact_registry_router
-from core.repo_resolver import RepoResolutionBlocked, validate_runtime_repo_map_targets
+from core.repo_resolver import RepoResolutionBlocked, inspect_runtime_repo_map_targets, validate_runtime_repo_map_targets
 from core.workspaces import ensure_default_workspace
 from core.runtime_loop import RuntimeWorkerLoopHandle, start_runtime_worker_loop, stop_runtime_worker_loop
 
@@ -86,6 +86,22 @@ def _validate_runtime_repo_map_startup() -> None:
             raise RuntimeError(message) from exc
         logger.warning(message)
         return
+    try:
+        target_rows = inspect_runtime_repo_map_targets()
+    except RepoResolutionBlocked:
+        target_rows = []
+    for row in target_rows:
+        logger.info(
+            "runtime_repo_map target repo=%s path=%s exists=%s is_dir=%s is_empty=%s has_git=%s readable=%s valid=%s",
+            row.get("repo_key"),
+            row.get("path"),
+            row.get("exists"),
+            row.get("is_dir"),
+            row.get("is_empty"),
+            row.get("has_git"),
+            row.get("readable"),
+            row.get("valid"),
+        )
     if not warnings:
         return
     for warning in warnings:

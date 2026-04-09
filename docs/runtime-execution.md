@@ -142,7 +142,9 @@ Manual validation:
   - `xyn -> /workspace/xyn`
   - `xyn-platform -> /workspace/xyn-platform`
 - The map can be overridden with `XYN_RUNTIME_REPO_MAP`
-- The xyn-platform mount source can be overridden with `XYN_PLATFORM_HOST_SRC_PATH` (host path -> `/workspace/xyn-platform`)
+- `XYN_RUNTIME_REPO_MAP` supports either JSON object format or comma-separated pairs:
+  - `{"xyn":["/workspace/xyn"],"xyn-platform":["/workspace/xyn-platform"]}`
+  - `xyn:/workspace/xyn,xyn-platform:/workspace/xyn-platform`
 - Startup validation mode is controlled by `XYN_RUNTIME_REPO_MAP_VALIDATION`:
   - `warn` (default): log warnings when configured targets are missing
   - `fail`: abort startup when configured targets are missing or map JSON is invalid
@@ -156,10 +158,17 @@ Manual validation:
 
 Runtime deployment requirement for source review:
 
-- Ensure your deployment mounts the source checkout/mirror paths referenced by `XYN_RUNTIME_REPO_MAP`.
-- Default expected mounts inside `xyn-core`:
-  - `/workspace/xyn`
-  - `/workspace/xyn-platform`
+- Non-source-backed (safe default): run `compose.yml` only. Runtime will continue using packaged fallback when source roots are unavailable.
+- Source-backed mode: set `XYN_PLATFORM_HOST_SRC_PATH` and include the source-backed compose overlay:
+  - `docker compose -f compose.yml -f compose.source-backed.yml up -d`
+- This mounts `${XYN_PLATFORM_HOST_SRC_PATH}` -> `/workspace/xyn-platform` inside `xyn-core`.
+- Validate current runtime visibility without changing behavior:
+  - `python scripts/check_runtime_repo_map.py`
+
+Observability:
+
+- Startup logs emit per-target repo-map diagnostics (`exists`, `is_dir`, `is_empty`, `has_git`, `readable`, `valid`).
+- Artifact source review endpoints log explicit warnings when fallback to packaged files is used, including `artifact_slug` and affected `repo_key`.
 
 Failure semantics:
 

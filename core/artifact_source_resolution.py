@@ -10,6 +10,7 @@ from typing import Any, Iterable, Optional
 
 from core.artifact_code_review import detect_language
 from core.artifact_provenance import extract_provenance_metadata, merge_provenance_metadata
+from core.repo_resolver import RepoResolutionBlocked, runtime_repo_map
 
 
 _DEFAULT_EXCLUDE_DIRS = {
@@ -402,20 +403,12 @@ def _repo_key_from_url(repo_url: str) -> str:
 
 def _provenance_repo_root_candidates(repo_key: str) -> list[tuple[Path, str]]:
     out: list[tuple[Path, str]] = []
-    runtime_map_raw = str(os.getenv("XYN_RUNTIME_REPO_MAP", "")).strip()
-    if runtime_map_raw:
-        try:
-            parsed = json.loads(runtime_map_raw)
-            if isinstance(parsed, dict):
-                value = parsed.get(repo_key)
-                if isinstance(value, str):
-                    out.append((Path(value).expanduser(), "runtime_repo_map"))
-                elif isinstance(value, list):
-                    for item in value:
-                        if isinstance(item, str) and item.strip():
-                            out.append((Path(item).expanduser(), "runtime_repo_map"))
-        except Exception:
-            pass
+    try:
+        parsed_map = runtime_repo_map()
+    except RepoResolutionBlocked:
+        parsed_map = {}
+    for candidate in parsed_map.get(repo_key, []):
+        out.append((Path(candidate).expanduser(), "runtime_repo_map"))
     for base in _base_roots():
         out.extend(
             [
