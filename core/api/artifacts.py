@@ -19,6 +19,10 @@ from core.artifact_code_review import (
     read_file_chunk,
     search_files,
 )
+from core.artifact_source_resolution import (
+    parse_packaged_artifact_metadata,
+    resolve_artifact_source,
+)
 from core.access_control import (
     CAP_ARTIFACTS_READ,
     CAP_CAMPAIGNS_MANAGE,
@@ -258,6 +262,27 @@ async def _artifact_bytes(row: models.Artifact) -> bytes:
     raise HTTPException(status_code=404, detail="Artifact content not found")
 
 
+def _resolved_artifact_source_payload(row: models.Artifact, payload: bytes) -> dict[str, Any]:
+    packaged_files = parse_artifact_source_files(artifact_name=row.name, artifact_bytes=payload)
+    row_metadata = row.extra_metadata if isinstance(row.extra_metadata, dict) else {}
+    packaged_metadata = parse_packaged_artifact_metadata(packaged_files)
+    merged_metadata = {**row_metadata, **packaged_metadata}
+    resolved = resolve_artifact_source(
+        artifact_slug=_artifact_slug(row),
+        artifact_id=str(row.id),
+        source_ref_type=str(merged_metadata.get("source_ref_type") or ""),
+        source_ref_id=str(merged_metadata.get("source_ref_id") or ""),
+        metadata=merged_metadata,
+        packaged_files=packaged_files,
+    )
+    return {
+        "files": resolved.files,
+        "source_mode": resolved.source_mode,
+        "resolved_source_roots": resolved.resolved_source_roots,
+        "warnings": resolved.warnings,
+    }
+
+
 def _normalize_extensions(raw: Optional[str]) -> list[str]:
     if not raw:
         return []
@@ -280,11 +305,15 @@ async def get_artifact_source_tree(
 ):
     row = _resolve_artifact(db, artifact_id=artifact_id, artifact_slug=artifact_slug)
     payload = await _artifact_bytes(row)
-    files = parse_artifact_source_files(artifact_name=row.name, artifact_bytes=payload)
+    resolved = _resolved_artifact_source_payload(row, payload)
+    files = resolved["files"] if isinstance(resolved.get("files"), dict) else {}
     index_rows = build_source_index(files, include_line_counts=bool(include_line_counts))
     tree = build_hierarchical_tree(index_rows)
     return {
         "artifact": _artifact_identity_payload(row),
+        "source_mode": resolved.get("source_mode") or "packaged_fallback",
+        "resolved_source_roots": resolved.get("resolved_source_roots") or [],
+        "warnings": resolved.get("warnings") or [],
         "file_count": len(index_rows),
         "tree": tree,
         "files": index_rows,
@@ -303,7 +332,8 @@ async def read_artifact_source_file(
 ):
     row = _resolve_artifact(db, artifact_id=artifact_id, artifact_slug=artifact_slug)
     payload = await _artifact_bytes(row)
-    files = parse_artifact_source_files(artifact_name=row.name, artifact_bytes=payload)
+    resolved = _resolved_artifact_source_payload(row, payload)
+    files = resolved["files"] if isinstance(resolved.get("files"), dict) else {}
     try:
         chunk = read_file_chunk(files=files, path=path, start_line=start_line, end_line=end_line)
     except KeyError as exc:
@@ -312,6 +342,9 @@ async def read_artifact_source_file(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "artifact": _artifact_identity_payload(row),
+        "source_mode": resolved.get("source_mode") or "packaged_fallback",
+        "resolved_source_roots": resolved.get("resolved_source_roots") or [],
+        "warnings": resolved.get("warnings") or [],
         **chunk,
     }
 
@@ -331,7 +364,8 @@ async def search_artifact_source(
 ):
     row = _resolve_artifact(db, artifact_id=artifact_id, artifact_slug=artifact_slug)
     payload = await _artifact_bytes(row)
-    files = parse_artifact_source_files(artifact_name=row.name, artifact_bytes=payload)
+    resolved = _resolved_artifact_source_payload(row, payload)
+    files = resolved["files"] if isinstance(resolved.get("files"), dict) else {}
     try:
         results = search_files(
             files=files,
@@ -346,6 +380,9 @@ async def search_artifact_source(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "artifact": _artifact_identity_payload(row),
+        "source_mode": resolved.get("source_mode") or "packaged_fallback",
+        "resolved_source_roots": resolved.get("resolved_source_roots") or [],
+        "warnings": resolved.get("warnings") or [],
         **results,
     }
 
@@ -360,13 +397,17 @@ async def analyze_artifact_codebase(
 ):
     row = _resolve_artifact(db, artifact_id=artifact_id, artifact_slug=artifact_slug)
     payload = await _artifact_bytes(row)
-    files = parse_artifact_source_files(artifact_name=row.name, artifact_bytes=payload)
+    resolved = _resolved_artifact_source_payload(row, payload)
+    files = resolved["files"] if isinstance(resolved.get("files"), dict) else {}
     resolved_mode = str(mode or "general").strip().lower() or "general"
     if resolved_mode not in {"general", "python_api"}:
         raise HTTPException(status_code=400, detail="Unsupported analysis mode")
     analysis = analyze_codebase(files, mode=resolved_mode)
     return {
         "artifact": _artifact_identity_payload(row),
+        "source_mode": resolved.get("source_mode") or "packaged_fallback",
+        "resolved_source_roots": resolved.get("resolved_source_roots") or [],
+        "warnings": resolved.get("warnings") or [],
         "analysis_version": "mvp.v1",
         **analysis,
     }
@@ -381,10 +422,14 @@ async def analyze_python_api_artifact(
 ):
     row = _resolve_artifact(db, artifact_id=artifact_id, artifact_slug=artifact_slug)
     payload = await _artifact_bytes(row)
-    files = parse_artifact_source_files(artifact_name=row.name, artifact_bytes=payload)
+    resolved = _resolved_artifact_source_payload(row, payload)
+    files = resolved["files"] if isinstance(resolved.get("files"), dict) else {}
     analysis = analyze_codebase(files, mode="python_api")
     return {
         "artifact": _artifact_identity_payload(row),
+        "source_mode": resolved.get("source_mode") or "packaged_fallback",
+        "resolved_source_roots": resolved.get("resolved_source_roots") or [],
+        "warnings": resolved.get("warnings") or [],
         "analysis_version": "mvp.v1",
         **analysis,
     }
@@ -400,10 +445,14 @@ async def get_artifact_module_metrics(
 ):
     row = _resolve_artifact(db, artifact_id=artifact_id, artifact_slug=artifact_slug)
     payload = await _artifact_bytes(row)
-    files = parse_artifact_source_files(artifact_name=row.name, artifact_bytes=payload)
+    resolved = _resolved_artifact_source_payload(row, payload)
+    files = resolved["files"] if isinstance(resolved.get("files"), dict) else {}
     rows = compute_module_metrics(files)
     return {
         "artifact": _artifact_identity_payload(row),
+        "source_mode": resolved.get("source_mode") or "packaged_fallback",
+        "resolved_source_roots": resolved.get("resolved_source_roots") or [],
+        "warnings": resolved.get("warnings") or [],
         "count": len(rows),
         "items": rows[: int(top_n)],
     }

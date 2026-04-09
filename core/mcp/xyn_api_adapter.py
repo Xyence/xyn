@@ -16,6 +16,10 @@ from core.artifact_code_review import (
     read_file_chunk,
     search_files,
 )
+from core.artifact_source_resolution import (
+    parse_packaged_artifact_metadata,
+    resolve_artifact_source,
+)
 
 _REQUEST_BEARER_TOKEN: ContextVar[str] = ContextVar("xyn_mcp_request_bearer_token", default="")
 
@@ -248,32 +252,36 @@ class XynApiAdapter:
             out.append(control_api)
         return out
 
-    def _resolve_artifact_id(self, *, artifact_id: str = "", artifact_slug: str = "") -> str:
+    def _resolve_artifact_record(self, *, artifact_id: str = "", artifact_slug: str = "") -> dict[str, Any]:
         resolved_id = str(artifact_id or "").strip()
-        if resolved_id:
-            return resolved_id
         resolved_slug = str(artifact_slug or "").strip()
-        if not resolved_slug:
-            return ""
+        if not resolved_id and not resolved_slug:
+            return {}
         listing = self.list_artifacts(limit=500, offset=0)
         if not listing.get("ok"):
-            return ""
+            return {}
         body = listing.get("response") if isinstance(listing.get("response"), dict) else {}
         rows = body.get("artifacts") if isinstance(body.get("artifacts"), list) else []
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            if str(row.get("slug") or "").strip() == resolved_slug:
-                return str(row.get("id") or "").strip()
-        return ""
+            row_id = str(row.get("id") or "").strip()
+            row_slug = str(row.get("slug") or "").strip()
+            if resolved_id and row_id == resolved_id:
+                return row
+            if resolved_slug and row_slug == resolved_slug:
+                return row
+        return {}
 
     def _artifact_files_via_export_package(
         self,
         *,
         artifact_id: str = "",
         artifact_slug: str = "",
-    ) -> Optional[tuple[str, dict[str, bytes]]]:
-        resolved_artifact_id = self._resolve_artifact_id(artifact_id=artifact_id, artifact_slug=artifact_slug)
+    ) -> Optional[dict[str, Any]]:
+        artifact_row = self._resolve_artifact_record(artifact_id=artifact_id, artifact_slug=artifact_slug)
+        resolved_artifact_id = str(artifact_row.get("id") or artifact_id or "").strip()
+        resolved_artifact_slug = str(artifact_row.get("slug") or artifact_slug or "").strip()
         if not resolved_artifact_id:
             return None
         export = self._request_bytes(
@@ -287,13 +295,46 @@ class XynApiAdapter:
         payload = export.get("content")
         if not isinstance(payload, (bytes, bytearray)) or not payload:
             return None
-        files = parse_artifact_source_files(
-            artifact_name=str(artifact_slug or resolved_artifact_id),
+        packaged_files = parse_artifact_source_files(
+            artifact_name=str(resolved_artifact_slug or resolved_artifact_id),
             artifact_bytes=bytes(payload),
         )
-        if not files:
+        if not packaged_files:
             return None
-        return (resolved_artifact_id, files)
+        packaged_metadata = parse_packaged_artifact_metadata(packaged_files)
+        if not resolved_artifact_slug:
+            resolved_artifact_slug = str(packaged_metadata.get("slug") or "").strip()
+        artifact_reference = (
+            artifact_row.get("artifact_reference")
+            if isinstance(artifact_row.get("artifact_reference"), dict)
+            else {}
+        )
+        source_ref_type = str(
+            packaged_metadata.get("source_ref_type")
+            or artifact_reference.get("source_ref_type")
+            or ""
+        ).strip()
+        source_ref_id = str(
+            packaged_metadata.get("source_ref_id")
+            or artifact_reference.get("source_ref_id")
+            or ""
+        ).strip()
+        resolved = resolve_artifact_source(
+            artifact_slug=resolved_artifact_slug,
+            artifact_id=resolved_artifact_id,
+            source_ref_type=source_ref_type,
+            source_ref_id=source_ref_id,
+            metadata=packaged_metadata,
+            packaged_files=packaged_files,
+        )
+        return {
+            "artifact_id": resolved_artifact_id,
+            "artifact_slug": resolved_artifact_slug,
+            "files": resolved.files,
+            "source_mode": resolved.source_mode,
+            "resolved_source_roots": resolved.resolved_source_roots,
+            "warnings": resolved.warnings,
+        }
 
     @staticmethod
     def _with_release_target_not_found_hint(result: Dict[str, Any], *, target_id: str) -> Dict[str, Any]:
@@ -662,7 +703,7 @@ class XynApiAdapter:
         if not result.get("ok") and int(result.get("status_code") or 0) == 404:
             resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
             if resolved:
-                resolved_artifact_id, files = resolved
+                files = resolved.get("files") if isinstance(resolved.get("files"), dict) else {}
                 index_rows = build_source_index(files, include_line_counts=bool(include_line_counts))
                 return {
                     "ok": True,
@@ -672,9 +713,12 @@ class XynApiAdapter:
                     "base_url": str(self._config.control_api_base_url).rstrip("/"),
                     "response": {
                         "artifact": {
-                            "id": resolved_artifact_id,
-                            "slug": str(artifact_slug or ""),
+                            "id": str(resolved.get("artifact_id") or artifact_id or ""),
+                            "slug": str(resolved.get("artifact_slug") or artifact_slug or ""),
                         },
+                        "source_mode": str(resolved.get("source_mode") or "packaged_fallback"),
+                        "resolved_source_roots": list(resolved.get("resolved_source_roots") or []),
+                        "warnings": list(resolved.get("warnings") or []),
                         "files": index_rows,
                         "tree": build_hierarchical_tree(index_rows),
                     },
@@ -712,7 +756,7 @@ class XynApiAdapter:
         if not result.get("ok") and int(result.get("status_code") or 0) == 404:
             resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
             if resolved:
-                resolved_artifact_id, files = resolved
+                files = resolved.get("files") if isinstance(resolved.get("files"), dict) else {}
                 try:
                     payload = read_file_chunk(
                         files=files,
@@ -736,7 +780,13 @@ class XynApiAdapter:
                     "path": "/api/v1/artifacts/source-file",
                     "base_url": str(self._config.control_api_base_url).rstrip("/"),
                     "response": {
-                        "artifact": {"id": resolved_artifact_id, "slug": str(artifact_slug or "")},
+                        "artifact": {
+                            "id": str(resolved.get("artifact_id") or artifact_id or ""),
+                            "slug": str(resolved.get("artifact_slug") or artifact_slug or ""),
+                        },
+                        "source_mode": str(resolved.get("source_mode") or "packaged_fallback"),
+                        "resolved_source_roots": list(resolved.get("resolved_source_roots") or []),
+                        "warnings": list(resolved.get("warnings") or []),
                         **payload,
                     },
                 }
@@ -779,7 +829,7 @@ class XynApiAdapter:
         if not result.get("ok") and int(result.get("status_code") or 0) == 404:
             resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
             if resolved:
-                resolved_artifact_id, files = resolved
+                files = resolved.get("files") if isinstance(resolved.get("files"), dict) else {}
                 extensions = [part.strip() for part in str(file_extensions or "").split(",") if part.strip()]
                 try:
                     payload = search_files(
@@ -807,7 +857,13 @@ class XynApiAdapter:
                     "path": "/api/v1/artifacts/source-search",
                     "base_url": str(self._config.control_api_base_url).rstrip("/"),
                     "response": {
-                        "artifact": {"id": resolved_artifact_id, "slug": str(artifact_slug or "")},
+                        "artifact": {
+                            "id": str(resolved.get("artifact_id") or artifact_id or ""),
+                            "slug": str(resolved.get("artifact_slug") or artifact_slug or ""),
+                        },
+                        "source_mode": str(resolved.get("source_mode") or "packaged_fallback"),
+                        "resolved_source_roots": list(resolved.get("resolved_source_roots") or []),
+                        "warnings": list(resolved.get("warnings") or []),
                         **payload,
                     },
                 }
@@ -836,7 +892,7 @@ class XynApiAdapter:
         if not result.get("ok") and int(result.get("status_code") or 0) == 404:
             resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
             if resolved:
-                resolved_artifact_id, files = resolved
+                files = resolved.get("files") if isinstance(resolved.get("files"), dict) else {}
                 payload = analyze_codebase(files, mode=params["mode"])
                 return {
                     "ok": True,
@@ -845,7 +901,13 @@ class XynApiAdapter:
                     "path": "/api/v1/artifacts/analyze-codebase",
                     "base_url": str(self._config.control_api_base_url).rstrip("/"),
                     "response": {
-                        "artifact": {"id": resolved_artifact_id, "slug": str(artifact_slug or "")},
+                        "artifact": {
+                            "id": str(resolved.get("artifact_id") or artifact_id or ""),
+                            "slug": str(resolved.get("artifact_slug") or artifact_slug or ""),
+                        },
+                        "source_mode": str(resolved.get("source_mode") or "packaged_fallback"),
+                        "resolved_source_roots": list(resolved.get("resolved_source_roots") or []),
+                        "warnings": list(resolved.get("warnings") or []),
                         **payload,
                     },
                 }
@@ -873,7 +935,7 @@ class XynApiAdapter:
         if not result.get("ok") and int(result.get("status_code") or 0) == 404:
             resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
             if resolved:
-                resolved_artifact_id, files = resolved
+                files = resolved.get("files") if isinstance(resolved.get("files"), dict) else {}
                 payload = analyze_codebase(files, mode="python_api")
                 return {
                     "ok": True,
@@ -882,7 +944,13 @@ class XynApiAdapter:
                     "path": "/api/v1/artifacts/analyze-python-api",
                     "base_url": str(self._config.control_api_base_url).rstrip("/"),
                     "response": {
-                        "artifact": {"id": resolved_artifact_id, "slug": str(artifact_slug or "")},
+                        "artifact": {
+                            "id": str(resolved.get("artifact_id") or artifact_id or ""),
+                            "slug": str(resolved.get("artifact_slug") or artifact_slug or ""),
+                        },
+                        "source_mode": str(resolved.get("source_mode") or "packaged_fallback"),
+                        "resolved_source_roots": list(resolved.get("resolved_source_roots") or []),
+                        "warnings": list(resolved.get("warnings") or []),
                         **payload,
                     },
                 }
@@ -911,7 +979,7 @@ class XynApiAdapter:
         if not result.get("ok") and int(result.get("status_code") or 0) == 404:
             resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
             if resolved:
-                resolved_artifact_id, files = resolved
+                files = resolved.get("files") if isinstance(resolved.get("files"), dict) else {}
                 metrics = compute_module_metrics(files)[: max(1, int(top_n))]
                 return {
                     "ok": True,
@@ -920,7 +988,13 @@ class XynApiAdapter:
                     "path": "/api/v1/artifacts/module-metrics",
                     "base_url": str(self._config.control_api_base_url).rstrip("/"),
                     "response": {
-                        "artifact": {"id": resolved_artifact_id, "slug": str(artifact_slug or "")},
+                        "artifact": {
+                            "id": str(resolved.get("artifact_id") or artifact_id or ""),
+                            "slug": str(resolved.get("artifact_slug") or artifact_slug or ""),
+                        },
+                        "source_mode": str(resolved.get("source_mode") or "packaged_fallback"),
+                        "resolved_source_roots": list(resolved.get("resolved_source_roots") or []),
+                        "warnings": list(resolved.get("warnings") or []),
                         "metrics": metrics,
                         "count": len(metrics),
                     },
