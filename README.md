@@ -99,7 +99,9 @@ pip install -r requirements-mcp.txt
 Set adapter configuration (example):
 
 ```bash
-export XYN_MCP_XYN_API_BASE_URL=http://localhost:8001
+export XYN_MCP_XYN_CONTROL_API_BASE_URL=http://localhost:8001
+# Optional dedicated code-plane upstream for source-tree/search/analyze (and future mutation tools):
+# export XYN_MCP_XYN_CODE_API_BASE_URL=http://localhost:8000
 export XYN_MCP_AUTH_BEARER_TOKEN=...
 # Optional:
 # export XYN_MCP_INTERNAL_TOKEN=...

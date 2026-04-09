@@ -403,6 +403,12 @@ def build_runtime_env() -> dict[str, str]:
     if str(runtime.get("XYN_AUTH_MODE", "")).strip().lower() == "token":
         if not str(runtime.get("XYN_UI_BEARER_TOKEN", "")).strip():
             runtime["XYN_UI_BEARER_TOKEN"] = "xyn-local-bootstrap-token"
+    # Keep MCP OAuth ingress while using a stable internal bearer for MCP->API calls.
+    if str(runtime.get("XYN_MCP_AUTH_MODE", "")).strip().lower() == "oidc":
+        if not str(runtime.get("XYN_UI_BEARER_TOKEN", "")).strip():
+            runtime["XYN_UI_BEARER_TOKEN"] = "xyn-mcp-upstream-token"
+        if not str(runtime.get("XYN_MCP_XYN_API_BEARER_TOKEN", "")).strip():
+            runtime["XYN_MCP_XYN_API_BEARER_TOKEN"] = str(runtime.get("XYN_UI_BEARER_TOKEN", "")).strip()
     if not str(runtime.get("DOCKER_GID", "")).strip():
         sock = Path("/var/run/docker.sock")
         if sock.exists():
@@ -710,6 +716,63 @@ def _seed_health_candidates(seed_url: str) -> list[tuple[str, dict[str, str]]]:
         _add_candidate("localhost", {"Host": host_header})
         _add_candidate("127.0.0.1", {"Host": host_header})
     return candidates
+
+
+def _build_default_mcp_url(runtime: dict[str, str]) -> str:
+    scheme = "https" if _as_bool(runtime.get("XYN_TRAEFIK_ENABLE_TLS", "false")) else "http"
+    host = str(runtime.get("XYN_MCP_HOST", "mcp.localhost")).strip() or "mcp.localhost"
+    if scheme == "https":
+        raw_port = str(runtime.get("XYN_TRAEFIK_WEBSECURE_PORT", "443")).strip() or "443"
+        default_port = "443"
+    else:
+        raw_port = str(runtime.get("XYN_TRAEFIK_WEB_PORT", "80")).strip() or "80"
+        default_port = "80"
+    if raw_port == default_port:
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{raw_port}"
+
+
+def _mcp_health_candidates(mcp_url: str) -> list[tuple[str, dict[str, str]]]:
+    parsed = urlparse(mcp_url)
+    scheme = parsed.scheme or "http"
+    host = parsed.hostname or "mcp.localhost"
+    port = parsed.port
+    netloc = host if port is None else f"{host}:{port}"
+    path = "/healthz"
+    candidates: list[tuple[str, dict[str, str]]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def _add_candidate(target_host: str, headers: dict[str, str]) -> None:
+        candidate_netloc = target_host if port is None else f"{target_host}:{port}"
+        key = (scheme, candidate_netloc, path)
+        if key in seen:
+            return
+        seen.add(key)
+        url = urlunparse((scheme, candidate_netloc, path, "", "", ""))
+        candidates.append((url, headers))
+
+    _add_candidate(host, {})
+    if host.endswith(".localhost"):
+        host_header = netloc
+        _add_candidate("localhost", {"Host": host_header})
+        _add_candidate("127.0.0.1", {"Host": host_header})
+    return candidates
+
+
+def _wait_for_mcp_health(mcp_url: str, timeout_seconds: int = 90) -> bool:
+    deadline = time.time() + timeout_seconds
+    candidates = _mcp_health_candidates(mcp_url)
+    while time.time() < deadline:
+        for health_url, headers in candidates:
+            try:
+                req = Request(health_url, method="GET", headers=headers)
+                with urlopen(req, timeout=5) as response:
+                    if response.status == 200:
+                        return True
+            except Exception:
+                continue
+        time.sleep(2)
+    return False
 
 
 def _wait_for_seed_health(seed_url: str, timeout_seconds: int = 120, show_progress: bool = False) -> bool:
@@ -1458,6 +1521,27 @@ def status(seed_url: str) -> int:
     return 0
 
 
+def reload_mcp(env: dict[str, str], *, force_recreate: bool = True, build: bool = False) -> int:
+    mcp_url = _build_default_mcp_url(env)
+    print_info(f"Reloading MCP service for host {mcp_url} ...")
+    args = ["docker", "compose", "--profile", "mcp", "up", "-d"]
+    if build:
+        args.append("--build")
+    if force_recreate:
+        args.append("--force-recreate")
+    args.append("mcp")
+    result = subprocess.run(args, check=False, env=env)
+    if result.returncode != 0:
+        print_error("Failed to reload MCP service")
+        return 2
+    print_info("Waiting for MCP health...")
+    if _wait_for_mcp_health(mcp_url, timeout_seconds=120):
+        print_success(f"MCP is healthy at {mcp_url}/healthz")
+        return 0
+    print_error(f"MCP did not become healthy at {mcp_url}/healthz")
+    return 3
+
+
 def apply_release_plan(path: str) -> int:
     plan_path = Path(path)
     if not plan_path.exists():
@@ -1530,6 +1614,10 @@ def main() -> None:
         sys.exit(0)
     if cmd == "status":
         sys.exit(status(seed_url))
+    if cmd == "mcp-reload":
+        force_recreate = "--no-force-recreate" not in sys.argv
+        build = "--build" in sys.argv
+        sys.exit(reload_mcp(env, force_recreate=force_recreate, build=build))
     if cmd == "freshness":
         sys.exit(freshness_check(env))
     if cmd == "apply":
@@ -1620,6 +1708,7 @@ def main() -> None:
         print("  ./xynctl quickstart [--force] [--name <name>]    # alias for start --provision")
         print("  ./xynctl provision local [--force] [--reset-state] [--name <name>] [--job-prompt <text>] [--repo-ref <path>]")
         print("  ./xynctl status")
+        print("  ./xynctl mcp-reload [--build] [--no-force-recreate]")
         print("  ./xynctl freshness        # verify running local/sibling ui/api containers match current xyn-platform source")
         print("  ./xynctl stop")
         print("  ./xynctl logs [service]")

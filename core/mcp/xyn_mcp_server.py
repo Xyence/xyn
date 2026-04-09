@@ -10,7 +10,12 @@ from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, Response
 
-from core.mcp.xyn_api_adapter import XynApiAdapter, XynApiAdapterConfig
+from core.mcp.xyn_api_adapter import (
+    XynApiAdapter,
+    XynApiAdapterConfig,
+    reset_request_bearer_token,
+    set_request_bearer_token,
+)
 
 
 TOOL_NAMES = [
@@ -492,7 +497,9 @@ def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
                 "service": "xyn-mcp-adapter",
                 "tool_count": len(TOOL_NAMES),
                 "tools": TOOL_NAMES,
-                "xyn_api_base_url": configured_adapter.config.api_base_url,
+                "xyn_control_api_base_url": configured_adapter.config.control_api_base_url,
+                "xyn_code_api_base_url": configured_adapter.config.code_api_base_url
+                or configured_adapter.config.control_api_base_url,
                 "auth": {
                     "has_bearer_token": bool(configured_adapter.config.bearer_token),
                     "has_internal_token": bool(configured_adapter.config.internal_token),
@@ -607,16 +614,27 @@ def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
         token = _extract_bearer_token(request.headers.get("Authorization", ""))
         if not token:
             return _unauthorized(request, "Missing Authorization: Bearer <token> header")
+        token_ctx = None
         if auth_config.mode == "token":
             if not auth_config.bearer_token:
                 return _unauthorized(request, "MCP auth token mode is enabled but XYN_MCP_AUTH_BEARER_TOKEN is not configured")
             if not secrets.compare_digest(token, auth_config.bearer_token):
                 return _unauthorized(request, "Invalid bearer token")
-            return await call_next(request)
+            token_ctx = set_request_bearer_token(token)
+            try:
+                return await call_next(request)
+            finally:
+                if token_ctx is not None:
+                    reset_request_bearer_token(token_ctx)
         ok, message = await _validate_oidc_bearer(token)
         if not ok:
             return _unauthorized(request, message)
-        return await call_next(request)
+        token_ctx = set_request_bearer_token(token)
+        try:
+            return await call_next(request)
+        finally:
+            if token_ctx is not None:
+                reset_request_bearer_token(token_ctx)
     app.add_middleware(BaseHTTPMiddleware, dispatch=_mcp_auth_guard)
 
     # Add diagnostics route directly on the same MCP Starlette app so lifespan/task-group init stays intact.

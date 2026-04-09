@@ -161,7 +161,8 @@ Compatibility aliases still exported for current local flows:
 
 Required MCP env:
 
-- `XYN_MCP_XYN_API_BASE_URL` (upstream Xyn API base URL; default `http://xyn-local-api:8000`)
+- `XYN_MCP_XYN_CONTROL_API_BASE_URL` (control-plane upstream base URL; default `http://xyn-local-api:8000`)
+- `XYN_MCP_XYN_CODE_API_BASE_URL` (code-plane upstream base URL; when set, source/code tools prefer this upstream before falling back to `XYN_MCP_XYN_CONTROL_API_BASE_URL`)
 - `XYN_MCP_PORT` (default `8011`)
 - `XYN_MCP_BIND_HOST` (default `0.0.0.0`)
 
