@@ -234,6 +234,70 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(kwargs["params"]["mode"], "python_api")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_create_change_effort_routes_to_api_v1(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"change_effort": {"id": "eff-1"}}
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.create_change_effort(payload={"workspace_id": "w1", "artifact_slug": "xyn-api"})
+        self.assertTrue(result["ok"])
+        kwargs = mock_request.call_args.kwargs
+        self.assertEqual(kwargs["method"], "POST")
+        self.assertEqual(kwargs["url"], "http://xyn.local:8001/api/v1/change-efforts")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_promote_change_effort_routes_to_api_v1(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"promotion": {"id": "p1"}}
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.promote_change_effort(effort_id="eff-1", payload={"to_branch": "develop"})
+        self.assertTrue(result["ok"])
+        kwargs = mock_request.call_args.kwargs
+        self.assertEqual(kwargs["method"], "POST")
+        self.assertEqual(kwargs["url"], "http://xyn.local:8001/api/v1/change-efforts/eff-1/promote")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_get_artifact_provenance_routes_with_workspace_query(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"artifact_slug": "xyn-api"}
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.get_artifact_provenance(artifact_slug="xyn-api", workspace_id="w1")
+        self.assertTrue(result["ok"])
+        kwargs = mock_request.call_args.kwargs
+        self.assertEqual(kwargs["method"], "GET")
+        self.assertEqual(kwargs["url"], "http://xyn.local:8001/api/v1/provenance/xyn-api")
+        self.assertEqual(kwargs["params"], {"workspace_id": "w1"})
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_list_artifacts_accepts_api_v1_items_shape(self, mock_request: mock.Mock) -> None:
         response = mock.Mock()
         response.status_code = 200
@@ -362,6 +426,36 @@ class XynMcpAdapterTests(TestCase):
         create_result = create_tool(payload={"name": "xyn-sibling"})
         adapter.create_release_target.assert_called_once_with(payload={"name": "xyn-sibling"})
         self.assertTrue(create_result["ok"])
+
+    def test_change_effort_and_release_tools_call_underlying_adapter(self) -> None:
+        adapter = mock.Mock()
+        adapter.create_change_effort.return_value = {"ok": True, "status_code": 200, "response": {"change_effort": {"id": "eff-1"}}}
+        adapter.get_change_effort.return_value = {"ok": True, "status_code": 200, "response": {"change_effort": {"id": "eff-1"}}}
+        adapter.resolve_effort_source.return_value = {"ok": True, "status_code": 200, "response": {"source": {}}}
+        adapter.allocate_effort_branch.return_value = {"ok": True, "status_code": 200, "response": {"change_effort": {"work_branch": "xyn/xyn-api/e1"}}}
+        adapter.allocate_effort_worktree.return_value = {"ok": True, "status_code": 200, "response": {"change_effort": {"worktree_path": "/tmp/e1"}}}
+        adapter.promote_change_effort.return_value = {"ok": True, "status_code": 200, "response": {"promotion": {"id": "p1"}}}
+        adapter.declare_release.return_value = {"ok": True, "status_code": 200, "response": {"release": {"id": "r1"}}}
+        adapter.get_artifact_provenance.return_value = {"ok": True, "status_code": 200, "response": {"artifact_slug": "xyn-api"}}
+        server = FakeMcpServer()
+        register_xyn_tools(server, adapter)
+
+        server.tools["create_change_effort"]["fn"](payload={"workspace_id": "w1", "artifact_slug": "xyn-api"})
+        adapter.create_change_effort.assert_called_once_with(payload={"workspace_id": "w1", "artifact_slug": "xyn-api"})
+        server.tools["get_change_effort"]["fn"](effort_id="eff-1")
+        adapter.get_change_effort.assert_called_once_with(effort_id="eff-1")
+        server.tools["resolve_effort_source"]["fn"](effort_id="eff-1")
+        adapter.resolve_effort_source.assert_called_once_with(effort_id="eff-1")
+        server.tools["allocate_effort_branch"]["fn"](effort_id="eff-1", payload={"base_branch": "develop"})
+        adapter.allocate_effort_branch.assert_called_once_with(effort_id="eff-1", payload={"base_branch": "develop"})
+        server.tools["allocate_effort_worktree"]["fn"](effort_id="eff-1", payload={"root_path": "/tmp"})
+        adapter.allocate_effort_worktree.assert_called_once_with(effort_id="eff-1", payload={"root_path": "/tmp"})
+        server.tools["promote_change_effort"]["fn"](effort_id="eff-1", payload={"to_branch": "develop"})
+        adapter.promote_change_effort.assert_called_once_with(effort_id="eff-1", payload={"to_branch": "develop"})
+        server.tools["declare_release"]["fn"](payload={"workspace_id": "w1"})
+        adapter.declare_release.assert_called_once_with(payload={"workspace_id": "w1"})
+        server.tools["get_artifact_provenance"]["fn"](artifact_slug="xyn-api", workspace_id="w1")
+        adapter.get_artifact_provenance.assert_called_once_with(artifact_slug="xyn-api", workspace_id="w1")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_passes_base_url_auth_and_path(self, mock_request: mock.Mock) -> None:

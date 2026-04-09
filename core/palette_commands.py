@@ -142,6 +142,82 @@ def ensure_default_palette_commands(db: Session) -> None:
                 },
             },
         ),
+        (
+            "start development effort on artifact",
+            {
+                "base_url": "$xyn.control_api_url",
+                "method": "POST",
+                "path": "/api/v1/change-efforts",
+                "body_map": {
+                    "workspace_id": "$workspace_id",
+                    "artifact_slug": "$parsed.artifact_slug",
+                    "base_branch": "develop",
+                    "target_branch": "develop",
+                },
+                "response_adapter": {
+                    "kind": "table",
+                    "columns": ["id", "artifact_slug", "base_branch", "work_branch", "status"],
+                    "text_template": "Created development effort {{id}} for {{artifact_slug}}",
+                },
+            },
+        ),
+        (
+            "open effort source",
+            {
+                "base_url": "$xyn.control_api_url",
+                "method": "POST",
+                "path": "/api/v1/change-efforts/{{effort_id}}/resolve-source",
+                "response_adapter": {
+                    "kind": "table",
+                    "columns": ["id", "artifact_slug", "repo_key", "repo_subpath", "status"],
+                    "text_template": "Resolved effort source for {{id}}",
+                },
+            },
+        ),
+        (
+            "promote effort to develop",
+            {
+                "base_url": "$xyn.control_api_url",
+                "method": "POST",
+                "path": "/api/v1/change-efforts/{{effort_id}}/promote",
+                "body_map": {
+                    "to_branch": "develop",
+                    "strategy": "merge_commit",
+                },
+                "response_adapter": {
+                    "kind": "table",
+                    "columns": ["id", "status", "target_branch", "work_branch"],
+                    "text_template": "Promotion request submitted for effort {{id}}",
+                },
+            },
+        ),
+        (
+            "declare release",
+            {
+                "base_url": "$xyn.control_api_url",
+                "method": "POST",
+                "path": "/api/v1/releases/declare",
+                "response_adapter": {
+                    "kind": "table",
+                    "columns": ["id", "artifact_slug", "target_commit_sha", "pipeline_provider", "status"],
+                    "text_template": "Declared release {{id}} for {{artifact_slug}}",
+                },
+            },
+        ),
+        (
+            "show artifact provenance",
+            {
+                "base_url": "$xyn.control_api_url",
+                "method": "GET",
+                "path": "/api/v1/provenance/{{artifact_slug}}",
+                "query_map": {"workspace_id": "$workspace_id"},
+                "response_adapter": {
+                    "kind": "table",
+                    "columns": ["artifact_slug", "workspace_id"],
+                    "text_template": "Provenance loaded for {{artifact_slug}}",
+                },
+            },
+        ),
     ]
     changed = False
     for key, config in defaults:
@@ -185,6 +261,16 @@ def resolve_palette_command(
         key = "create location"
     elif key.startswith("create device"):
         key = "create device"
+    elif key.startswith("start development effort on artifact"):
+        key = "start development effort on artifact"
+    elif key.startswith("open effort source"):
+        key = "open effort source"
+    elif key.startswith("promote effort to develop"):
+        key = "promote effort to develop"
+    elif key.startswith("declare release"):
+        key = "declare release"
+    elif key.startswith("show artifact provenance"):
+        key = "show artifact provenance"
 
     workspace_match = (
         db.query(PaletteCommand)

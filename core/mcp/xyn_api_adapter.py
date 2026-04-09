@@ -1026,3 +1026,58 @@ class XynApiAdapter:
             path="/xyn/api/blueprints",
             json_payload=dict(payload or {}),
         )
+
+    def create_change_effort(self, *, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self._request(
+            method="POST",
+            path="/api/v1/change-efforts",
+            json_payload=dict(payload or {}),
+        )
+
+    def get_change_effort(self, *, effort_id: str) -> Dict[str, Any]:
+        return self._request(
+            method="GET",
+            path=f"/api/v1/change-efforts/{effort_id}",
+        )
+
+    def resolve_effort_source(self, *, effort_id: str) -> Dict[str, Any]:
+        return self._request(
+            method="POST",
+            path=f"/api/v1/change-efforts/{effort_id}/resolve-source",
+            json_payload={},
+        )
+
+    def allocate_effort_branch(self, *, effort_id: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self._request(
+            method="POST",
+            path=f"/api/v1/change-efforts/{effort_id}/allocate-branch",
+            json_payload=dict(payload or {}),
+        )
+
+    def allocate_effort_worktree(self, *, effort_id: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self._request(
+            method="POST",
+            path=f"/api/v1/change-efforts/{effort_id}/allocate-worktree",
+            json_payload=dict(payload or {}),
+        )
+
+    def promote_change_effort(self, *, effort_id: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self._request(
+            method="POST",
+            path=f"/api/v1/change-efforts/{effort_id}/promote",
+            json_payload=dict(payload or {}),
+        )
+
+    def declare_release(self, *, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self._request(
+            method="POST",
+            path="/api/v1/releases/declare",
+            json_payload=dict(payload or {}),
+        )
+
+    def get_artifact_provenance(self, *, artifact_slug: str, workspace_id: str) -> Dict[str, Any]:
+        return self._request(
+            method="GET",
+            path=f"/api/v1/provenance/{artifact_slug}",
+            params={"workspace_id": str(workspace_id or "").strip()},
+        )
