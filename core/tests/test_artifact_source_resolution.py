@@ -34,6 +34,7 @@ class ArtifactSourceResolutionTests(TestCase):
             )
         self.assertEqual(resolved.source_mode, "resolved_source")
         self.assertEqual(resolved.source_origin, "filesystem_hint")
+        self.assertEqual(resolved.resolution_branch, "filesystem_hint")
         self.assertTrue(resolved.resolved_source_roots)
         self.assertIn("service.py", resolved.files)
         self.assertNotIn("blob.bin", resolved.files)
@@ -46,6 +47,7 @@ class ArtifactSourceResolutionTests(TestCase):
         )
         self.assertEqual(resolved.source_mode, "packaged_fallback")
         self.assertEqual(resolved.source_origin, "packaged_fallback")
+        self.assertEqual(resolved.resolution_branch, "packaged_fallback")
         self.assertEqual(resolved.resolved_source_roots, [])
         self.assertIn("manifest.json", resolved.files)
         self.assertTrue(any("deterministic/provenance" in msg for msg in resolved.warnings))
@@ -75,6 +77,7 @@ class ArtifactSourceResolutionTests(TestCase):
             )
         self.assertEqual(resolved.source_mode, "resolved_source")
         self.assertEqual(resolved.source_origin, "github")
+        self.assertEqual(resolved.resolution_branch, "provenance_backed")
         self.assertIn("xyn_api.py", resolved.files)
         source = resolved.provenance.get("source") if isinstance(resolved.provenance.get("source"), dict) else {}
         self.assertEqual(source.get("repo_key"), "xyn-platform")
@@ -98,6 +101,7 @@ class ArtifactSourceResolutionTests(TestCase):
         )
         self.assertEqual(resolved.source_mode, "packaged_fallback")
         self.assertEqual(resolved.source_origin, "packaged_fallback")
+        self.assertEqual(resolved.resolution_branch, "packaged_fallback")
         self.assertTrue(
             any(
                 "No local mirror/checkout found" in msg
@@ -126,7 +130,47 @@ class ArtifactSourceResolutionTests(TestCase):
                 packaged_files={"manifest.json": b"{}"},
             )
         self.assertEqual(resolved.source_mode, "packaged_fallback")
+        self.assertEqual(resolved.resolution_branch, "packaged_fallback")
         self.assertTrue(any("unsafe monorepo_subpath" in msg for msg in resolved.warnings))
+
+    def test_xyn_api_without_provenance_does_not_silently_resolve_to_core_root(self) -> None:
+        resolved = resolve_artifact_source(
+            artifact_slug="xyn-api",
+            metadata={},
+            packaged_files={"manifest.json": b"{}"},
+        )
+        self.assertEqual(resolved.source_mode, "packaged_fallback")
+        self.assertEqual(resolved.source_origin, "packaged_fallback")
+        self.assertEqual(resolved.resolution_branch, "packaged_fallback")
+        details = resolved.resolution_details if isinstance(resolved.resolution_details, dict) else {}
+        candidates = details.get("candidate_roots") if isinstance(details.get("candidate_roots"), list) else []
+        self.assertFalse(any(str(item.get("path") or "").rstrip("/") == "/app" and bool(item.get("selected")) for item in candidates if isinstance(item, dict)))
+
+    def test_resolution_details_include_provenance_candidate_diagnostics(self) -> None:
+        os.environ["XYN_RUNTIME_REPO_MAP"] = json.dumps({"xyn-platform": ["/definitely/missing"]})
+        resolved = resolve_artifact_source(
+            artifact_slug="app.demo",
+            metadata={
+                "provenance": {
+                    "source": {
+                        "kind": "git",
+                        "repo_key": "xyn-platform",
+                        "commit_sha": "abcdef0123456789",
+                        "monorepo_subpath": "services/xyn-api",
+                    }
+                }
+            },
+            packaged_files={"manifest.json": b"{}"},
+        )
+        details = resolved.resolution_details if isinstance(resolved.resolution_details, dict) else {}
+        provenance_details = details.get("provenance") if isinstance(details.get("provenance"), dict) else {}
+        candidate_repo_roots = (
+            provenance_details.get("candidate_repo_roots")
+            if isinstance(provenance_details.get("candidate_repo_roots"), list)
+            else []
+        )
+        self.assertTrue(candidate_repo_roots)
+        self.assertTrue(any(isinstance(row, dict) and str(row.get("path") or "").endswith("/definitely/missing") for row in candidate_repo_roots))
 
     def test_parse_packaged_artifact_metadata_extracts_content_ref(self) -> None:
         artifact_json = {
