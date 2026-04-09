@@ -42,8 +42,11 @@ class XynApiAdapterConfig:
         if ":" in derived_host:
             derived_host = derived_host.split(":", 1)[0].strip()
         derived_proto = str(parsed_public.scheme or "").strip() if parsed_public else ""
+        legacy_api_base_url = str(os.getenv("XYN_MCP_XYN_API_BASE_URL", "")).strip()
         return cls(
-            control_api_base_url=str(os.getenv("XYN_MCP_XYN_CONTROL_API_BASE_URL", "http://localhost:8001")).strip(),
+            control_api_base_url=str(os.getenv("XYN_MCP_XYN_CONTROL_API_BASE_URL", "")).strip()
+            or legacy_api_base_url
+            or "http://localhost:8001",
             code_api_base_url=str(os.getenv("XYN_MCP_XYN_CODE_API_BASE_URL", "")).strip(),
             bearer_token=str(os.getenv("XYN_MCP_XYN_API_BEARER_TOKEN", "")).strip()
             or str(os.getenv("XYN_MCP_AUTH_BEARER_TOKEN", "")).strip(),
@@ -167,6 +170,23 @@ class XynApiAdapter:
         control_api = str(self._config.control_api_base_url or "").strip()
         if code_api:
             out.append(code_api)
+        if control_api:
+            parsed = urlparse(control_api)
+            host = str(parsed.hostname or "").strip().lower()
+            port = f":{parsed.port}" if parsed.port else ""
+            scheme = str(parsed.scheme or "http").strip() or "http"
+            if host:
+                derived_hosts: list[str] = []
+                if host == "xyn-local-api":
+                    derived_hosts.extend(["xyn-core", "core"])
+                elif host == "local-api":
+                    derived_hosts.extend(["core", "xyn-core"])
+                elif host.endswith("-local-api"):
+                    derived_hosts.append(f"{host[:-len('-local-api')]}-core")
+                for candidate_host in derived_hosts:
+                    candidate = f"{scheme}://{candidate_host}{port}"
+                    if candidate not in out:
+                        out.append(candidate)
         if control_api and control_api not in out:
             out.append(control_api)
         return out

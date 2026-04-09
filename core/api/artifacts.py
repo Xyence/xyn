@@ -193,83 +193,6 @@ async def list_artifacts(
     return schemas.ArtifactListResponse(items=items, next_cursor=next_cursor)
 
 
-@router.get("/artifacts/{artifact_id}", response_model=schemas.Artifact)
-async def get_artifact(
-    artifact_id: uuid.UUID,
-    principal: AccessPrincipal = Depends(require_capabilities(CAP_ARTIFACTS_READ)),
-    db: Session = Depends(get_db)
-):
-    """Get artifact metadata.
-
-    Args:
-        artifact_id: Artifact UUID
-        db: Database session
-
-    Returns:
-        Artifact metadata
-    """
-    artifact = db.query(models.Artifact).filter(
-        models.Artifact.id == artifact_id
-    ).first()
-
-    if not artifact:
-        raise HTTPException(status_code=404, detail="Artifact not found")
-
-    return schemas.Artifact.from_orm_model(artifact)
-
-
-@router.get("/artifacts/{artifact_id}/download")
-async def download_artifact(
-    artifact_id: uuid.UUID,
-    principal: AccessPrincipal = Depends(require_capabilities(CAP_ARTIFACTS_READ)),
-    db: Session = Depends(get_db)
-):
-    """Download artifact content.
-
-    Args:
-        artifact_id: Artifact UUID
-        db: Database session
-
-    Returns:
-        Artifact file content
-    """
-    artifact = db.query(models.Artifact).filter(
-        models.Artifact.id == artifact_id
-    ).first()
-
-    if not artifact:
-        raise HTTPException(status_code=404, detail="Artifact not found")
-
-    # Prefer direct file serving when available (local filesystem backend).
-    artifact_path = artifact_store.get_path(artifact_id)
-    if artifact_path and artifact_path.exists():
-        return FileResponse(
-            path=str(artifact_path),
-            media_type=artifact.content_type,
-            filename=artifact.name
-        )
-
-    # Fall back to backend retrieval (required for non-filesystem providers).
-    payload = await artifact_store.retrieve(artifact_id)
-    if payload is not None:
-        return Response(
-            content=payload,
-            media_type=artifact.content_type or "application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{artifact.name}"'},
-        )
-
-    # Legacy fallback for artifact rows that persisted explicit local paths.
-    if artifact.storage_path:
-        artifact_path = Path(str(artifact.storage_path))
-        if artifact_path.exists():
-            return FileResponse(
-                path=str(artifact_path),
-                media_type=artifact.content_type,
-                filename=artifact.name
-            )
-    raise HTTPException(status_code=404, detail="Artifact content not found")
-
-
 def _artifact_slug(row: models.Artifact) -> str:
     metadata = row.extra_metadata if isinstance(row.extra_metadata, dict) else {}
     candidate = str(metadata.get("generated_artifact_slug") or "").strip()
@@ -484,3 +407,80 @@ async def get_artifact_module_metrics(
         "count": len(rows),
         "items": rows[: int(top_n)],
     }
+
+
+@router.get("/artifacts/{artifact_id}", response_model=schemas.Artifact)
+async def get_artifact(
+    artifact_id: uuid.UUID,
+    principal: AccessPrincipal = Depends(require_capabilities(CAP_ARTIFACTS_READ)),
+    db: Session = Depends(get_db)
+):
+    """Get artifact metadata.
+
+    Args:
+        artifact_id: Artifact UUID
+        db: Database session
+
+    Returns:
+        Artifact metadata
+    """
+    artifact = db.query(models.Artifact).filter(
+        models.Artifact.id == artifact_id
+    ).first()
+
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    return schemas.Artifact.from_orm_model(artifact)
+
+
+@router.get("/artifacts/{artifact_id}/download")
+async def download_artifact(
+    artifact_id: uuid.UUID,
+    principal: AccessPrincipal = Depends(require_capabilities(CAP_ARTIFACTS_READ)),
+    db: Session = Depends(get_db)
+):
+    """Download artifact content.
+
+    Args:
+        artifact_id: Artifact UUID
+        db: Database session
+
+    Returns:
+        Artifact file content
+    """
+    artifact = db.query(models.Artifact).filter(
+        models.Artifact.id == artifact_id
+    ).first()
+
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    # Prefer direct file serving when available (local filesystem backend).
+    artifact_path = artifact_store.get_path(artifact_id)
+    if artifact_path and artifact_path.exists():
+        return FileResponse(
+            path=str(artifact_path),
+            media_type=artifact.content_type,
+            filename=artifact.name
+        )
+
+    # Fall back to backend retrieval (required for non-filesystem providers).
+    payload = await artifact_store.retrieve(artifact_id)
+    if payload is not None:
+        return Response(
+            content=payload,
+            media_type=artifact.content_type or "application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{artifact.name}"'},
+        )
+
+    # Legacy fallback for artifact rows that persisted explicit local paths.
+    if artifact.storage_path:
+        artifact_path = Path(str(artifact.storage_path))
+        if artifact_path.exists():
+            return FileResponse(
+                path=str(artifact_path),
+                media_type=artifact.content_type,
+                filename=artifact.name
+            )
+    raise HTTPException(status_code=404, detail="Artifact content not found")
