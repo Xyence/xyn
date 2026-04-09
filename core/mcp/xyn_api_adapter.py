@@ -7,6 +7,15 @@ from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
 import httpx
+from core.artifact_code_review import (
+    analyze_codebase,
+    build_hierarchical_tree,
+    build_source_index,
+    compute_module_metrics,
+    parse_artifact_source_files,
+    read_file_chunk,
+    search_files,
+)
 
 _REQUEST_BEARER_TOKEN: ContextVar[str] = ContextVar("xyn_mcp_request_bearer_token", default="")
 
@@ -127,6 +136,54 @@ class XynApiAdapter:
             "response": body if isinstance(body, (dict, list)) else {"value": body},
         }
 
+    def _request_bytes(
+        self,
+        *,
+        method: str,
+        path: str,
+        json_payload: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+        base_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        resolved_base_url = str(base_url or self._config.control_api_base_url).rstrip("/")
+        url = f"{resolved_base_url}{path}"
+        try:
+            response = httpx.request(
+                method=method.upper(),
+                url=url,
+                headers=self._headers(),
+                json=json_payload,
+                params=params,
+                timeout=self._config.timeout_seconds,
+            )
+        except httpx.RequestError as exc:
+            return {
+                "ok": False,
+                "status_code": 503,
+                "method": method.upper(),
+                "path": path,
+                "base_url": resolved_base_url,
+                "response": {"error": "upstream_unreachable", "detail": str(exc)},
+                "content": b"",
+            }
+        body: Any
+        try:
+            body = response.json()
+        except Exception:
+            body = {"raw_text": response.text}
+        raw_content = response.content
+        if not isinstance(raw_content, (bytes, bytearray)):
+            raw_content = b""
+        return {
+            "ok": bool(200 <= response.status_code < 300),
+            "status_code": int(response.status_code),
+            "method": method.upper(),
+            "path": path,
+            "base_url": resolved_base_url,
+            "response": body if isinstance(body, (dict, list)) else {"value": body},
+            "content": bytes(raw_content),
+        }
+
     def _request_with_fallback_paths(
         self,
         *,
@@ -191,6 +248,53 @@ class XynApiAdapter:
             out.append(control_api)
         return out
 
+    def _resolve_artifact_id(self, *, artifact_id: str = "", artifact_slug: str = "") -> str:
+        resolved_id = str(artifact_id or "").strip()
+        if resolved_id:
+            return resolved_id
+        resolved_slug = str(artifact_slug or "").strip()
+        if not resolved_slug:
+            return ""
+        listing = self.list_artifacts(limit=500, offset=0)
+        if not listing.get("ok"):
+            return ""
+        body = listing.get("response") if isinstance(listing.get("response"), dict) else {}
+        rows = body.get("artifacts") if isinstance(body.get("artifacts"), list) else []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("slug") or "").strip() == resolved_slug:
+                return str(row.get("id") or "").strip()
+        return ""
+
+    def _artifact_files_via_export_package(
+        self,
+        *,
+        artifact_id: str = "",
+        artifact_slug: str = "",
+    ) -> Optional[tuple[str, dict[str, bytes]]]:
+        resolved_artifact_id = self._resolve_artifact_id(artifact_id=artifact_id, artifact_slug=artifact_slug)
+        if not resolved_artifact_id:
+            return None
+        export = self._request_bytes(
+            method="POST",
+            path=f"/xyn/api/artifacts/{resolved_artifact_id}/export-package",
+            json_payload={},
+            base_url=self._config.control_api_base_url,
+        )
+        if not export.get("ok"):
+            return None
+        payload = export.get("content")
+        if not isinstance(payload, (bytes, bytearray)) or not payload:
+            return None
+        files = parse_artifact_source_files(
+            artifact_name=str(artifact_slug or resolved_artifact_id),
+            artifact_bytes=bytes(payload),
+        )
+        if not files:
+            return None
+        return (resolved_artifact_id, files)
+
     @staticmethod
     def _with_release_target_not_found_hint(result: Dict[str, Any], *, target_id: str) -> Dict[str, Any]:
         if int(result.get("status_code") or 0) != 404:
@@ -213,6 +317,34 @@ class XynApiAdapter:
             ["list_release_targets", "get_release_target", "get_release_target_deployment_plan"],
         )
         response_body.setdefault("target_id", str(target_id or ""))
+        result["response"] = response_body
+        return result
+
+    @staticmethod
+    def _with_artifact_not_found_hint(
+        result: Dict[str, Any],
+        *,
+        artifact_id: str = "",
+        artifact_slug: str = "",
+    ) -> Dict[str, Any]:
+        if int(result.get("status_code") or 0) != 404:
+            return result
+        response_body = result.get("response")
+        if not isinstance(response_body, dict):
+            response_body = {}
+        warnings = response_body.get("warnings") if isinstance(response_body.get("warnings"), list) else []
+        warning = (
+            "Artifact not found in the source-review backend for the provided identifier. "
+            "Use list_artifacts, then retry with an id returned from that call."
+        )
+        if warning not in warnings:
+            warnings.append(warning)
+        response_body["warnings"] = warnings
+        response_body.setdefault("blocked_reason", "artifact_not_found")
+        response_body.setdefault("recommended_action", "refresh_artifacts_and_retry")
+        response_body.setdefault("next_allowed_actions", ["list_artifacts", "get_artifact_source_tree"])
+        response_body.setdefault("artifact_id", str(artifact_id or ""))
+        response_body.setdefault("artifact_slug", str(artifact_slug or ""))
         result["response"] = response_body
         return result
 
@@ -430,9 +562,10 @@ class XynApiAdapter:
             }
 
         # Compatibility strategy:
-        # - Prefer /xyn/api/artifacts for deployed MCP integrations.
+        # - Prefer control-plane /xyn/api/artifacts so MCP discovery mirrors
+        #   production/UI artifact registry results (xyn-api, Workbench, etc).
         # - Some handlers reject offset-style params; retry same path without offset.
-        # - Fall back to /api/v1/artifacts variants.
+        # - Fall back to /api/v1/artifacts when control routes are unavailable.
         explicit_params = {"limit": resolved_limit, "offset": resolved_offset}
         no_offset_params = {"limit": resolved_limit}
         params_variants = [explicit_params]
@@ -440,28 +573,56 @@ class XynApiAdapter:
             params_variants.append(no_offset_params)
 
         last_result: Dict[str, Any] = {"ok": False, "status_code": 404, "response": {"error": "not_found"}}
-        for path in ["/xyn/api/artifacts", "/api/v1/artifacts"]:
-            for params in params_variants:
-                result = self._request(method="GET", path=path, params=params)
-                last_result = result
-                if bool(result.get("ok")):
-                    body = result.get("response") if isinstance(result.get("response"), dict) else {}
-                    rows = (
-                        body.get("artifacts")
-                        if isinstance(body.get("artifacts"), list)
-                        else (body.get("items") if isinstance(body.get("items"), list) else [])
-                    )
-                    normalized = [self._artifact_discovery_row(row) for row in rows if isinstance(row, dict)]
-                    result["response"] = {
-                        "artifacts": normalized,
-                        "count": len(normalized),
-                        "next_cursor": body.get("next_cursor"),
-                    }
+        # First pass: control API base (UI/production registry view).
+        for base_url in [self._config.control_api_base_url]:
+            for path in ["/xyn/api/artifacts", "/api/v1/artifacts"]:
+                for params in params_variants:
+                    result = self._request(method="GET", path=path, params=params, base_url=base_url)
+                    last_result = result
+                    if bool(result.get("ok")):
+                        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+                        rows = (
+                            body.get("artifacts")
+                            if isinstance(body.get("artifacts"), list)
+                            else (body.get("items") if isinstance(body.get("items"), list) else [])
+                        )
+                        normalized = [self._artifact_discovery_row(row) for row in rows if isinstance(row, dict)]
+                        result["response"] = {
+                            "artifacts": normalized,
+                            "count": len(normalized),
+                            "next_cursor": body.get("next_cursor"),
+                        }
+                        return result
+                    code = int(result.get("status_code") or 0)
+                    if code in {400, 404, 405, 503}:
+                        continue
                     return result
-                code = int(result.get("status_code") or 0)
-                if code in {400, 404, 405}:
-                    continue
-                return result
+        # Second pass: additional code API bases as compatibility fallback.
+        for base_url in self._code_api_base_urls():
+            if str(base_url).strip() == str(self._config.control_api_base_url).strip():
+                continue
+            for path in ["/xyn/api/artifacts", "/api/v1/artifacts"]:
+                for params in params_variants:
+                    result = self._request(method="GET", path=path, params=params, base_url=base_url)
+                    last_result = result
+                    if bool(result.get("ok")):
+                        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+                        rows = (
+                            body.get("artifacts")
+                            if isinstance(body.get("artifacts"), list)
+                            else (body.get("items") if isinstance(body.get("items"), list) else [])
+                        )
+                        normalized = [self._artifact_discovery_row(row) for row in rows if isinstance(row, dict)]
+                        result["response"] = {
+                            "artifacts": normalized,
+                            "count": len(normalized),
+                            "next_cursor": body.get("next_cursor"),
+                        }
+                        return result
+                    code = int(result.get("status_code") or 0)
+                    if code in {400, 404, 405, 503}:
+                        continue
+                    return result
         result = last_result
         if not result.get("ok"):
             return result
@@ -490,15 +651,35 @@ class XynApiAdapter:
             params["artifact_id"] = str(artifact_id).strip()
         if str(artifact_slug or "").strip():
             params["artifact_slug"] = str(artifact_slug).strip()
-        return self._request_with_fallback_paths(
+        result = self._request_with_fallback_paths(
             method="GET",
             paths=[
                 "/api/v1/artifacts/source-tree",
-                "/xyn/api/artifacts/source-tree",
             ],
             params=params,
             base_urls=self._code_api_base_urls(),
         )
+        if not result.get("ok") and int(result.get("status_code") or 0) == 404:
+            resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
+            if resolved:
+                resolved_artifact_id, files = resolved
+                index_rows = build_source_index(files, include_line_counts=bool(include_line_counts))
+                return {
+                    "ok": True,
+                    "status_code": 200,
+                    "method": "GET",
+                    "path": "/api/v1/artifacts/source-tree",
+                    "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                    "response": {
+                        "artifact": {
+                            "id": resolved_artifact_id,
+                            "slug": str(artifact_slug or ""),
+                        },
+                        "files": index_rows,
+                        "tree": build_hierarchical_tree(index_rows),
+                    },
+                }
+        return self._with_artifact_not_found_hint(result, artifact_id=artifact_id, artifact_slug=artifact_slug)
 
     def read_artifact_source_file(
         self,
@@ -520,15 +701,46 @@ class XynApiAdapter:
             params["start_line"] = int(start_line)
         if end_line is not None:
             params["end_line"] = int(end_line)
-        return self._request_with_fallback_paths(
+        result = self._request_with_fallback_paths(
             method="GET",
             paths=[
                 "/api/v1/artifacts/source-file",
-                "/xyn/api/artifacts/source-file",
             ],
             params=params,
             base_urls=self._code_api_base_urls(),
         )
+        if not result.get("ok") and int(result.get("status_code") or 0) == 404:
+            resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
+            if resolved:
+                resolved_artifact_id, files = resolved
+                try:
+                    payload = read_file_chunk(
+                        files=files,
+                        path=path,
+                        start_line=start_line,
+                        end_line=end_line,
+                    )
+                except (KeyError, ValueError) as exc:
+                    return {
+                        "ok": False,
+                        "status_code": 404 if isinstance(exc, KeyError) else 400,
+                        "method": "GET",
+                        "path": "/api/v1/artifacts/source-file",
+                        "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                        "response": {"error": str(exc)},
+                    }
+                return {
+                    "ok": True,
+                    "status_code": 200,
+                    "method": "GET",
+                    "path": "/api/v1/artifacts/source-file",
+                    "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                    "response": {
+                        "artifact": {"id": resolved_artifact_id, "slug": str(artifact_slug or "")},
+                        **payload,
+                    },
+                }
+        return self._with_artifact_not_found_hint(result, artifact_id=artifact_id, artifact_slug=artifact_slug)
 
     def search_artifact_source(
         self,
@@ -556,15 +768,50 @@ class XynApiAdapter:
             params["path_glob"] = str(path_glob).strip()
         if str(file_extensions or "").strip():
             params["file_extensions"] = str(file_extensions).strip()
-        return self._request_with_fallback_paths(
+        result = self._request_with_fallback_paths(
             method="GET",
             paths=[
                 "/api/v1/artifacts/source-search",
-                "/xyn/api/artifacts/source-search",
             ],
             params=params,
             base_urls=self._code_api_base_urls(),
         )
+        if not result.get("ok") and int(result.get("status_code") or 0) == 404:
+            resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
+            if resolved:
+                resolved_artifact_id, files = resolved
+                extensions = [part.strip() for part in str(file_extensions or "").split(",") if part.strip()]
+                try:
+                    payload = search_files(
+                        files=files,
+                        query=str(query or ""),
+                        path_glob=str(path_glob or "") or None,
+                        file_extensions=extensions or None,
+                        regex=bool(regex),
+                        case_sensitive=bool(case_sensitive),
+                        limit=int(limit),
+                    )
+                except ValueError as exc:
+                    return {
+                        "ok": False,
+                        "status_code": 400,
+                        "method": "GET",
+                        "path": "/api/v1/artifacts/source-search",
+                        "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                        "response": {"error": str(exc)},
+                    }
+                return {
+                    "ok": True,
+                    "status_code": 200,
+                    "method": "GET",
+                    "path": "/api/v1/artifacts/source-search",
+                    "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                    "response": {
+                        "artifact": {"id": resolved_artifact_id, "slug": str(artifact_slug or "")},
+                        **payload,
+                    },
+                }
+        return self._with_artifact_not_found_hint(result, artifact_id=artifact_id, artifact_slug=artifact_slug)
 
     def analyze_artifact_codebase(
         self,
@@ -578,15 +825,31 @@ class XynApiAdapter:
             params["artifact_id"] = str(artifact_id).strip()
         if str(artifact_slug or "").strip():
             params["artifact_slug"] = str(artifact_slug).strip()
-        return self._request_with_fallback_paths(
+        result = self._request_with_fallback_paths(
             method="GET",
             paths=[
                 "/api/v1/artifacts/analyze-codebase",
-                "/xyn/api/artifacts/analyze-codebase",
             ],
             params=params,
             base_urls=self._code_api_base_urls(),
         )
+        if not result.get("ok") and int(result.get("status_code") or 0) == 404:
+            resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
+            if resolved:
+                resolved_artifact_id, files = resolved
+                payload = analyze_codebase(files, mode=params["mode"])
+                return {
+                    "ok": True,
+                    "status_code": 200,
+                    "method": "GET",
+                    "path": "/api/v1/artifacts/analyze-codebase",
+                    "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                    "response": {
+                        "artifact": {"id": resolved_artifact_id, "slug": str(artifact_slug or "")},
+                        **payload,
+                    },
+                }
+        return self._with_artifact_not_found_hint(result, artifact_id=artifact_id, artifact_slug=artifact_slug)
 
     def analyze_python_api_artifact(
         self,
@@ -599,15 +862,31 @@ class XynApiAdapter:
             params["artifact_id"] = str(artifact_id).strip()
         if str(artifact_slug or "").strip():
             params["artifact_slug"] = str(artifact_slug).strip()
-        return self._request_with_fallback_paths(
+        result = self._request_with_fallback_paths(
             method="GET",
             paths=[
                 "/api/v1/artifacts/analyze-python-api",
-                "/xyn/api/artifacts/analyze-python-api",
             ],
             params=params,
             base_urls=self._code_api_base_urls(),
         )
+        if not result.get("ok") and int(result.get("status_code") or 0) == 404:
+            resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
+            if resolved:
+                resolved_artifact_id, files = resolved
+                payload = analyze_codebase(files, mode="python_api")
+                return {
+                    "ok": True,
+                    "status_code": 200,
+                    "method": "GET",
+                    "path": "/api/v1/artifacts/analyze-python-api",
+                    "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                    "response": {
+                        "artifact": {"id": resolved_artifact_id, "slug": str(artifact_slug or "")},
+                        **payload,
+                    },
+                }
+        return self._with_artifact_not_found_hint(result, artifact_id=artifact_id, artifact_slug=artifact_slug)
 
     def get_artifact_module_metrics(
         self,
@@ -621,15 +900,32 @@ class XynApiAdapter:
             params["artifact_id"] = str(artifact_id).strip()
         if str(artifact_slug or "").strip():
             params["artifact_slug"] = str(artifact_slug).strip()
-        return self._request_with_fallback_paths(
+        result = self._request_with_fallback_paths(
             method="GET",
             paths=[
                 "/api/v1/artifacts/module-metrics",
-                "/xyn/api/artifacts/module-metrics",
             ],
             params=params,
             base_urls=self._code_api_base_urls(),
         )
+        if not result.get("ok") and int(result.get("status_code") or 0) == 404:
+            resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
+            if resolved:
+                resolved_artifact_id, files = resolved
+                metrics = compute_module_metrics(files)[: max(1, int(top_n))]
+                return {
+                    "ok": True,
+                    "status_code": 200,
+                    "method": "GET",
+                    "path": "/api/v1/artifacts/module-metrics",
+                    "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                    "response": {
+                        "artifact": {"id": resolved_artifact_id, "slug": str(artifact_slug or "")},
+                        "metrics": metrics,
+                        "count": len(metrics),
+                    },
+                }
+        return self._with_artifact_not_found_hint(result, artifact_id=artifact_id, artifact_slug=artifact_slug)
 
     def list_deployment_providers(self) -> Dict[str, Any]:
         return self._request(method="GET", path="/xyn/api/deployment-providers")
