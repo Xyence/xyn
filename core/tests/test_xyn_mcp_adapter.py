@@ -3,7 +3,12 @@ from __future__ import annotations
 from typing import Any, Dict
 from unittest import TestCase, mock
 
-from core.mcp.xyn_api_adapter import XynApiAdapter, XynApiAdapterConfig
+from core.mcp.xyn_api_adapter import (
+    XynApiAdapter,
+    XynApiAdapterConfig,
+    reset_request_bearer_token,
+    set_request_bearer_token,
+)
 from core.mcp.xyn_mcp_server import TOOL_NAMES, create_xyn_mcp_http_app, register_xyn_tools
 from starlette.testclient import TestClient
 
@@ -256,6 +261,60 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer token-1")
         self.assertEqual(kwargs["headers"]["X-Internal-Token"], "int-1")
         self.assertEqual(kwargs["headers"]["Cookie"], "sessionid=abc")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_uses_request_scoped_bearer_when_config_bearer_missing(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"release_targets": []}
+        mock_request.return_value = response
+
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=11.0,
+            )
+        )
+
+        token = set_request_bearer_token("request-token-123")
+        try:
+            result = adapter.list_release_targets()
+        finally:
+            reset_request_bearer_token(token)
+
+        self.assertTrue(result["ok"])
+        kwargs = mock_request.call_args.kwargs
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer request-token-123")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_sets_upstream_host_headers_when_configured(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"release_targets": []}
+        mock_request.return_value = response
+
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=11.0,
+                upstream_host_header="xyn.xyence.io",
+                upstream_forwarded_proto="https",
+            )
+        )
+
+        result = adapter.list_release_targets()
+
+        self.assertTrue(result["ok"])
+        kwargs = mock_request.call_args.kwargs
+        self.assertEqual(kwargs["headers"]["Host"], "xyn.xyence.io")
+        self.assertEqual(kwargs["headers"]["X-Forwarded-Host"], "xyn.xyence.io")
+        self.assertEqual(kwargs["headers"]["X-Forwarded-Proto"], "https")
 
     def test_healthz_surfaces_effective_xyn_api_base_and_auth_presence(self) -> None:
         adapter = XynApiAdapter(

@@ -403,6 +403,12 @@ def build_runtime_env() -> dict[str, str]:
     if str(runtime.get("XYN_AUTH_MODE", "")).strip().lower() == "token":
         if not str(runtime.get("XYN_UI_BEARER_TOKEN", "")).strip():
             runtime["XYN_UI_BEARER_TOKEN"] = "xyn-local-bootstrap-token"
+    # Keep MCP OAuth ingress while using a stable internal bearer for MCP->API calls.
+    if str(runtime.get("XYN_MCP_AUTH_MODE", "")).strip().lower() == "oidc":
+        if not str(runtime.get("XYN_UI_BEARER_TOKEN", "")).strip():
+            runtime["XYN_UI_BEARER_TOKEN"] = "xyn-mcp-upstream-token"
+        if not str(runtime.get("XYN_MCP_XYN_API_BEARER_TOKEN", "")).strip():
+            runtime["XYN_MCP_XYN_API_BEARER_TOKEN"] = str(runtime.get("XYN_UI_BEARER_TOKEN", "")).strip()
     if not str(runtime.get("DOCKER_GID", "")).strip():
         sock = Path("/var/run/docker.sock")
         if sock.exists():
