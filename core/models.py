@@ -108,6 +108,7 @@ class Workspace(Base):
     environments = relationship("Environment", back_populates="workspace")
     siblings = relationship("Sibling", back_populates="workspace")
     activations = relationship("Activation", back_populates="workspace")
+    change_efforts = relationship("ChangeEffort", back_populates="workspace")
 
 
 class Environment(Base):
@@ -209,6 +210,38 @@ class Activation(Base):
     sibling = relationship("Sibling", back_populates="activations")
     workspace = relationship("Workspace", back_populates="activations")
     source_job = relationship("Job", foreign_keys=[source_job_id])
+
+
+class ChangeEffort(Base):
+    """Minimal branch/worktree effort state for AI-managed development."""
+    __tablename__ = "change_efforts"
+    __table_args__ = (
+        Index("ix_change_efforts_workspace_status", "workspace_id", "status"),
+        Index("ix_change_efforts_artifact_status", "artifact_slug", "status"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id = Column(UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False)
+    environment_id = Column(UUID(as_uuid=True), ForeignKey("environments.id", ondelete="SET NULL"), nullable=True)
+    sibling_id = Column(UUID(as_uuid=True), ForeignKey("siblings.id", ondelete="SET NULL"), nullable=True)
+    artifact_slug = Column(String(255), nullable=False)
+    repo_key = Column(String(255), nullable=True)
+    repo_url = Column(Text, nullable=True)
+    repo_subpath = Column(Text, nullable=True)
+    base_branch = Column(String(255), nullable=False, default="develop")
+    work_branch = Column(String(255), nullable=True)
+    target_branch = Column(String(255), nullable=False, default="develop")
+    worktree_path = Column(Text, nullable=True)
+    status = Column(String(32), nullable=False, default="created")
+    owner = Column(String(255), nullable=True)
+    created_by = Column(String(255), nullable=False, default="system")
+    metadata_json = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    workspace = relationship("Workspace", back_populates="change_efforts")
+    environment = relationship("Environment", foreign_keys=[environment_id])
+    sibling = relationship("Sibling", foreign_keys=[sibling_id])
 
 
 class Draft(Base):

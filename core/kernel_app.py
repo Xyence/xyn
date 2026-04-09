@@ -31,6 +31,7 @@ from core.api.primitives import router as primitives_router
 from core.api.runs import router as runs_router
 from core.api.workspaces import router as workspaces_router
 from core.api.environments import router as environments_router
+from core.api.change_efforts import router as change_efforts_router
 from core.api.artifact_refresh import router as artifact_refresh_router
 from core.palette_commands import ensure_default_palette_commands
 from core.provisioning_local import router as provisioning_router
@@ -198,6 +199,7 @@ def create_app() -> FastAPI:
     app.include_router(lifecycle_router, prefix="/api/v1", tags=["Lifecycle"])
     app.include_router(workspaces_router, prefix="/api/v1", tags=["Workspaces"])
     app.include_router(environments_router, prefix="/api/v1", tags=["Environments"])
+    app.include_router(change_efforts_router, prefix="/api/v1", tags=["Change Efforts"])
     app.include_router(primitives_router, prefix="/api/v1", tags=["Primitives"])
     app.include_router(palette_router, prefix="/api/v1", tags=["Palette"])
     app.include_router(runs_router, prefix="/api/v1", tags=["Runs"])
