@@ -753,7 +753,7 @@ class XynMcpAdapterTests(TestCase):
         third.json.return_value = {"detail": "Not Found"}
         listing = mock.Mock()
         listing.status_code = 200
-        listing.json.return_value = {"artifacts": [{"id": "a1", "slug": "xyn-api", "title": "xyn-api"}]}
+        listing.json.return_value = {"artifacts": [{"id": "a1", "slug": "app.demo", "title": "Demo App"}]}
         export = mock.Mock()
         export.status_code = 200
         export.json.side_effect = ValueError("not json")
@@ -772,7 +772,7 @@ class XynMcpAdapterTests(TestCase):
             )
         )
 
-        result = adapter.get_artifact_source_tree(artifact_slug="xyn-api")
+        result = adapter.get_artifact_source_tree(artifact_slug="app.demo")
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["status_code"], 200)
@@ -793,7 +793,7 @@ class XynMcpAdapterTests(TestCase):
         third.json.return_value = {"detail": "Not Found"}
         listing = mock.Mock()
         listing.status_code = 200
-        listing.json.return_value = {"artifacts": [{"id": "a1", "slug": "xyn-api", "title": "xyn-api"}]}
+        listing.json.return_value = {"artifacts": [{"id": "a1", "slug": "app.demo", "title": "Demo App"}]}
         export = mock.Mock()
         export.status_code = 200
         export.json.side_effect = ValueError("not json")
@@ -812,7 +812,7 @@ class XynMcpAdapterTests(TestCase):
             )
         )
 
-        result = adapter.read_artifact_source_file(path="README.md", artifact_slug="xyn-api", start_line=2, end_line=2)
+        result = adapter.read_artifact_source_file(path="README.md", artifact_slug="app.demo", start_line=2, end_line=2)
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["status_code"], 200)
