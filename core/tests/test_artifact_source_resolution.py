@@ -83,7 +83,7 @@ class ArtifactSourceResolutionTests(TestCase):
     def test_resolve_warns_when_provenance_repo_missing_and_falls_back(self) -> None:
         os.environ["XYN_RUNTIME_REPO_MAP"] = json.dumps({"xyn-platform": ["/definitely/missing"]})
         resolved = resolve_artifact_source(
-            artifact_slug="xyn-api",
+            artifact_slug="app.demo",
             metadata={
                 "provenance": {
                     "source": {
@@ -112,7 +112,7 @@ class ArtifactSourceResolutionTests(TestCase):
             repo_root.mkdir(parents=True, exist_ok=True)
             os.environ["XYN_RUNTIME_REPO_MAP"] = json.dumps({"xyn-platform": [str(repo_root)]})
             resolved = resolve_artifact_source(
-                artifact_slug="xyn-api",
+                artifact_slug="app.demo",
                 metadata={
                     "provenance": {
                         "source": {

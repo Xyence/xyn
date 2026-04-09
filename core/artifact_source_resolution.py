@@ -298,6 +298,10 @@ def _slug_candidates(slug: str) -> list[Path]:
                 base / "apps" / token,
             ]
         )
+    # Compatibility alias for platform runtime artifacts that are packaged
+    # without provenance/source_ref metadata.
+    if token in {"xyn-api", "xyn.api"}:
+        out.append(Path(__file__).resolve().parents[1])
     return out
 
 
