@@ -22,6 +22,7 @@ from core.artifact_source_resolution import (
 )
 
 _REQUEST_BEARER_TOKEN: ContextVar[str] = ContextVar("xyn_mcp_request_bearer_token", default="")
+_SOURCE_FALLBACK_STATUS_CODES = {400, 404, 422}
 
 
 def set_request_bearer_token(token: str) -> Token:
@@ -429,17 +430,21 @@ class XynApiAdapter:
     def _artifact_discovery_row(payload: Dict[str, Any]) -> Dict[str, Any]:
         artifact_type = payload.get("artifact_type") if isinstance(payload.get("artifact_type"), dict) else {}
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        artifact_title = str(payload.get("title") or "").strip()
+        artifact_identifier = str(payload.get("artifact_id") or payload.get("id") or "").strip()
         inferred_slug = str(
             payload.get("slug")
             or metadata.get("generated_artifact_slug")
+            or artifact_title
             or payload.get("name")
             or payload.get("label")
+            or artifact_identifier
             or ""
         )
         return {
-            "id": str(payload.get("id") or ""),
+            "id": artifact_identifier,
             "slug": inferred_slug,
-            "title": str(payload.get("title") or payload.get("name") or payload.get("label") or ""),
+            "title": str(artifact_title or payload.get("name") or payload.get("label") or inferred_slug),
             "artifact_type": str(
                 artifact_type.get("slug")
                 or payload.get("kind")
@@ -704,7 +709,7 @@ class XynApiAdapter:
             params=params,
             base_urls=self._code_api_base_urls(),
         )
-        if not result.get("ok") and int(result.get("status_code") or 0) == 404:
+        if not result.get("ok") and int(result.get("status_code") or 0) in _SOURCE_FALLBACK_STATUS_CODES:
             resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
             if resolved:
                 files = resolved.get("files") if isinstance(resolved.get("files"), dict) else {}
@@ -765,7 +770,7 @@ class XynApiAdapter:
             params=params,
             base_urls=self._code_api_base_urls(),
         )
-        if not result.get("ok") and int(result.get("status_code") or 0) == 404:
+        if not result.get("ok") and int(result.get("status_code") or 0) in _SOURCE_FALLBACK_STATUS_CODES:
             resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
             if resolved:
                 files = resolved.get("files") if isinstance(resolved.get("files"), dict) else {}
@@ -846,7 +851,7 @@ class XynApiAdapter:
             params=params,
             base_urls=self._code_api_base_urls(),
         )
-        if not result.get("ok") and int(result.get("status_code") or 0) == 404:
+        if not result.get("ok") and int(result.get("status_code") or 0) in _SOURCE_FALLBACK_STATUS_CODES:
             resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
             if resolved:
                 files = resolved.get("files") if isinstance(resolved.get("files"), dict) else {}
@@ -917,7 +922,7 @@ class XynApiAdapter:
             params=params,
             base_urls=self._code_api_base_urls(),
         )
-        if not result.get("ok") and int(result.get("status_code") or 0) == 404:
+        if not result.get("ok") and int(result.get("status_code") or 0) in _SOURCE_FALLBACK_STATUS_CODES:
             resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
             if resolved:
                 files = resolved.get("files") if isinstance(resolved.get("files"), dict) else {}
@@ -968,7 +973,7 @@ class XynApiAdapter:
             params=params,
             base_urls=self._code_api_base_urls(),
         )
-        if not result.get("ok") and int(result.get("status_code") or 0) == 404:
+        if not result.get("ok") and int(result.get("status_code") or 0) in _SOURCE_FALLBACK_STATUS_CODES:
             resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
             if resolved:
                 files = resolved.get("files") if isinstance(resolved.get("files"), dict) else {}
@@ -1020,7 +1025,7 @@ class XynApiAdapter:
             params=params,
             base_urls=self._code_api_base_urls(),
         )
-        if not result.get("ok") and int(result.get("status_code") or 0) == 404:
+        if not result.get("ok") and int(result.get("status_code") or 0) in _SOURCE_FALLBACK_STATUS_CODES:
             resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
             if resolved:
                 files = resolved.get("files") if isinstance(resolved.get("files"), dict) else {}
