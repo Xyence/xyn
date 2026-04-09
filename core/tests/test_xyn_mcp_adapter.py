@@ -242,6 +242,7 @@ class XynMcpAdapterTests(TestCase):
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
                 control_api_base_url="http://xyn.local:8001",
+                code_api_base_url="http://xyn-core:8000",
                 bearer_token="",
                 internal_token="",
                 cookie="",
@@ -252,7 +253,7 @@ class XynMcpAdapterTests(TestCase):
         self.assertTrue(result["ok"])
         kwargs = mock_request.call_args.kwargs
         self.assertEqual(kwargs["method"], "POST")
-        self.assertEqual(kwargs["url"], "http://xyn.local:8001/api/v1/change-efforts")
+        self.assertEqual(kwargs["url"], "http://xyn-core:8000/api/v1/change-efforts")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_promote_change_effort_routes_to_api_v1(self, mock_request: mock.Mock) -> None:
@@ -263,6 +264,7 @@ class XynMcpAdapterTests(TestCase):
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
                 control_api_base_url="http://xyn.local:8001",
+                code_api_base_url="http://xyn-core:8000",
                 bearer_token="",
                 internal_token="",
                 cookie="",
@@ -273,7 +275,7 @@ class XynMcpAdapterTests(TestCase):
         self.assertTrue(result["ok"])
         kwargs = mock_request.call_args.kwargs
         self.assertEqual(kwargs["method"], "POST")
-        self.assertEqual(kwargs["url"], "http://xyn.local:8001/api/v1/change-efforts/eff-1/promote")
+        self.assertEqual(kwargs["url"], "http://xyn-core:8000/api/v1/change-efforts/eff-1/promote")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_get_artifact_provenance_routes_with_workspace_query(self, mock_request: mock.Mock) -> None:
@@ -284,6 +286,7 @@ class XynMcpAdapterTests(TestCase):
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
                 control_api_base_url="http://xyn.local:8001",
+                code_api_base_url="http://xyn-core:8000",
                 bearer_token="",
                 internal_token="",
                 cookie="",
@@ -294,8 +297,38 @@ class XynMcpAdapterTests(TestCase):
         self.assertTrue(result["ok"])
         kwargs = mock_request.call_args.kwargs
         self.assertEqual(kwargs["method"], "GET")
-        self.assertEqual(kwargs["url"], "http://xyn.local:8001/api/v1/provenance/xyn-api")
+        self.assertEqual(kwargs["url"], "http://xyn-core:8000/api/v1/provenance/xyn-api")
         self.assertEqual(kwargs["params"], {"workspace_id": "w1"})
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_change_effort_related_routes_use_code_api_base_url(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"ok": True}
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn-local-api:8000",
+                code_api_base_url="http://xyn-core:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        adapter.get_change_effort(effort_id="eff-1")
+        adapter.resolve_effort_source(effort_id="eff-1")
+        adapter.allocate_effort_branch(effort_id="eff-1", payload={"base_branch": "develop"})
+        adapter.allocate_effort_worktree(effort_id="eff-1", payload={"root_path": "/tmp"})
+        adapter.declare_release(payload={"workspace_id": "w1"})
+
+        urls = [call.kwargs.get("url") for call in mock_request.call_args_list]
+        self.assertIn("http://xyn-core:8000/api/v1/change-efforts/eff-1", urls)
+        self.assertIn("http://xyn-core:8000/api/v1/change-efforts/eff-1/resolve-source", urls)
+        self.assertIn("http://xyn-core:8000/api/v1/change-efforts/eff-1/allocate-branch", urls)
+        self.assertIn("http://xyn-core:8000/api/v1/change-efforts/eff-1/allocate-worktree", urls)
+        self.assertIn("http://xyn-core:8000/api/v1/releases/declare", urls)
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_list_artifacts_accepts_api_v1_items_shape(self, mock_request: mock.Mock) -> None:

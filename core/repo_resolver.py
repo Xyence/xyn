@@ -78,6 +78,9 @@ def validate_runtime_repo_map_targets() -> List[str]:
             if not (candidate / ".git").exists():
                 invalid_reasons.append(f"{candidate} (not_a_git_repo)")
                 continue
+            if not os.access(candidate, os.R_OK | os.X_OK):
+                invalid_reasons.append(f"{candidate} (not_readable)")
+                continue
             valid = True
             break
         if not valid:
@@ -127,4 +130,6 @@ def _validate_repo_path(repo_key: str, path: Path) -> ResolvedRuntimeRepo:
         raise RepoResolutionFailed(f"Target repo path '{path}' is not a directory.")
     if not (path / ".git").exists():
         raise RepoResolutionFailed(f"Target repo path '{path}' is not a git repository.")
+    if not os.access(path, os.R_OK | os.X_OK):
+        raise RepoResolutionFailed(f"Target repo path '{path}' is not readable by runtime user.")
     return ResolvedRuntimeRepo(repo_key=repo_key, path=path)

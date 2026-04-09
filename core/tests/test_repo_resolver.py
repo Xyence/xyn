@@ -79,6 +79,14 @@ class RepoResolverTests(unittest.TestCase):
         warnings = validate_runtime_repo_map_targets()
         self.assertEqual(warnings, [])
 
+    def test_validate_runtime_repo_map_targets_reports_unreadable_candidate(self):
+        repo = self._temp_repo()
+        os.environ["XYN_RUNTIME_REPO_MAP"] = f'{{"xyn":["{repo}"]}}'
+        with mock.patch("core.repo_resolver.os.access", return_value=False):
+            warnings = validate_runtime_repo_map_targets()
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("not_readable", warnings[0])
+
 
 if __name__ == "__main__":
     unittest.main()

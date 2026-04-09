@@ -1080,56 +1080,64 @@ class XynApiAdapter:
         )
 
     def create_change_effort(self, *, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self._request(
+        return self._request_with_fallback_paths(
             method="POST",
-            path="/api/v1/change-efforts",
+            paths=["/api/v1/change-efforts"],
             json_payload=dict(payload or {}),
+            base_urls=self._code_api_base_urls(),
         )
 
     def get_change_effort(self, *, effort_id: str) -> Dict[str, Any]:
-        return self._request(
+        return self._request_with_fallback_paths(
             method="GET",
-            path=f"/api/v1/change-efforts/{effort_id}",
+            paths=[f"/api/v1/change-efforts/{effort_id}"],
+            base_urls=self._code_api_base_urls(),
         )
 
     def resolve_effort_source(self, *, effort_id: str) -> Dict[str, Any]:
-        return self._request(
+        return self._request_with_fallback_paths(
             method="POST",
-            path=f"/api/v1/change-efforts/{effort_id}/resolve-source",
+            paths=[f"/api/v1/change-efforts/{effort_id}/resolve-source"],
             json_payload={},
+            base_urls=self._code_api_base_urls(),
         )
 
     def allocate_effort_branch(self, *, effort_id: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self._request(
+        return self._request_with_fallback_paths(
             method="POST",
-            path=f"/api/v1/change-efforts/{effort_id}/allocate-branch",
+            paths=[f"/api/v1/change-efforts/{effort_id}/allocate-branch"],
             json_payload=dict(payload or {}),
+            base_urls=self._code_api_base_urls(),
         )
 
     def allocate_effort_worktree(self, *, effort_id: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self._request(
+        return self._request_with_fallback_paths(
             method="POST",
-            path=f"/api/v1/change-efforts/{effort_id}/allocate-worktree",
+            paths=[f"/api/v1/change-efforts/{effort_id}/allocate-worktree"],
             json_payload=dict(payload or {}),
+            base_urls=self._code_api_base_urls(),
         )
 
     def promote_change_effort(self, *, effort_id: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self._request(
+        return self._request_with_fallback_paths(
             method="POST",
-            path=f"/api/v1/change-efforts/{effort_id}/promote",
+            paths=[f"/api/v1/change-efforts/{effort_id}/promote"],
             json_payload=dict(payload or {}),
+            base_urls=self._code_api_base_urls(),
         )
 
     def declare_release(self, *, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self._request(
+        return self._request_with_fallback_paths(
             method="POST",
-            path="/api/v1/releases/declare",
+            paths=["/api/v1/releases/declare"],
             json_payload=dict(payload or {}),
+            base_urls=self._code_api_base_urls(),
         )
 
     def get_artifact_provenance(self, *, artifact_slug: str, workspace_id: str) -> Dict[str, Any]:
-        return self._request(
+        return self._request_with_fallback_paths(
             method="GET",
-            path=f"/api/v1/provenance/{artifact_slug}",
+            paths=[f"/api/v1/provenance/{artifact_slug}"],
             params={"workspace_id": str(workspace_id or "").strip()},
+            base_urls=self._code_api_base_urls(),
         )

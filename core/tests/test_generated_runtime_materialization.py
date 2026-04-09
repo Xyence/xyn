@@ -464,7 +464,10 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         )
         self.assertIn("XYN_OIDC_CLIENT_SECRET: ${XYN_OIDC_CLIENT_SECRET:-}", compose_text)
         self.assertIn("${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn:/workspace/xyn", compose_text)
-        self.assertIn("${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn-platform:/workspace/xyn-platform", compose_text)
+        self.assertIn(
+            "${XYN_PLATFORM_HOST_SRC_PATH:-${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn-platform}:/workspace/xyn-platform",
+            compose_text,
+        )
         self.assertIn("XYN_AUTH_MODE: token", compose_text)
 
     def test_compose_uses_external_db_without_local_postgres_when_db_mode_external(self):
