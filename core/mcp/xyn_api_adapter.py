@@ -69,6 +69,8 @@ class XynApiAdapterConfig:
             bearer_token=str(os.getenv("XYN_MCP_XYN_API_BEARER_TOKEN", "")).strip()
             or str(os.getenv("XYN_MCP_AUTH_BEARER_TOKEN", "")).strip(),
             internal_token=str(os.getenv("XYN_MCP_INTERNAL_TOKEN", "")).strip(),
+            # Deprecated: browser session-cookie forwarding is retained only as
+            # a temporary fallback; bearer token propagation is the canonical path.
             cookie=str(os.getenv("XYN_MCP_COOKIE", "")).strip(),
             timeout_seconds=float(os.getenv("XYN_MCP_TIMEOUT_SECONDS", "30").strip() or "30"),
             upstream_host_header=str(os.getenv("XYN_MCP_UPSTREAM_HOST_HEADER", "")).strip() or derived_host,
@@ -95,6 +97,7 @@ class XynApiAdapter:
             headers["Authorization"] = f"Bearer {bearer}"
         if self._config.internal_token:
             headers["X-Internal-Token"] = self._config.internal_token
+        # Deprecated fallback; do not rely on browser-cookie auth in production.
         if self._config.cookie:
             headers["Cookie"] = self._config.cookie
         if self._config.upstream_host_header:

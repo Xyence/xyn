@@ -91,37 +91,6 @@ TOOL_NAMES = [
     "get_artifact_provenance",
 ]
 
-_SESSION_COOKIE_REQUIRED_TOOLS = {
-    "list_applications",
-    "get_application",
-    "list_application_change_sessions",
-    "get_application_change_session",
-    "create_application_change_session",
-    "create_decomposition_campaign",
-    "get_decomposition_campaign",
-    "inspect_decomposition_guardrails",
-    "get_decomposition_observability",
-    "get_application_change_session_plan",
-    "stage_apply_application_change_session",
-    "prepare_preview_application_change_session",
-    "get_application_change_session_preview_status",
-    "validate_application_change_session",
-    "commit_application_change_session",
-    "promote_application_change_session",
-    "rollback_application_change_session",
-    "get_application_change_session_commits",
-    "get_application_change_session_promotion_evidence",
-    "list_runtime_runs",
-    "get_runtime_run",
-    "get_runtime_run_logs",
-    "get_runtime_run_artifacts",
-    "get_runtime_run_commands",
-    "cancel_runtime_run",
-    "rerun_runtime_run",
-    "get_dev_task_by_id",
-    "list_dev_tasks_for_change_session",
-}
-
 _TOOL_ROUTE_PROBES: Dict[str, tuple[str, str, str]] = {
     "list_change_efforts": ("GET", "/api/v1/change-efforts", "code"),
     "list_runtime_runs": ("GET", "/api/v1/runs", "code"),
@@ -1047,18 +1016,6 @@ def _build_tool_surface(adapter: XynApiAdapter) -> Dict[str, Any]:
     enabled_tools = set(TOOL_NAMES)
     parity: Dict[str, Dict[str, Any]] = {}
 
-    # Session-scoped xyn-api control-plane routes require a real session cookie today.
-    has_cookie = bool(str(adapter.config.cookie or "").strip())
-    if not has_cookie:
-        for tool_name in _SESSION_COOKIE_REQUIRED_TOOLS:
-            enabled_tools.discard(tool_name)
-            parity[tool_name] = {
-                "enabled": False,
-                "reason": "session_cookie_required",
-                "auth_required": True,
-                "route_exists": None,
-            }
-
     # Probe known optional endpoints and disable tools when route parity fails.
     for tool_name, (method, path, base) in _TOOL_ROUTE_PROBES.items():
         if tool_name not in enabled_tools:
@@ -1127,7 +1084,6 @@ def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
                 "auth": {
                     "has_bearer_token": bool(configured_adapter.config.bearer_token),
                     "has_internal_token": bool(configured_adapter.config.internal_token),
-                    "has_cookie": bool(configured_adapter.config.cookie),
                     "mcp_auth_mode": auth_config.mode,
                     "mcp_auth_token_configured": bool(auth_config.bearer_token),
                     "mcp_auth_oidc_configured": bool(auth_config.oidc_issuer and auth_config.oidc_client_id),
