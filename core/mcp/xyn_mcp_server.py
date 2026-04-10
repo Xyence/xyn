@@ -91,6 +91,42 @@ TOOL_NAMES = [
     "get_artifact_provenance",
 ]
 
+_SESSION_COOKIE_REQUIRED_TOOLS = {
+    "list_applications",
+    "get_application",
+    "list_application_change_sessions",
+    "get_application_change_session",
+    "create_application_change_session",
+    "create_decomposition_campaign",
+    "get_decomposition_campaign",
+    "inspect_decomposition_guardrails",
+    "get_decomposition_observability",
+    "get_application_change_session_plan",
+    "stage_apply_application_change_session",
+    "prepare_preview_application_change_session",
+    "get_application_change_session_preview_status",
+    "validate_application_change_session",
+    "commit_application_change_session",
+    "promote_application_change_session",
+    "rollback_application_change_session",
+    "get_application_change_session_commits",
+    "get_application_change_session_promotion_evidence",
+    "list_runtime_runs",
+    "get_runtime_run",
+    "get_runtime_run_logs",
+    "get_runtime_run_artifacts",
+    "get_runtime_run_commands",
+    "cancel_runtime_run",
+    "rerun_runtime_run",
+    "get_dev_task_by_id",
+    "list_dev_tasks_for_change_session",
+}
+
+_TOOL_ROUTE_PROBES: Dict[str, tuple[str, str, str]] = {
+    "list_change_efforts": ("GET", "/api/v1/change-efforts", "code"),
+    "list_runtime_runs": ("GET", "/api/v1/runs", "code"),
+}
+
 
 @dataclass(frozen=True)
 class McpAuthConfig:
@@ -122,6 +158,9 @@ class McpAuthConfig:
 
 
 def _register_tool(mcp_server: Any, *, name: str, description: str, fn: Callable[..., Dict[str, Any]]) -> None:
+    enabled_tools = getattr(mcp_server, "_xyn_enabled_tools", None)
+    if isinstance(enabled_tools, set) and enabled_tools and name not in enabled_tools:
+        return
     if hasattr(mcp_server, "add_tool"):
         mcp_server.add_tool(fn, name=name, description=description)
         return
@@ -993,11 +1032,67 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     )
 
 
+def _probe_backend_route(adapter: XynApiAdapter, *, method: str, path: str, base: str) -> Dict[str, Any]:
+    base_url = adapter.config.control_api_base_url if base == "control" else (
+        adapter.config.code_api_base_url or adapter.config.control_api_base_url
+    )
+    return adapter._request(  # noqa: SLF001 - intentional internal parity probe
+        method=method,
+        path=path,
+        base_url=base_url,
+    )
+
+
+def _build_tool_surface(adapter: XynApiAdapter) -> Dict[str, Any]:
+    enabled_tools = set(TOOL_NAMES)
+    parity: Dict[str, Dict[str, Any]] = {}
+
+    # Session-scoped xyn-api control-plane routes require a real session cookie today.
+    has_cookie = bool(str(adapter.config.cookie or "").strip())
+    if not has_cookie:
+        for tool_name in _SESSION_COOKIE_REQUIRED_TOOLS:
+            enabled_tools.discard(tool_name)
+            parity[tool_name] = {
+                "enabled": False,
+                "reason": "session_cookie_required",
+                "auth_required": True,
+                "route_exists": None,
+            }
+
+    # Probe known optional endpoints and disable tools when route parity fails.
+    for tool_name, (method, path, base) in _TOOL_ROUTE_PROBES.items():
+        if tool_name not in enabled_tools:
+            continue
+        probe = _probe_backend_route(adapter, method=method, path=path, base=base)
+        status_code = int(probe.get("status_code") or 0)
+        route_exists = bool(status_code) and status_code not in {404, 405} and status_code < 500
+        if not route_exists:
+            enabled_tools.discard(tool_name)
+        parity[tool_name] = {
+            "enabled": route_exists,
+            "reason": "" if route_exists else "backend_route_unavailable",
+            "auth_required": status_code in {401, 403},
+            "route_exists": route_exists,
+            "status_code": status_code,
+            "path": path,
+            "base": base,
+        }
+
+    return {
+        "enabled_tools": sorted(enabled_tools),
+        "disabled_tools": sorted([name for name in TOOL_NAMES if name not in enabled_tools]),
+        "parity": parity,
+    }
+
+
 def create_xyn_mcp_server(adapter: XynApiAdapter | None = None) -> Any:
     from mcp.server.fastmcp import FastMCP
 
     configured_adapter = adapter or XynApiAdapter(XynApiAdapterConfig.from_env())
+    tool_surface = _build_tool_surface(configured_adapter)
     server = FastMCP("xyn-control-adapter")
+    setattr(server, "_xyn_enabled_tools", set(tool_surface.get("enabled_tools") or []))
+    setattr(server, "_xyn_tool_surface", tool_surface)
     register_xyn_tools(server, configured_adapter)
     return server
 
@@ -1006,6 +1101,10 @@ def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
     configured_adapter = adapter or XynApiAdapter(XynApiAdapterConfig.from_env())
     auth_config = McpAuthConfig.from_env()
     mcp_server = create_xyn_mcp_server(configured_adapter)
+    tool_surface = getattr(mcp_server, "_xyn_tool_surface", {}) if mcp_server is not None else {}
+    enabled_tools = list(tool_surface.get("enabled_tools") or TOOL_NAMES)
+    disabled_tools = list(tool_surface.get("disabled_tools") or [])
+    parity = tool_surface.get("parity") if isinstance(tool_surface.get("parity"), dict) else {}
     # Prefer explicit streamable HTTP app construction (works across mcp versions).
     if hasattr(mcp_server, "streamable_http_app"):
         app = mcp_server.streamable_http_app()
@@ -1018,8 +1117,10 @@ def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
             {
                 "status": "ok",
                 "service": "xyn-mcp-adapter",
-                "tool_count": len(TOOL_NAMES),
-                "tools": TOOL_NAMES,
+                "tool_count": len(enabled_tools),
+                "tools": enabled_tools,
+                "disabled_tools": disabled_tools,
+                "tool_parity": parity,
                 "xyn_control_api_base_url": configured_adapter.config.control_api_base_url,
                 "xyn_code_api_base_url": configured_adapter.config.code_api_base_url
                 or configured_adapter.config.control_api_base_url,

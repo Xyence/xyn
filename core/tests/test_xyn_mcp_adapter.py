@@ -13,7 +13,7 @@ from core.mcp.xyn_api_adapter import (
     reset_request_bearer_token,
     set_request_bearer_token,
 )
-from core.mcp.xyn_mcp_server import TOOL_NAMES, create_xyn_mcp_http_app, register_xyn_tools
+from core.mcp.xyn_mcp_server import TOOL_NAMES, _build_tool_surface, create_xyn_mcp_http_app, register_xyn_tools
 from starlette.testclient import TestClient
 
 
@@ -1534,6 +1534,152 @@ class XynMcpAdapterTests(TestCase):
         self.assertTrue(result["ok"])
         kwargs = mock_request.call_args.kwargs
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer request-token-123")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_prefers_request_scoped_bearer_over_static_bearer(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"applications": []}
+        mock_request.return_value = response
+
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="static-upstream-token",
+                internal_token="",
+                cookie="",
+                timeout_seconds=11.0,
+            )
+        )
+
+        token = set_request_bearer_token("request-token-abc")
+        try:
+            result = adapter.list_applications()
+        finally:
+            reset_request_bearer_token(token)
+
+        self.assertTrue(result["ok"])
+        kwargs = mock_request.call_args.kwargs
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer request-token-abc")
+
+    @mock.patch.object(XynApiAdapter, "_request")
+    def test_tool_surface_hides_session_tools_without_cookie_and_hides_unsupported_list_change_efforts(
+        self, mock_request: mock.Mock
+    ) -> None:
+        def _fake_request(*_args, **kwargs):
+            path = str(kwargs.get("path") or "")
+            if path == "/api/v1/change-efforts":
+                return {"ok": False, "status_code": 405, "response": {"detail": "Method Not Allowed"}}
+            if path == "/api/v1/runs":
+                return {"ok": True, "status_code": 200, "response": {"items": []}}
+            return {"ok": False, "status_code": 404, "response": {"detail": "Not Found"}}
+
+        mock_request.side_effect = _fake_request
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                code_api_base_url="http://xyn-core:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        surface = _build_tool_surface(adapter)
+        enabled_tools = set(surface.get("enabled_tools") or [])
+        disabled_tools = set(surface.get("disabled_tools") or [])
+        self.assertIn("list_applications", disabled_tools)
+        self.assertIn("list_runtime_runs", disabled_tools)
+        self.assertIn("list_change_efforts", disabled_tools)
+        self.assertNotIn("list_change_efforts", enabled_tools)
+        parity = surface.get("parity") if isinstance(surface.get("parity"), dict) else {}
+        list_effort = parity.get("list_change_efforts") if isinstance(parity.get("list_change_efforts"), dict) else {}
+        self.assertEqual(list_effort.get("route_exists"), False)
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_application_change_session_calls_use_request_scoped_auth_context(self, mock_request: mock.Mock) -> None:
+        create = mock.Mock()
+        create.status_code = 201
+        create.json.return_value = {"session_id": "sess-1", "status": "created"}
+        get_session = mock.Mock()
+        get_session.status_code = 200
+        get_session.json.return_value = {"id": "sess-1", "application_id": "app-1", "status": "created"}
+        mock_request.side_effect = [create, get_session]
+
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="sessionid=abc",
+                timeout_seconds=10.0,
+            )
+        )
+        token = set_request_bearer_token("oauth-request-token")
+        try:
+            create_result = adapter.create_application_change_session(application_id="app-1", payload={"title": "demo"})
+            get_result = adapter.get_application_change_session(application_id="app-1", session_id="sess-1")
+        finally:
+            reset_request_bearer_token(token)
+
+        self.assertTrue(create_result["ok"])
+        self.assertTrue(get_result["ok"])
+        for call in mock_request.call_args_list:
+            headers = call.kwargs.get("headers") or {}
+            self.assertEqual(headers.get("Authorization"), "Bearer oauth-request-token")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_list_runtime_runs_uses_authenticated_request_context(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"items": [{"id": "run-1", "status": "completed"}]}
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                code_api_base_url="http://xyn-core:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="sessionid=abc",
+                timeout_seconds=10.0,
+            )
+        )
+        token = set_request_bearer_token("oauth-request-token")
+        try:
+            result = adapter.list_runtime_runs(application_id="app-1", session_id="sess-1")
+        finally:
+            reset_request_bearer_token(token)
+        self.assertTrue(result["ok"])
+        kwargs = mock_request.call_args.kwargs
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer oauth-request-token")
+
+    @mock.patch.object(XynApiAdapter, "_request")
+    def test_tool_surface_enables_session_tools_when_cookie_present(self, mock_request: mock.Mock) -> None:
+        def _fake_request(*_args, **kwargs):
+            path = str(kwargs.get("path") or "")
+            if path == "/api/v1/change-efforts":
+                return {"ok": False, "status_code": 405, "response": {"detail": "Method Not Allowed"}}
+            if path == "/api/v1/runs":
+                return {"ok": True, "status_code": 200, "response": {"items": []}}
+            return {"ok": False, "status_code": 404, "response": {"detail": "Not Found"}}
+
+        mock_request.side_effect = _fake_request
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                code_api_base_url="http://xyn-core:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="sessionid=abc",
+                timeout_seconds=10.0,
+            )
+        )
+        surface = _build_tool_surface(adapter)
+        enabled = set(surface.get("enabled_tools") or [])
+        disabled = set(surface.get("disabled_tools") or [])
+        self.assertIn("list_applications", enabled)
+        self.assertIn("list_runtime_runs", enabled)
+        self.assertIn("list_change_efforts", disabled)
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_sets_upstream_host_headers_when_configured(self, mock_request: mock.Mock) -> None:
