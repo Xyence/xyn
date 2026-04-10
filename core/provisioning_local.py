@@ -424,6 +424,7 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
       XYN_BOOTSTRAP_SOLUTION_WORKSPACE_SLUG: ${{XYN_BOOTSTRAP_SOLUTION_WORKSPACE_SLUG:-}}
       XYN_RUNTIME_REPO_MAP: '${{XYN_RUNTIME_REPO_MAP:-{{"xyn":["/workspace/xyn"],"xyn-platform":["/workspace/xyn-platform"]}}}}'
       XYN_RUNTIME_REPO_MAP_VALIDATION: ${{XYN_RUNTIME_REPO_MAP_VALIDATION:-warn}}
+      XYN_SOURCE_REVIEW_MAX_FILE_BYTES: ${{XYN_SOURCE_REVIEW_MAX_FILE_BYTES:-1048576}}
       AWS_ACCESS_KEY_ID: ${{AWS_ACCESS_KEY_ID:-}}
       AWS_SECRET_ACCESS_KEY: ${{AWS_SECRET_ACCESS_KEY:-}}
       AWS_SESSION_TOKEN: ${{AWS_SESSION_TOKEN:-}}

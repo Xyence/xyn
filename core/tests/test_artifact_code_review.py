@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import io
+import tempfile
 import unittest
 import zipfile
+from pathlib import Path
 
 from core.artifact_code_review import (
     analyze_codebase,
@@ -98,6 +100,19 @@ class ArtifactCodeReviewTests(unittest.TestCase):
         self.assertEqual(chunk_without_backend["path"], "xyn_orchestrator/xyn_api.py")
         self.assertIn("non_backend", chunk_without_backend["content"])
 
+    def test_read_file_chunk_accepts_repo_relative_path_when_canonical_key_is_root_relative(self) -> None:
+        files = {
+            "backend/xyn_orchestrator/architecture_placement.py": b"def placement():\n    return 'ok'\n",
+        }
+        chunk = read_file_chunk(
+            files=files,
+            path="services/xyn-api/backend/xyn_orchestrator/architecture_placement.py",
+            start_line=1,
+            end_line=2,
+        )
+        self.assertEqual(chunk["path"], "backend/xyn_orchestrator/architecture_placement.py")
+        self.assertIn("placement", chunk["content"])
+
     def test_read_file_chunk_near_match_error_includes_candidate_paths(self) -> None:
         files = {
             "apps/a/xyn_api.py": b"def a():\n    return 1\n",
@@ -110,6 +125,47 @@ class ArtifactCodeReviewTests(unittest.TestCase):
             sorted(ctx.exception.candidate_paths),
             sorted(["apps/a/xyn_api.py", "apps/b/xyn_api.py"]),
         )
+
+    def test_tree_search_and_analysis_paths_are_directly_readable(self) -> None:
+        files = {
+            "backend/xyn_orchestrator/architecture_placement.py": b"def placement():\n    return 'ok'\n",
+            "backend/xyn_orchestrator/guardrails/canonical_boundaries.py": b"RULE = 'xyn_api.py source of truth'\n",
+            "xyn_orchestrator/tests/test_solution_change_session_repo_commits.py": b"def test_commit_chain():\n    assert True\n",
+        }
+        tree_rows = build_source_index(files, include_line_counts=True)
+        self.assertTrue(tree_rows)
+        tree_path = str(tree_rows[0]["path"])
+        tree_chunk = read_file_chunk(files=files, path=tree_path, start_line=1, end_line=2)
+        self.assertEqual(tree_chunk["path"], tree_path)
+
+        search_result = search_files(files=files, query="xyn_api.py", limit=10)
+        self.assertGreaterEqual(search_result["total_hits"], 1)
+        search_path = str(search_result["files"][0]["path"])
+        search_chunk = read_file_chunk(files=files, path=search_path, start_line=1, end_line=2)
+        self.assertEqual(search_chunk["path"], search_path)
+
+        analysis = analyze_codebase(files, mode="general")
+        largest = analysis.get("largest_files_by_line_count") if isinstance(analysis.get("largest_files_by_line_count"), list) else []
+        self.assertTrue(largest)
+        analysis_path = str(largest[0]["path"])
+        analysis_chunk = read_file_chunk(files=files, path=analysis_path, start_line=1, end_line=2)
+        self.assertEqual(analysis_chunk["path"], analysis_path)
+
+    def test_large_python_file_is_readable_when_within_configured_limit(self) -> None:
+        from core import artifact_source_resolution as module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            module._DEFAULT_MAX_FILE_BYTES = 4 * 1024 * 1024
+            module._DEFAULT_MAX_TOTAL_BYTES = 8 * 1024 * 1024
+            module._DEFAULT_MAX_FILES = 100
+            target = root / "backend" / "xyn_orchestrator" / "xyn_api.py"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"a" * (2 * 1024 * 1024))
+            files, roots, warnings = module._read_source_roots([root])
+            self.assertIn("backend/xyn_orchestrator/xyn_api.py", files)
+            self.assertEqual(roots, [str(root.resolve())])
+            self.assertEqual(warnings, [])
 
     def test_compute_metrics_and_analysis_include_expected_fields(self) -> None:
         files = {
