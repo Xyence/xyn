@@ -9,6 +9,7 @@ from core.artifact_code_review import (
     build_hierarchical_tree,
     build_source_index,
     compute_module_metrics,
+    FilePathNotFoundError,
     parse_artifact_source_files,
     read_file_chunk,
     search_files,
@@ -64,6 +65,51 @@ class ArtifactCodeReviewTests(unittest.TestCase):
         self.assertGreaterEqual(result["total_hits"], 1)
         self.assertEqual(len(result["files"]), 1)
         self.assertEqual(result["files"][0]["path"], "a.py")
+
+    def test_search_hit_path_can_be_read_directly(self) -> None:
+        files = {
+            "backend/xyn_orchestrator/xyn_api.py": b"def handler():\n    return 1\n",
+            "xyn_orchestrator/xyn_api.py": b"def mirrored():\n    return 2\n",
+        }
+        result = search_files(files=files, query="handler", limit=10)
+        self.assertGreaterEqual(result["total_hits"], 1)
+        hit_path = str(result["files"][0]["path"])
+        chunk = read_file_chunk(files=files, path=hit_path, start_line=1, end_line=2)
+        self.assertEqual(chunk["path"], hit_path)
+        self.assertIn("handler", chunk["content"])
+
+    def test_read_file_chunk_resolves_backend_mirror_paths(self) -> None:
+        files = {
+            "backend/xyn_orchestrator/xyn_api.py": b"def backend_only():\n    return 1\n",
+        }
+        chunk = read_file_chunk(files=files, path="xyn_orchestrator/xyn_api.py", start_line=1, end_line=2)
+        self.assertEqual(chunk["path"], "backend/xyn_orchestrator/xyn_api.py")
+        self.assertIn("backend_only", chunk["content"])
+
+        files_without_backend = {
+            "xyn_orchestrator/xyn_api.py": b"def non_backend():\n    return 2\n",
+        }
+        chunk_without_backend = read_file_chunk(
+            files=files_without_backend,
+            path="backend/xyn_orchestrator/xyn_api.py",
+            start_line=1,
+            end_line=2,
+        )
+        self.assertEqual(chunk_without_backend["path"], "xyn_orchestrator/xyn_api.py")
+        self.assertIn("non_backend", chunk_without_backend["content"])
+
+    def test_read_file_chunk_near_match_error_includes_candidate_paths(self) -> None:
+        files = {
+            "apps/a/xyn_api.py": b"def a():\n    return 1\n",
+            "apps/b/xyn_api.py": b"def b():\n    return 2\n",
+        }
+        with self.assertRaises(FilePathNotFoundError) as ctx:
+            read_file_chunk(files=files, path="xyn_api.py", start_line=1, end_line=1)
+        self.assertEqual(str(ctx.exception), "'file not found'")
+        self.assertEqual(
+            sorted(ctx.exception.candidate_paths),
+            sorted(["apps/a/xyn_api.py", "apps/b/xyn_api.py"]),
+        )
 
     def test_compute_metrics_and_analysis_include_expected_fields(self) -> None:
         files = {

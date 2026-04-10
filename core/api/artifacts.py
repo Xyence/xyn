@@ -16,6 +16,7 @@ from core.artifact_code_review import (
     build_hierarchical_tree,
     build_source_index,
     compute_module_metrics,
+    FilePathNotFoundError,
     parse_artifact_source_files,
     read_file_chunk,
     search_files,
@@ -366,8 +367,13 @@ async def read_artifact_source_file(
     files = resolved["files"] if isinstance(resolved.get("files"), dict) else {}
     try:
         chunk = read_file_chunk(files=files, path=path, start_line=start_line, end_line=end_line)
+    except FilePathNotFoundError as exc:
+        detail: dict[str, Any] = {"error": "file not found"}
+        if exc.candidate_paths:
+            detail["candidate_paths"] = exc.candidate_paths
+        raise HTTPException(status_code=404, detail=detail) from exc
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail={"error": str(exc)}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {

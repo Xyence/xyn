@@ -52,6 +52,14 @@ _DEFAULT_SEARCH_LIMIT = 200
 _MAX_SEARCH_LIMIT = 2000
 
 
+class FilePathNotFoundError(KeyError):
+    """Raised when a requested source path cannot be resolved."""
+
+    def __init__(self, message: str = "file not found", *, candidate_paths: Optional[list[str]] = None):
+        super().__init__(message)
+        self.candidate_paths = list(candidate_paths or [])
+
+
 def detect_language(path: str) -> str:
     suffix = Path(str(path or "")).suffix.lower()
     if suffix in _LANGUAGE_BY_SUFFIX:
@@ -201,10 +209,14 @@ def read_file_chunk(
 ) -> dict[str, Any]:
     raw_path = str(path or "").replace("\\", "/").strip().lstrip("/")
     safe_path = _safe_archive_path(raw_path or "")
-    if not safe_path or safe_path not in files:
-        raise KeyError("file not found")
-    blob = files[safe_path]
-    language = detect_language(safe_path)
+    if not safe_path:
+        raise FilePathNotFoundError("file not found")
+    resolved_path = _resolve_read_path(files=files, requested_path=safe_path)
+    if resolved_path is None:
+        candidates = _candidate_read_paths(files=files, requested_path=safe_path)
+        raise FilePathNotFoundError("file not found", candidate_paths=candidates)
+    blob = files[resolved_path]
+    language = detect_language(resolved_path)
     text = _decode_text(blob)
     if text is None or not _is_text_language(language):
         raise ValueError("file is not readable text")
@@ -222,7 +234,7 @@ def read_file_chunk(
     resolved_end = min(total_lines, max(resolved_start, resolved_end))
     selected = lines[resolved_start - 1 : resolved_end]
     return {
-        "path": safe_path,
+        "path": resolved_path,
         "language": language,
         "total_lines": total_lines,
         "returned_start_line": resolved_start,
@@ -230,6 +242,76 @@ def read_file_chunk(
         "sha256": hashlib.sha256(blob).hexdigest(),
         "content": "\n".join(selected),
     }
+
+
+def _resolve_read_path(*, files: dict[str, bytes], requested_path: str) -> Optional[str]:
+    safe_path = _safe_archive_path(requested_path)
+    if not safe_path:
+        return None
+    if safe_path in files:
+        return safe_path
+    candidates = _candidate_read_paths(files=files, requested_path=safe_path)
+    if not candidates:
+        return None
+    # If multiple candidates have identical confidence score, require caller disambiguation.
+    scored = _score_candidate_paths(candidates=candidates, requested_path=safe_path)
+    if len(scored) > 1 and scored[0][0] == scored[1][0]:
+        return None
+    return scored[0][1]
+
+
+def _candidate_read_paths(*, files: dict[str, bytes], requested_path: str) -> list[str]:
+    safe_path = _safe_archive_path(requested_path)
+    if not safe_path:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(path: str) -> None:
+        token = str(path or "").strip()
+        if not token or token in seen:
+            return
+        seen.add(token)
+        out.append(token)
+
+    # Backend/non-backend mirror compatibility.
+    if safe_path.startswith("backend/"):
+        mirrored = safe_path[len("backend/") :]
+    else:
+        mirrored = f"backend/{safe_path}"
+    if mirrored in files:
+        add(mirrored)
+
+    # Suffix-aware matching for repo-root relative vs selected-root relative paths.
+    for file_path in sorted(files.keys()):
+        if file_path.endswith("/" + safe_path) or safe_path.endswith("/" + file_path):
+            add(file_path)
+
+    # Best-effort near match by basename when exact/suffix path differs.
+    requested_name = Path(safe_path).name
+    if requested_name:
+        for file_path in sorted(files.keys()):
+            if Path(file_path).name == requested_name:
+                add(file_path)
+
+    return out[:20]
+
+
+def _score_candidate_paths(*, candidates: list[str], requested_path: str) -> list[tuple[tuple[int, int, int, int], str]]:
+    requested = str(requested_path or "")
+    requested_parts = [part for part in requested.split("/") if part]
+    requested_backend = requested.startswith("backend/")
+    scored: list[tuple[tuple[int, int, int, int], str]] = []
+    for candidate in candidates:
+        path = str(candidate)
+        parts = [part for part in path.split("/") if part]
+        suffix_match = int(not (path.endswith("/" + requested) or requested.endswith("/" + path)))
+        backend_mismatch = int(path.startswith("backend/") != requested_backend)
+        depth_delta = abs(len(parts) - len(requested_parts))
+        tie_break = len(path)
+        scored.append(((suffix_match, backend_mismatch, depth_delta, tie_break), path))
+    scored.sort(key=lambda item: item[0])
+    return scored
 
 
 def search_files(

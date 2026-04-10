@@ -12,6 +12,7 @@ from core.artifact_code_review import (
     build_hierarchical_tree,
     build_source_index,
     compute_module_metrics,
+    FilePathNotFoundError,
     parse_artifact_source_files,
     read_file_chunk,
     search_files,
@@ -858,6 +859,18 @@ class XynApiAdapter:
                         start_line=start_line,
                         end_line=end_line,
                     )
+                except FilePathNotFoundError as exc:
+                    response: Dict[str, Any] = {"error": "file not found"}
+                    if exc.candidate_paths:
+                        response["candidate_paths"] = exc.candidate_paths
+                    return {
+                        "ok": False,
+                        "status_code": 404,
+                        "method": "GET",
+                        "path": "/api/v1/artifacts/source-file",
+                        "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                        "response": response,
+                    }
                 except (KeyError, ValueError) as exc:
                     return {
                         "ok": False,
