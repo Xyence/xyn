@@ -359,6 +359,782 @@ class XynMcpAdapterTests(TestCase):
         self.assertIn("http://xyn-core:8000/api/v1/releases/declare", urls)
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_change_effort_resolve_source_normalizes_provenance_fields(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "change_effort": {
+                "id": "eff-1",
+                "artifact_slug": "xyn-api",
+                "repo_key": "xyn-platform",
+                "repo_url": "https://github.com/xyence/xyn-platform",
+                "repo_subpath": "services/xyn-api/backend",
+                "work_branch": "xyn/xyn-api/abc123",
+                "target_branch": "develop",
+                "worktree_path": "/workspace/.xyn/change-efforts/ws/eff-1",
+                "status": "source_resolved",
+                "metadata_json": {"application_id": "app-1", "session_id": "sess-1"},
+            },
+            "source": {
+                "kind": "git",
+                "repo_key": "xyn-platform",
+                "repo_url": "https://github.com/xyence/xyn-platform",
+                "commit_sha": "3f93410",
+                "monorepo_subpath": "services/xyn-api/backend",
+            },
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                code_api_base_url="http://xyn-core:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.resolve_effort_source(effort_id="eff-1")
+        self.assertTrue(result["ok"])
+        body = result.get("response") or {}
+        self.assertEqual(body.get("repo_key"), "xyn-platform")
+        self.assertEqual(body.get("commit_sha"), "3f93410")
+        self.assertEqual(body.get("source_roots"), ["services/xyn-api/backend"])
+        self.assertEqual(body.get("branch_name"), "xyn/xyn-api/abc123")
+        self.assertEqual(body.get("allowed_paths"), ["services/xyn-api/backend/**"])
+        linked = body.get("linked_change_session") or {}
+        self.assertTrue(linked.get("connected"))
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_change_effort_branch_and_worktree_allocation_surface_deterministic_context(self, mock_request: mock.Mock) -> None:
+        branch = mock.Mock()
+        branch.status_code = 200
+        branch.json.return_value = {
+            "change_effort": {
+                "id": "eff-2",
+                "artifact_slug": "xyn-api",
+                "repo_key": "xyn-platform",
+                "repo_subpath": "services/xyn-api/backend",
+                "work_branch": "xyn/xyn-api/123456789abc",
+                "target_branch": "develop",
+                "status": "branch_allocated",
+                "metadata_json": {},
+            }
+        }
+        worktree = mock.Mock()
+        worktree.status_code = 200
+        worktree.json.return_value = {
+            "change_effort": {
+                "id": "eff-2",
+                "artifact_slug": "xyn-api",
+                "repo_key": "xyn-platform",
+                "repo_subpath": "services/xyn-api/backend",
+                "work_branch": "xyn/xyn-api/123456789abc",
+                "target_branch": "develop",
+                "worktree_path": "/workspace/.xyn/change-efforts/ws/eff-2",
+                "status": "worktree_allocated",
+                "metadata_json": {},
+            }
+        }
+        mock_request.side_effect = [branch, worktree]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                code_api_base_url="http://xyn-core:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        branch_result = adapter.allocate_effort_branch(effort_id="eff-2", payload={"base_branch": "develop"})
+        worktree_result = adapter.allocate_effort_worktree(effort_id="eff-2", payload={"root_path": "/workspace/.xyn/change-efforts"})
+        self.assertTrue(branch_result["ok"])
+        self.assertEqual((branch_result.get("response") or {}).get("branch_name"), "xyn/xyn-api/123456789abc")
+        self.assertTrue(worktree_result["ok"])
+        worktree_body = worktree_result.get("response") or {}
+        self.assertEqual(worktree_body.get("worktree_path"), "/workspace/.xyn/change-efforts/ws/eff-2")
+        self.assertEqual(worktree_body.get("worktree_token"), "eff-2")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_change_effort_resolve_source_structured_errors_for_missing_provenance_and_ambiguity(self, mock_request: mock.Mock) -> None:
+        missing = mock.Mock()
+        missing.status_code = 409
+        missing.json.return_value = {"detail": "artifact provenance is missing source.kind=git"}
+        ambiguous = mock.Mock()
+        ambiguous.status_code = 409
+        ambiguous.json.return_value = {"detail": "ambiguous source mapping for artifact slug"}
+        mock_request.side_effect = [missing, ambiguous]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                code_api_base_url="http://xyn-core:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        missing_result = adapter.resolve_effort_source(effort_id="eff-missing")
+        ambiguous_result = adapter.resolve_effort_source(effort_id="eff-ambiguous")
+        self.assertFalse(missing_result["ok"])
+        self.assertEqual((missing_result.get("response") or {}).get("blocked_reason"), "missing_provenance")
+        self.assertFalse(ambiguous_result["ok"])
+        self.assertEqual((ambiguous_result.get("response") or {}).get("blocked_reason"), "ambiguous_source")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_change_effort_preview_binding_connects_to_change_session_preview_status(self, mock_request: mock.Mock) -> None:
+        effort = mock.Mock()
+        effort.status_code = 200
+        effort.json.return_value = {
+            "change_effort": {
+                "id": "eff-9",
+                "artifact_slug": "xyn-api",
+                "metadata_json": {"application_id": "app-1", "session_id": "sess-1"},
+                "status": "worktree_allocated",
+            }
+        }
+        session_control = mock.Mock()
+        session_control.status_code = 200
+        session_control.json.return_value = {
+            "status": "preview_ready",
+            "preview_urls": ["https://preview.example.com/sess-1"],
+            "session_build": {"status": "ready"},
+        }
+        mock_request.side_effect = [effort, session_control]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                code_api_base_url="http://xyn-core:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.get_effort_preview_binding(effort_id="eff-9")
+        self.assertTrue(result["ok"])
+        body = result.get("response") or {}
+        self.assertEqual(((body.get("preview_binding") or {}).get("preview_status")), "preview_ready")
+        self.assertEqual(((body.get("linked_change_session") or {}).get("application_id")), "app-1")
+        urls = [call.kwargs.get("url") for call in mock_request.call_args_list]
+        self.assertIn("http://xyn-core:8000/api/v1/change-efforts/eff-9", urls)
+        self.assertIn("http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/control", urls)
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_effort_changed_files_falls_back_to_effort_metadata_when_endpoint_missing(self, mock_request: mock.Mock) -> None:
+        missing_endpoint_1 = mock.Mock()
+        missing_endpoint_1.status_code = 404
+        missing_endpoint_1.json.return_value = {"detail": "Not Found"}
+        missing_endpoint_2 = mock.Mock()
+        missing_endpoint_2.status_code = 404
+        missing_endpoint_2.json.return_value = {"detail": "Not Found"}
+        effort = mock.Mock()
+        effort.status_code = 200
+        effort.json.return_value = {
+            "change_effort": {
+                "id": "eff-10",
+                "artifact_slug": "xyn-api",
+                "status": "worktree_allocated",
+                "metadata_json": {"changed_files": ["xyn_orchestrator/xyn_api.py"]},
+            }
+        }
+        mock_request.side_effect = [missing_endpoint_1, missing_endpoint_2, effort]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                code_api_base_url="http://xyn-core:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.get_effort_changed_files(effort_id="eff-10")
+        self.assertTrue(result["ok"])
+        self.assertEqual((result.get("response") or {}).get("changed_files"), ["xyn_orchestrator/xyn_api.py"])
+        self.assertEqual((result.get("response") or {}).get("blocked_reason"), "not_supported")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_application_and_change_session_discovery_routes(self, mock_request: mock.Mock) -> None:
+        list_apps = mock.Mock()
+        list_apps.status_code = 200
+        list_apps.json.return_value = {"applications": [{"id": "app-1", "slug": "xyn-api", "name": "Xyn API", "status": "active"}]}
+
+        get_app = mock.Mock()
+        get_app.status_code = 200
+        get_app.json.return_value = {"id": "app-1", "slug": "xyn-api", "name": "Xyn API", "status": "active"}
+
+        list_sessions = mock.Mock()
+        list_sessions.status_code = 200
+        list_sessions.json.return_value = {"change_sessions": [{"id": "sess-1", "application_id": "app-1", "status": "draft"}]}
+
+        get_session = mock.Mock()
+        get_session.status_code = 200
+        get_session.json.return_value = {"id": "sess-1", "application_id": "app-1", "status": "draft"}
+
+        mock_request.side_effect = [list_apps, get_app, list_sessions, get_session]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        applications = adapter.list_applications()
+        application = adapter.get_application(application_id="app-1")
+        sessions = adapter.list_application_change_sessions(application_id="app-1")
+        session = adapter.get_application_change_session(application_id="app-1", session_id="sess-1")
+
+        self.assertTrue(applications["ok"])
+        self.assertEqual((applications.get("response") or {}).get("count"), 1)
+        self.assertTrue(application["ok"])
+        self.assertEqual(((application.get("response") or {}).get("application") or {}).get("id"), "app-1")
+        self.assertTrue(sessions["ok"])
+        self.assertEqual((sessions.get("response") or {}).get("count"), 1)
+        self.assertTrue(session["ok"])
+        self.assertEqual(((session.get("response") or {}).get("change_session") or {}).get("id"), "sess-1")
+
+        urls = [call.kwargs.get("url") for call in mock_request.call_args_list]
+        self.assertIn("http://xyn.local:8001/xyn/api/applications", urls)
+        self.assertIn("http://xyn.local:8001/xyn/api/applications/app-1", urls)
+        self.assertIn("http://xyn.local:8001/xyn/api/applications/app-1/change-sessions", urls)
+        self.assertIn("http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1", urls)
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_application_change_session_workflow_create_stage_preview_validate_commit(self, mock_request: mock.Mock) -> None:
+        create = mock.Mock()
+        create.status_code = 201
+        create.json.return_value = {"session_id": "sess-1", "status": "created"}
+
+        stage = mock.Mock()
+        stage.status_code = 200
+        stage.json.return_value = {"status": "staged", "preview_url": "https://preview.example.com/sess-1"}
+
+        preview = mock.Mock()
+        preview.status_code = 200
+        preview.json.return_value = {"status": "preview_ready", "preview_urls": ["https://preview.example.com/sess-1"]}
+
+        validate = mock.Mock()
+        validate.status_code = 200
+        validate.json.return_value = {"status": "validated", "next_allowed_actions": ["commit_application_change_session"]}
+
+        commit = mock.Mock()
+        commit.status_code = 200
+        commit.json.return_value = {"status": "committed", "commit_sha": "abcdef0123456789"}
+
+        mock_request.side_effect = [create, stage, preview, validate, commit]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        create_result = adapter.create_application_change_session(application_id="app-1", payload={"title": "Session 1"})
+        stage_result = adapter.stage_apply_application_change_session(application_id="app-1", session_id="sess-1")
+        preview_result = adapter.prepare_preview_application_change_session(application_id="app-1", session_id="sess-1")
+        validate_result = adapter.validate_application_change_session(application_id="app-1", session_id="sess-1")
+        commit_result = adapter.commit_application_change_session(application_id="app-1", session_id="sess-1")
+
+        self.assertTrue(create_result["ok"])
+        self.assertEqual((create_result.get("response") or {}).get("current_status"), "created")
+        self.assertTrue(stage_result["ok"])
+        self.assertEqual((stage_result.get("response") or {}).get("preview_urls"), ["https://preview.example.com/sess-1"])
+        self.assertTrue(preview_result["ok"])
+        self.assertEqual((preview_result.get("response") or {}).get("current_status"), "preview_ready")
+        self.assertTrue(validate_result["ok"])
+        self.assertIn("commit_application_change_session", (validate_result.get("response") or {}).get("next_allowed_actions") or [])
+        self.assertTrue(commit_result["ok"])
+        self.assertEqual((commit_result.get("response") or {}).get("commit_shas"), ["abcdef0123456789"])
+
+        urls = [call.kwargs.get("url") for call in mock_request.call_args_list]
+        self.assertIn("http://xyn.local:8001/xyn/api/applications/app-1/change-sessions", urls)
+        self.assertEqual(
+            urls.count("http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/control/actions"),
+            4,
+        )
+        action_bodies = [call.kwargs.get("json") for call in mock_request.call_args_list if call.kwargs.get("json")]
+        operations = [str(body.get("operation")) for body in action_bodies if isinstance(body, dict) and body.get("operation")]
+        self.assertEqual(operations, ["stage_apply", "prepare_preview", "validate", "commit"])
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_application_change_session_workflow_promote_evidence_rollback(self, mock_request: mock.Mock) -> None:
+        promote = mock.Mock()
+        promote.status_code = 200
+        promote.json.return_value = {
+            "status": "promoted",
+            "promotion_evidence_id": "pe-1",
+            "merge_commit_sha": "0123456789abcdef",
+        }
+
+        evidence = mock.Mock()
+        evidence.status_code = 200
+        evidence.json.return_value = {"items": [{"id": "pe-1", "type": "promotion_evidence"}], "status": "available"}
+
+        rollback = mock.Mock()
+        rollback.status_code = 200
+        rollback.json.return_value = {"status": "rolled_back", "evidence_id": "rb-1"}
+
+        mock_request.side_effect = [promote, evidence, rollback]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        promote_result = adapter.promote_application_change_session(application_id="app-1", session_id="sess-1")
+        evidence_result = adapter.get_application_change_session_promotion_evidence(application_id="app-1", session_id="sess-1")
+        rollback_result = adapter.rollback_application_change_session(application_id="app-1", session_id="sess-1")
+
+        self.assertTrue(promote_result["ok"])
+        self.assertEqual((promote_result.get("response") or {}).get("promotion_evidence_ids"), ["pe-1"])
+        self.assertEqual((promote_result.get("response") or {}).get("commit_shas"), ["0123456789abcdef"])
+
+        self.assertTrue(evidence_result["ok"])
+        self.assertEqual((evidence_result.get("response") or {}).get("promotion_evidence_ids"), ["pe-1"])
+
+        self.assertTrue(rollback_result["ok"])
+        self.assertEqual((rollback_result.get("response") or {}).get("promotion_evidence_ids"), ["rb-1"])
+
+        urls = [call.kwargs.get("url") for call in mock_request.call_args_list]
+        self.assertEqual(urls[0], "http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/control/actions")
+        self.assertEqual(urls[1], "http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/promotion-evidence")
+        self.assertEqual(urls[2], "http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/control/actions")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_compact_preview_status_isolated_preview_success(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "status": "preview_ready",
+            "preview_urls": ["https://preview.example.com/sess-1"],
+            "isolated_session_preview_requested": True,
+            "session_build": {"status": "ready", "reason": ""},
+            "compose_project": "xyn-preview-sess-1",
+            "runtime_target_ids": ["rt-1"],
+            "artifacts": [{"artifact_id": "a1", "artifact_slug": "xyn-api", "ready": True, "status": "ready"}],
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.get_application_change_session_preview_status(application_id="app-1", session_id="sess-1")
+        self.assertTrue(result["ok"])
+        preview = ((result.get("response") or {}).get("preview") or {})
+        self.assertEqual(preview.get("preview_status"), "preview_ready")
+        self.assertEqual(preview.get("primary_url"), "https://preview.example.com/sess-1")
+        self.assertTrue(preview.get("isolated_session_preview_requested"))
+        self.assertEqual(((preview.get("session_build") or {}).get("status")), "ready")
+        self.assertEqual(preview.get("compose_project"), "xyn-preview-sess-1")
+        self.assertEqual(preview.get("runtime_target_ids"), ["rt-1"])
+        readiness = preview.get("artifact_readiness") or {}
+        self.assertEqual(readiness.get("ready_count"), 1)
+        self.assertFalse(preview.get("used_existing_runtime_fallback"))
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_compact_preview_status_fallback_reuse_success(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "status": "preview_ready",
+            "preview_url": "https://preview.example.com/reused",
+            "session_build": {"status": "ready"},
+            "used_existing_runtime": True,
+            "fallback_reason": "isolated_provision_skipped",
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.get_application_change_session_preview_status(application_id="app-1", session_id="sess-1")
+        self.assertTrue(result["ok"])
+        preview = ((result.get("response") or {}).get("preview") or {})
+        self.assertTrue(preview.get("used_existing_runtime_fallback"))
+        self.assertEqual(preview.get("existing_runtime_fallback_reason"), "isolated_provision_skipped")
+        self.assertEqual(preview.get("primary_url"), "https://preview.example.com/reused")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_compact_preview_status_provision_failure_normalized(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "status": "preview_failed",
+            "session_build": {"status": "failed", "reason": "preview provision failed: compose up error"},
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.get_application_change_session_preview_status(application_id="app-1", session_id="sess-1")
+        self.assertTrue(result["ok"])
+        reason = (((result.get("response") or {}).get("preview") or {}).get("session_build") or {}).get("reason")
+        self.assertEqual(reason, "session_preview_provision_failed")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_compact_preview_status_runtime_health_failure_normalized(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "status": "preview_failed",
+            "session_build": {"status": "failed", "reason": "preview environment unavailable: runtime health check failed"},
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.get_application_change_session_preview_status(application_id="app-1", session_id="sess-1")
+        self.assertTrue(result["ok"])
+        reason = (((result.get("response") or {}).get("preview") or {}).get("session_build") or {}).get("reason")
+        self.assertEqual(reason, "preview_environment_unavailable")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_decomposition_campaign_end_to_end_mocked_flow(self, mock_request: mock.Mock) -> None:
+        create = mock.Mock()
+        create.status_code = 201
+        create.json.return_value = {
+            "session_id": "sess-decomp-1",
+            "status": "created",
+            "decomposition_campaign": {
+                "kind": "xyn_api_decomposition",
+                "target_source_files": ["xyn_orchestrator/xyn_api.py"],
+                "extraction_seams": ["api.v1.applications"],
+                "required_test_suites": ["backend_fastapi_routes", "orchestrator_unit"],
+            },
+        }
+        stage = mock.Mock()
+        stage.status_code = 200
+        stage.json.return_value = {
+            "status": "staged",
+            "changed_files": [
+                "xyn_orchestrator/xyn_api.py",
+                "xyn_orchestrator/api/applications.py",
+            ],
+            "test_recommendations": ["backend_fastapi_routes", "orchestrator_unit"],
+        }
+        runtime_list = mock.Mock()
+        runtime_list.status_code = 200
+        runtime_list.json.return_value = {
+            "runtime_runs": [
+                {"id": "run-77", "status": "completed", "worker_type": "codex", "summary": "apply patch complete"}
+            ]
+        }
+        runtime_get = mock.Mock()
+        runtime_get.status_code = 200
+        runtime_get.json.return_value = {
+            "id": "run-77",
+            "status": "completed",
+            "worker_type": "codex",
+            "summary": "run completed",
+            "outputs": {"patch": "artifact://patch.diff", "report": "artifact://report.md"},
+        }
+        runtime_logs = mock.Mock()
+        runtime_logs.status_code = 200
+        runtime_logs.json.return_value = {"steps": [{"id": "step-1", "name": "pytest", "status": "completed", "summary": "all pass"}]}
+        runtime_artifacts = mock.Mock()
+        runtime_artifacts.status_code = 200
+        runtime_artifacts.json.return_value = {"artifacts": [{"id": "a-patch", "name": "patch.diff", "kind": "patch"}]}
+        preview = mock.Mock()
+        preview.status_code = 200
+        preview.json.return_value = {
+            "status": "preview_ready",
+            "preview_urls": ["https://preview.example.com/sess-decomp-1"],
+            "isolated_session_preview_requested": True,
+            "session_build": {"status": "ready", "reason": ""},
+            "runtime_target_ids": ["rt-7"],
+        }
+        validate = mock.Mock()
+        validate.status_code = 200
+        validate.json.return_value = {"status": "validated"}
+        commit = mock.Mock()
+        commit.status_code = 200
+        commit.json.return_value = {
+            "status": "committed",
+            "commit_sha": "deadbeefdeadbeef",
+            "changed_files": [
+                "xyn_orchestrator/xyn_api.py",
+                "xyn_orchestrator/api/applications.py",
+            ],
+        }
+        promote = mock.Mock()
+        promote.status_code = 200
+        promote.json.return_value = {
+            "status": "promoted",
+            "merge_commit_sha": "feedfacefeedface",
+            "promotion_evidence_id": "pe-77",
+        }
+
+        mock_request.side_effect = [
+            create,
+            stage,
+            runtime_list,
+            runtime_get,
+            runtime_logs,
+            runtime_artifacts,
+            preview,
+            validate,
+            commit,
+            promote,
+        ]
+
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        create_result = adapter.create_decomposition_campaign(
+            application_id="app-1",
+            target_source_files=["xyn_orchestrator/xyn_api.py"],
+            extraction_seams=["api.v1.applications"],
+            moved_handlers_modules=["xyn_orchestrator/api/applications.py"],
+            required_test_suites=["backend_fastapi_routes", "orchestrator_unit"],
+        )
+        stage_result = adapter.stage_apply_application_change_session(application_id="app-1", session_id="sess-decomp-1")
+        runs_result = adapter.list_runtime_runs(application_id="app-1", session_id="sess-decomp-1")
+        run_result = adapter.get_runtime_run(run_id="run-77", application_id="app-1", session_id="sess-decomp-1")
+        logs_result = adapter.get_runtime_run_logs(run_id="run-77", application_id="app-1", session_id="sess-decomp-1")
+        artifacts_result = adapter.get_runtime_run_artifacts(run_id="run-77", application_id="app-1", session_id="sess-decomp-1")
+        preview_result = adapter.prepare_preview_application_change_session(application_id="app-1", session_id="sess-decomp-1")
+        validate_result = adapter.validate_application_change_session(application_id="app-1", session_id="sess-decomp-1")
+        commit_result = adapter.commit_application_change_session(application_id="app-1", session_id="sess-decomp-1")
+        promote_result = adapter.promote_application_change_session(application_id="app-1", session_id="sess-decomp-1")
+
+        self.assertTrue(create_result["ok"])
+        campaign = (create_result.get("response") or {}).get("decomposition_campaign") or {}
+        self.assertEqual(campaign.get("kind"), "xyn_api_decomposition")
+        self.assertEqual(campaign.get("target_source_files"), ["xyn_orchestrator/xyn_api.py"])
+
+        self.assertTrue(stage_result["ok"])
+        guardrails = (stage_result.get("response") or {}).get("guardrails") or {}
+        self.assertIn("xyn_orchestrator/xyn_api.py", guardrails.get("affected_files") or [])
+
+        self.assertTrue(runs_result["ok"])
+        self.assertEqual((runs_result.get("response") or {}).get("count"), 1)
+        self.assertTrue(run_result["ok"])
+        self.assertEqual((run_result.get("response") or {}).get("current_status"), "completed")
+        self.assertTrue(logs_result["ok"])
+        self.assertTrue(artifacts_result["ok"])
+        self.assertTrue(preview_result["ok"])
+        self.assertEqual((((preview_result.get("response") or {}).get("preview") or {}).get("preview_status")), "preview_ready")
+        self.assertTrue(validate_result["ok"])
+        self.assertTrue(commit_result["ok"])
+        self.assertIn("deadbeefdeadbeef", (commit_result.get("response") or {}).get("commit_shas") or [])
+        self.assertIn("xyn_orchestrator/xyn_api.py", (commit_result.get("response") or {}).get("changed_files") or [])
+        self.assertTrue(promote_result["ok"])
+        self.assertIn("feedfacefeedface", (promote_result.get("response") or {}).get("commit_shas") or [])
+
+        urls = [call.kwargs.get("url") for call in mock_request.call_args_list]
+        self.assertIn("http://xyn.local:8001/xyn/api/applications/app-1/change-sessions", urls)
+        self.assertIn("http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-decomp-1/runtime-runs", urls)
+        self.assertIn("http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-decomp-1/runtime-runs/run-77", urls)
+
+        action_bodies = [call.kwargs.get("json") for call in mock_request.call_args_list if isinstance(call.kwargs.get("json"), dict)]
+        operations = [str(body.get("operation")) for body in action_bodies if body.get("operation")]
+        self.assertEqual(operations, ["stage_apply", "prepare_preview", "validate", "commit", "promote"])
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_runtime_run_inspection_success(self, mock_request: mock.Mock) -> None:
+        list_runs = mock.Mock()
+        list_runs.status_code = 200
+        list_runs.json.return_value = {
+            "runtime_runs": [
+                {
+                    "id": "run-1",
+                    "status": "completed",
+                    "worker_type": "codex",
+                    "summary": "run completed",
+                    "repo_key": "xyn-platform",
+                    "branch": "feature/x",
+                    "target_branch": "develop",
+                }
+            ]
+        }
+
+        get_run = mock.Mock()
+        get_run.status_code = 200
+        get_run.json.return_value = {
+            "id": "run-1",
+            "status": "completed",
+            "worker_type": "codex",
+            "summary": "run completed",
+            "repo_key": "xyn-platform",
+            "branch": "feature/x",
+            "target_branch": "develop",
+        }
+
+        get_logs = mock.Mock()
+        get_logs.status_code = 200
+        get_logs.json.return_value = {"logs": [{"step_id": "s1", "name": "test", "status": "completed", "summary": "ok"}]}
+
+        get_artifacts = mock.Mock()
+        get_artifacts.status_code = 200
+        get_artifacts.json.return_value = {"artifacts": [{"id": "a1", "name": "report.md", "kind": "report"}]}
+
+        get_commands = mock.Mock()
+        get_commands.status_code = 200
+        get_commands.json.return_value = {"commands": [{"id": "c1", "command": "pytest -q", "status": "completed"}]}
+
+        mock_request.side_effect = [list_runs, get_run, get_logs, get_artifacts, get_commands]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        runs = adapter.list_runtime_runs(application_id="app-1", session_id="sess-1")
+        run = adapter.get_runtime_run(run_id="run-1", application_id="app-1", session_id="sess-1")
+        logs = adapter.get_runtime_run_logs(run_id="run-1", application_id="app-1", session_id="sess-1")
+        artifacts = adapter.get_runtime_run_artifacts(run_id="run-1", application_id="app-1", session_id="sess-1")
+        commands = adapter.get_runtime_run_commands(run_id="run-1", application_id="app-1", session_id="sess-1")
+
+        self.assertTrue(runs["ok"])
+        self.assertEqual((runs.get("response") or {}).get("count"), 1)
+        self.assertTrue(run["ok"])
+        self.assertEqual((run.get("response") or {}).get("current_status"), "completed")
+        repo_target = (run.get("response") or {}).get("repo_target") or {}
+        self.assertEqual(repo_target.get("repo_key"), "xyn-platform")
+        self.assertEqual(repo_target.get("branch"), "feature/x")
+        self.assertTrue(logs["ok"])
+        self.assertEqual((logs.get("response") or {}).get("count"), 1)
+        self.assertTrue(artifacts["ok"])
+        self.assertEqual((artifacts.get("response") or {}).get("count"), 1)
+        self.assertTrue(commands["ok"])
+        self.assertEqual((commands.get("response") or {}).get("count"), 1)
+
+        urls = [call.kwargs.get("url") for call in mock_request.call_args_list]
+        self.assertIn(
+            "http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/runtime-runs",
+            urls,
+        )
+        self.assertIn(
+            "http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/runtime-runs/run-1",
+            urls,
+        )
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_runtime_run_inspection_failure_surfaces_logs_and_errors(self, mock_request: mock.Mock) -> None:
+        get_run = mock.Mock()
+        get_run.status_code = 200
+        get_run.json.return_value = {
+            "id": "run-2",
+            "status": "failed",
+            "worker_type": "codex",
+            "failure_reason": "tests_failed",
+            "error": {"message": "pytest failed"},
+        }
+
+        get_logs = mock.Mock()
+        get_logs.status_code = 200
+        get_logs.json.return_value = {
+            "steps": [
+                {
+                    "id": "s2",
+                    "name": "pytest",
+                    "status": "failed",
+                    "summary": "2 tests failed",
+                    "error": {"detail": "assertion error"},
+                }
+            ]
+        }
+
+        mock_request.side_effect = [get_run, get_logs]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        run = adapter.get_runtime_run(run_id="run-2")
+        logs = adapter.get_runtime_run_logs(run_id="run-2")
+
+        self.assertTrue(run["ok"])
+        self.assertEqual((run.get("response") or {}).get("current_status"), "failed")
+        self.assertEqual((run.get("response") or {}).get("failure_reason"), "tests_failed")
+        self.assertEqual(((run.get("response") or {}).get("error") or {}).get("message"), "pytest failed")
+        self.assertTrue(logs["ok"])
+        first_log = ((logs.get("response") or {}).get("logs") or [{}])[0]
+        self.assertEqual(first_log.get("status"), "failed")
+        self.assertEqual(first_log.get("summary"), "2 tests failed")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_runtime_run_missing_and_forbidden_access(self, mock_request: mock.Mock) -> None:
+        def _not_found() -> mock.Mock:
+            response = mock.Mock()
+            response.status_code = 404
+            response.json.return_value = {"detail": "Run not found"}
+            return response
+
+        forbidden = mock.Mock()
+        forbidden.status_code = 403
+        forbidden.json.return_value = {"detail": "Forbidden"}
+
+        mock_request.side_effect = [_not_found(), _not_found(), _not_found(), _not_found(), forbidden]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        missing = adapter.get_runtime_run(run_id="run-missing")
+        denied = adapter.get_runtime_run(run_id="run-denied")
+
+        self.assertFalse(missing["ok"])
+        self.assertEqual((missing.get("response") or {}).get("blocked_reason"), "not_found")
+        self.assertFalse(denied["ok"])
+        self.assertEqual((denied.get("response") or {}).get("blocked_reason"), "permission_denied")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_list_artifacts_accepts_api_v1_items_shape(self, mock_request: mock.Mock) -> None:
         response = mock.Mock()
         response.status_code = 200

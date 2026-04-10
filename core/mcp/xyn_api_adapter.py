@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
@@ -506,6 +507,1490 @@ class XynApiAdapter:
                 "source_ref_id": str(payload.get("source_ref_id") or ""),
             },
         }
+
+    @staticmethod
+    def _extract_preview_urls(payload: Any) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: Any) -> None:
+            token = str(value or "").strip()
+            if not token:
+                return
+            if token in seen:
+                return
+            seen.add(token)
+            out.append(token)
+
+        def walk(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, inner in value.items():
+                    normalized_key = str(key or "").strip().lower()
+                    if normalized_key in {"preview_url", "url", "preview"} and isinstance(inner, str):
+                        add(inner)
+                    elif normalized_key == "preview_urls" and isinstance(inner, list):
+                        for item in inner:
+                            add(item)
+                    walk(inner)
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item)
+
+        walk(payload)
+        return out
+
+    @staticmethod
+    def _extract_commit_shas(payload: Any) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        candidate_keys = {
+            "commit_sha",
+            "merge_commit_sha",
+            "target_commit_sha",
+            "head_commit_sha",
+            "base_commit_sha",
+            "promotion_commit_sha",
+        }
+
+        def add(value: Any) -> None:
+            token = str(value or "").strip()
+            if not token:
+                return
+            if token in seen:
+                return
+            seen.add(token)
+            out.append(token)
+
+        def walk(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, inner in value.items():
+                    normalized_key = str(key or "").strip().lower()
+                    if normalized_key in candidate_keys:
+                        add(inner)
+                    walk(inner)
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item)
+
+        walk(payload)
+        return out
+
+    @staticmethod
+    def _extract_changed_files(payload: Any) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        candidate_keys = {
+            "changed_file",
+            "changed_files",
+            "files_changed",
+            "affected_file",
+            "affected_files",
+            "files_touched",
+            "modified_files",
+            "touched_files",
+            "paths",
+        }
+
+        def add(value: Any) -> None:
+            token = str(value or "").strip()
+            if not token or token in seen:
+                return
+            seen.add(token)
+            out.append(token)
+
+        def walk(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, inner in value.items():
+                    normalized_key = str(key or "").strip().lower()
+                    if normalized_key in candidate_keys:
+                        if isinstance(inner, list):
+                            for item in inner:
+                                if isinstance(item, dict):
+                                    candidate = item.get("path") or item.get("file") or item.get("name")
+                                    add(candidate)
+                                else:
+                                    add(item)
+                        elif isinstance(inner, dict):
+                            candidate = inner.get("path") or inner.get("file") or inner.get("name")
+                            add(candidate)
+                        else:
+                            add(inner)
+                    walk(inner)
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item)
+
+        walk(payload)
+        return out
+
+    @staticmethod
+    def _extract_string_list(payload: Any, keys: set[str]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: Any) -> None:
+            token = str(value or "").strip()
+            if not token or token in seen:
+                return
+            seen.add(token)
+            out.append(token)
+
+        def walk(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, inner in value.items():
+                    normalized_key = str(key or "").strip().lower()
+                    if normalized_key in keys:
+                        if isinstance(inner, list):
+                            for item in inner:
+                                if isinstance(item, dict):
+                                    add(item.get("name") or item.get("path") or item.get("route") or item.get("import"))
+                                else:
+                                    add(item)
+                        elif isinstance(inner, dict):
+                            add(inner.get("name") or inner.get("path") or inner.get("route") or inner.get("import"))
+                        else:
+                            add(inner)
+                    walk(inner)
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item)
+
+        walk(payload)
+        return out
+
+    @staticmethod
+    def _extract_decomposition_campaign(payload: Any) -> Dict[str, Any]:
+        body = payload if isinstance(payload, dict) else {}
+        candidates: list[Dict[str, Any]] = []
+        for key in ("decomposition_campaign", "campaign", "metadata", "session_metadata", "decomposition"):
+            value = body.get(key)
+            if isinstance(value, dict):
+                candidates.append(value)
+        campaign: Dict[str, Any] = {}
+        for source in candidates:
+            if str(source.get("kind") or "").strip().lower() in {"decomposition", "xyn_api_decomposition"}:
+                campaign = source
+                break
+        if not campaign:
+            campaign = candidates[0] if candidates else {}
+        target_files = campaign.get("target_source_files")
+        if not isinstance(target_files, list):
+            target_files = campaign.get("target_files")
+        seams = campaign.get("extraction_seams")
+        moved = campaign.get("moved_handlers_modules")
+        if not isinstance(moved, list):
+            moved = campaign.get("moved_modules")
+        required_tests = campaign.get("required_test_suites")
+        return {
+            "kind": str(campaign.get("kind") or "xyn_api_decomposition"),
+            "target_source_files": [str(item).strip() for item in (target_files or []) if str(item).strip()],
+            "extraction_seams": [str(item).strip() for item in (seams or []) if str(item).strip()],
+            "moved_handlers_modules": [str(item).strip() for item in (moved or []) if str(item).strip()],
+            "required_test_suites": [str(item).strip() for item in (required_tests or []) if str(item).strip()],
+            "promotion_readiness": str(campaign.get("promotion_readiness") or "unknown"),
+        }
+
+    @staticmethod
+    def _extract_decomposition_guardrails(payload: Any) -> Dict[str, Any]:
+        body = payload if isinstance(payload, dict) else {}
+        changed_routes = XynApiAdapter._extract_string_list(body, {"changed_routes", "route_changes", "route_inventory_delta"})
+        changed_imports = XynApiAdapter._extract_string_list(body, {"changed_imports", "import_changes"})
+        affected_files = XynApiAdapter._extract_changed_files(body)
+        test_recommendations = XynApiAdapter._extract_string_list(
+            body,
+            {"test_recommendations", "recommended_tests", "required_test_suites", "suggested_tests"},
+        )
+        oversized = body.get("oversized_file_delta")
+        if not isinstance(oversized, dict):
+            oversized = {}
+        return {
+            "changed_routes": changed_routes,
+            "changed_imports": changed_imports,
+            "affected_files": affected_files,
+            "oversized_file_delta": oversized,
+            "test_recommendations": test_recommendations,
+        }
+
+    @staticmethod
+    def _extract_promotion_evidence_ids(payload: Any) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: Any) -> None:
+            token = str(value or "").strip()
+            if not token:
+                return
+            if token in seen:
+                return
+            seen.add(token)
+            out.append(token)
+
+        def walk(value: Any) -> None:
+            if isinstance(value, dict):
+                is_evidence_like = any(
+                    token in str(value.get(key) or "").strip().lower()
+                    for key, token in [("type", "evidence"), ("kind", "evidence"), ("category", "evidence")]
+                )
+                if is_evidence_like and value.get("id"):
+                    add(value.get("id"))
+                for key, inner in value.items():
+                    normalized_key = str(key or "").strip().lower()
+                    if normalized_key in {"promotion_evidence_id", "evidence_id"}:
+                        add(inner)
+                    walk(inner)
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item)
+
+        walk(payload)
+        return out
+
+    @staticmethod
+    def _normalize_change_session_result(
+        result: Dict[str, Any],
+        *,
+        application_id: str = "",
+        session_id: str = "",
+        default_next_allowed_actions: Optional[list[str]] = None,
+    ) -> Dict[str, Any]:
+        response = result.get("response")
+        body = response if isinstance(response, dict) else {}
+        status_code = int(result.get("status_code") or 0)
+        ok = bool(result.get("ok"))
+
+        status_candidates = [
+            body.get("status"),
+            body.get("state"),
+            body.get("session_status"),
+            body.get("control_status"),
+        ]
+        control = body.get("control") if isinstance(body.get("control"), dict) else {}
+        status_candidates.extend([control.get("status"), control.get("state")])
+        current_status = next((str(item) for item in status_candidates if str(item or "").strip()), "")
+        if not current_status:
+            current_status = "ok" if ok else ("forbidden" if status_code in {401, 403} else "error")
+
+        blocked_reason = str(body.get("blocked_reason") or "").strip()
+        if not blocked_reason and not ok:
+            if status_code in {401, 403}:
+                blocked_reason = "permission_denied"
+            elif status_code == 404:
+                blocked_reason = "not_found"
+            elif status_code == 409:
+                blocked_reason = "conflict"
+            elif status_code >= 500:
+                blocked_reason = "upstream_error"
+            else:
+                blocked_reason = "request_failed"
+
+        next_allowed_actions = body.get("next_allowed_actions") if isinstance(body.get("next_allowed_actions"), list) else []
+        if not next_allowed_actions:
+            next_allowed_actions = list(default_next_allowed_actions or [])
+
+        normalized = {
+            "application_id": str(application_id or body.get("application_id") or ""),
+            "session_id": str(session_id or body.get("session_id") or ""),
+            "current_status": current_status,
+            "next_allowed_actions": next_allowed_actions,
+            "blocked_reason": blocked_reason,
+            "preview_urls": XynApiAdapter._extract_preview_urls(body),
+            "preview": XynApiAdapter._extract_preview_compact(body),
+            "commit_shas": XynApiAdapter._extract_commit_shas(body),
+            "changed_files": XynApiAdapter._extract_changed_files(body),
+            "promotion_evidence_ids": XynApiAdapter._extract_promotion_evidence_ids(body),
+            "decomposition_campaign": XynApiAdapter._extract_decomposition_campaign(body),
+            "guardrails": XynApiAdapter._extract_decomposition_guardrails(body),
+            "raw": response,
+        }
+        result["response"] = normalized
+        return result
+
+    @staticmethod
+    def _application_discovery_row(payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": str(payload.get("id") or payload.get("application_id") or ""),
+            "slug": str(payload.get("slug") or payload.get("application_slug") or payload.get("name") or ""),
+            "name": str(payload.get("name") or payload.get("title") or payload.get("slug") or ""),
+            "status": str(payload.get("status") or payload.get("state") or ""),
+        }
+
+    @staticmethod
+    def _change_session_discovery_row(payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": str(payload.get("id") or payload.get("session_id") or ""),
+            "application_id": str(payload.get("application_id") or ""),
+            "status": str(payload.get("status") or payload.get("state") or payload.get("session_status") or ""),
+            "created_at": str(payload.get("created_at") or ""),
+            "updated_at": str(payload.get("updated_at") or ""),
+            "summary": str(payload.get("summary") or ""),
+        }
+
+    @staticmethod
+    def _normalize_preview_failure_reason(raw_reason: str) -> str:
+        token = str(raw_reason or "").strip().lower()
+        if not token:
+            return ""
+        allowed = {
+            "runtime_target_missing",
+            "session_preview_provision_failed",
+            "docker_unavailable",
+            "docker_restart_failed",
+            "preview_environment_unavailable",
+        }
+        if token in allowed:
+            return token
+        if "runtime" in token and "target" in token and "missing" in token:
+            return "runtime_target_missing"
+        if "provision" in token and "preview" in token:
+            return "session_preview_provision_failed"
+        if "docker" in token and "restart" in token:
+            return "docker_restart_failed"
+        if "docker" in token and ("unavailable" in token or "not available" in token or "not running" in token):
+            return "docker_unavailable"
+        if "preview" in token and ("unavailable" in token or "health" in token):
+            return "preview_environment_unavailable"
+        return "session_preview_provision_failed"
+
+    @staticmethod
+    def _to_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        token = str(value or "").strip().lower()
+        return token in {"1", "true", "yes", "y", "on"}
+
+    @staticmethod
+    def _extract_preview_compact(payload: Dict[str, Any]) -> Dict[str, Any]:
+        preview_urls = XynApiAdapter._extract_preview_urls(payload)
+        primary_url = preview_urls[0] if preview_urls else str(payload.get("primary_url") or "").strip()
+        isolated_requested = XynApiAdapter._to_bool(
+            payload.get("isolated_session_preview_requested")
+            or payload.get("isolated_preview_requested")
+            or payload.get("session_preview_isolated")
+        )
+        session_build = payload.get("session_build") if isinstance(payload.get("session_build"), dict) else {}
+        session_build_status = str(
+            session_build.get("status")
+            or payload.get("session_build_status")
+            or payload.get("build_status")
+            or ""
+        )
+        raw_reason = str(
+            session_build.get("reason")
+            or payload.get("session_build_reason")
+            or payload.get("failure_reason")
+            or payload.get("preview_failure_reason")
+            or (
+                (payload.get("error") or {}).get("reason")
+                if isinstance(payload.get("error"), dict)
+                else ""
+            )
+            or ""
+        )
+        normalized_reason = XynApiAdapter._normalize_preview_failure_reason(raw_reason)
+        compose_project = str(
+            session_build.get("compose_project")
+            or payload.get("compose_project")
+            or payload.get("preview_compose_project")
+            or ""
+        )
+        if not compose_project and isinstance(payload.get("compose_projects"), list):
+            for item in payload.get("compose_projects") or []:
+                token = str(item or "").strip()
+                if token:
+                    compose_project = token
+                    break
+        runtime_target_ids = XynApiAdapter._extract_values_by_keys(
+            payload,
+            {"runtime_target_id", "runtime_target_ids", "target_id", "target_ids"},
+        )
+        if isinstance(payload.get("runtime_target_ids"), list):
+            for item in payload.get("runtime_target_ids") or []:
+                token = str(item or "").strip()
+                if token and token not in runtime_target_ids:
+                    runtime_target_ids.append(token)
+        runtime_target_ids = [token for token in runtime_target_ids if token]
+        artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), list) else []
+        artifact_readiness = {
+            "ready_count": 0,
+            "not_ready_count": 0,
+            "unknown_count": 0,
+            "items": [],
+        }
+        for row in artifacts:
+            if not isinstance(row, dict):
+                continue
+            status_value = str(row.get("status") or row.get("readiness") or row.get("state") or "")
+            ready_value = row.get("ready") if row.get("ready") is not None else row.get("is_ready")
+            computed_ready = XynApiAdapter._to_bool(ready_value) or status_value.strip().lower() == "ready"
+            item = {
+                "artifact_id": str(row.get("id") or row.get("artifact_id") or ""),
+                "slug": str(row.get("slug") or row.get("artifact_slug") or row.get("name") or ""),
+                "status": status_value,
+                "ready": computed_ready,
+            }
+            if item["ready"]:
+                artifact_readiness["ready_count"] += 1
+            elif item["status"]:
+                artifact_readiness["not_ready_count"] += 1
+            else:
+                artifact_readiness["unknown_count"] += 1
+            artifact_readiness["items"].append(item)
+
+        fallback_used = XynApiAdapter._to_bool(
+            payload.get("fallback_to_existing_runtime")
+            or payload.get("used_existing_runtime")
+            or payload.get("reused_existing_runtime")
+            or session_build.get("fallback_to_existing_runtime")
+            or session_build.get("used_existing_runtime")
+        )
+        fallback_reason = str(
+            payload.get("fallback_reason")
+            or payload.get("existing_runtime_fallback_reason")
+            or session_build.get("fallback_reason")
+            or ""
+        )
+        preview_status = str(
+            payload.get("preview_status")
+            or payload.get("status")
+            or payload.get("state")
+            or session_build_status
+            or ""
+        )
+        return {
+            "preview_status": preview_status,
+            "primary_url": primary_url,
+            "preview_urls": preview_urls,
+            "isolated_session_preview_requested": isolated_requested,
+            "session_build": {
+                "status": session_build_status,
+                "reason": normalized_reason or raw_reason,
+            },
+            "compose_project": compose_project,
+            "runtime_target_ids": runtime_target_ids,
+            "artifact_readiness": artifact_readiness,
+            "used_existing_runtime_fallback": fallback_used,
+            "existing_runtime_fallback_reason": fallback_reason,
+        }
+
+    @staticmethod
+    def _extract_values_by_keys(payload: Any, keys: set[str]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: Any) -> None:
+            token = str(value or "").strip()
+            if not token or token in seen:
+                return
+            seen.add(token)
+            out.append(token)
+
+        def walk(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, inner in value.items():
+                    normalized_key = str(key or "").strip().lower()
+                    if normalized_key in keys and not isinstance(inner, (dict, list)):
+                        add(inner)
+                    walk(inner)
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item)
+
+        walk(payload)
+        return out
+
+    @staticmethod
+    def _extract_runtime_repo_target(payload: Dict[str, Any]) -> Dict[str, str]:
+        repo_keys = {"repo_key", "repository", "repo", "repo_name"}
+        repo_urls = {"repo_url", "repository_url", "git_url"}
+        repo_paths = {"repo_path", "workspace_path", "root_path", "checkout_path", "repo_subpath", "subpath"}
+        branch_keys = {"branch", "work_branch", "source_branch", "head_branch"}
+        target_branch_keys = {"target_branch", "base_branch", "destination_branch"}
+        return {
+            "repo_key": (XynApiAdapter._extract_values_by_keys(payload, repo_keys) or [""])[0],
+            "repo_url": (XynApiAdapter._extract_values_by_keys(payload, repo_urls) or [""])[0],
+            "repo_path": (XynApiAdapter._extract_values_by_keys(payload, repo_paths) or [""])[0],
+            "branch": (XynApiAdapter._extract_values_by_keys(payload, branch_keys) or [""])[0],
+            "target_branch": (XynApiAdapter._extract_values_by_keys(payload, target_branch_keys) or [""])[0],
+        }
+
+    @staticmethod
+    def _normalize_runtime_artifacts(payload: Any) -> list[Dict[str, Any]]:
+        rows = payload if isinstance(payload, list) else []
+        if isinstance(payload, dict):
+            if isinstance(payload.get("artifacts"), list):
+                rows = payload.get("artifacts") or []
+            elif isinstance(payload.get("items"), list):
+                rows = payload.get("items") or []
+        out: list[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            out.append(
+                {
+                    "id": str(row.get("id") or row.get("artifact_id") or ""),
+                    "name": str(row.get("name") or ""),
+                    "kind": str(row.get("kind") or row.get("artifact_type") or ""),
+                    "content_type": str(row.get("content_type") or ""),
+                    "byte_length": row.get("byte_length"),
+                    "uri": str(row.get("uri") or ""),
+                }
+            )
+        return out
+
+    @staticmethod
+    def _normalize_runtime_logs(payload: Any) -> list[Dict[str, Any]]:
+        rows = payload if isinstance(payload, list) else []
+        if isinstance(payload, dict):
+            if isinstance(payload.get("logs"), list):
+                rows = payload.get("logs") or []
+            elif isinstance(payload.get("items"), list):
+                rows = payload.get("items") or []
+            elif isinstance(payload.get("steps"), list):
+                rows = payload.get("steps") or []
+        out: list[Dict[str, Any]] = []
+        for index, row in enumerate(rows):
+            if isinstance(row, dict):
+                out.append(
+                    {
+                        "step_id": str(row.get("id") or row.get("step_id") or ""),
+                        "name": str(row.get("name") or row.get("label") or f"step_{index}"),
+                        "status": str(row.get("status") or ""),
+                        "summary": str(row.get("summary") or ""),
+                        "error": row.get("error"),
+                        "outputs": row.get("outputs"),
+                    }
+                )
+            else:
+                out.append({"step_id": "", "name": f"log_{index}", "status": "", "summary": str(row)})
+        return out
+
+    @staticmethod
+    def _normalize_runtime_commands(payload: Any) -> list[Dict[str, Any]]:
+        rows = payload if isinstance(payload, list) else []
+        if isinstance(payload, dict):
+            if isinstance(payload.get("commands"), list):
+                rows = payload.get("commands") or []
+            elif isinstance(payload.get("items"), list):
+                rows = payload.get("items") or []
+            elif isinstance(payload.get("steps"), list):
+                rows = payload.get("steps") or []
+        out: list[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            out.append(
+                {
+                    "id": str(row.get("id") or row.get("command_id") or row.get("step_id") or ""),
+                    "command": str(row.get("command") or row.get("cmd") or row.get("name") or ""),
+                    "status": str(row.get("status") or ""),
+                    "summary": str(row.get("summary") or ""),
+                }
+            )
+        return out
+
+    @staticmethod
+    def _normalize_runtime_run_row(payload: Dict[str, Any]) -> Dict[str, Any]:
+        outputs = payload.get("outputs") if isinstance(payload.get("outputs"), dict) else {}
+        artifact_candidates = payload.get("artifacts") if isinstance(payload.get("artifacts"), list) else []
+        artifacts = XynApiAdapter._normalize_runtime_artifacts(artifact_candidates)
+        produced_outputs = {
+            "patch_artifacts": [a for a in artifacts if "patch" in str(a.get("kind") or "").lower() or "patch" in str(a.get("name") or "").lower()],
+            "report_artifacts": [a for a in artifacts if "report" in str(a.get("kind") or "").lower() or "report" in str(a.get("name") or "").lower()],
+            "log_artifacts": [a for a in artifacts if "log" in str(a.get("kind") or "").lower() or "log" in str(a.get("name") or "").lower()],
+            "summary_artifacts": [a for a in artifacts if "summary" in str(a.get("kind") or "").lower() or "summary" in str(a.get("name") or "").lower()],
+            "output_keys": sorted([str(key) for key in outputs.keys()]),
+        }
+        return {
+            "run_id": str(payload.get("id") or payload.get("run_id") or ""),
+            "status": str(payload.get("status") or payload.get("state") or ""),
+            "worker_type": str(payload.get("worker_type") or ""),
+            "worker_id": str(payload.get("worker_id") or ""),
+            "repo_target": XynApiAdapter._extract_runtime_repo_target(payload),
+            "failure_reason": str(payload.get("failure_reason") or ""),
+            "summary": str(payload.get("summary") or ""),
+            "error": payload.get("error"),
+            "produced_outputs": produced_outputs,
+            "raw": payload,
+        }
+
+    @staticmethod
+    def _normalize_runtime_run_result(
+        result: Dict[str, Any],
+        *,
+        default_next_allowed_actions: Optional[list[str]] = None,
+    ) -> Dict[str, Any]:
+        body = result.get("response")
+        payload = body if isinstance(body, dict) else {}
+        run_payload = payload.get("run") if isinstance(payload.get("run"), dict) else payload
+        normalized_run = XynApiAdapter._normalize_runtime_run_row(run_payload) if isinstance(run_payload, dict) else {}
+        status_code = int(result.get("status_code") or 0)
+        blocked_reason = ""
+        if not result.get("ok"):
+            if status_code in {401, 403}:
+                blocked_reason = "permission_denied"
+            elif status_code == 404:
+                blocked_reason = "not_found"
+            elif status_code == 409:
+                blocked_reason = "conflict"
+            elif status_code >= 500:
+                blocked_reason = "upstream_error"
+            else:
+                blocked_reason = "request_failed"
+        result["response"] = {
+            **normalized_run,
+            "current_status": str(normalized_run.get("status") or ("ok" if result.get("ok") else "error")),
+            "next_allowed_actions": list(default_next_allowed_actions or []),
+            "blocked_reason": blocked_reason,
+            "raw": body,
+        }
+        return result
+
+    @staticmethod
+    def _extract_effort_changed_files(payload: Any) -> list[str]:
+        return XynApiAdapter._extract_changed_files(payload)
+
+    @staticmethod
+    def _normalize_change_effort_source_roots(change_effort: Dict[str, Any], source: Dict[str, Any], metadata: Dict[str, Any]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: Any) -> None:
+            token = str(value or "").strip().strip("/")
+            if not token or token in seen:
+                return
+            seen.add(token)
+            out.append(token)
+
+        add(source.get("monorepo_subpath"))
+        add(change_effort.get("repo_subpath"))
+        source_roots = metadata.get("source_roots")
+        if isinstance(source_roots, list):
+            for item in source_roots:
+                add(item)
+        return out
+
+    @staticmethod
+    def _normalize_change_effort_result(
+        result: Dict[str, Any],
+        *,
+        default_next_allowed_actions: Optional[list[str]] = None,
+    ) -> Dict[str, Any]:
+        body = result.get("response")
+        payload = body if isinstance(body, dict) else {}
+        effort = payload.get("change_effort") if isinstance(payload.get("change_effort"), dict) else {}
+        source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        promotion = payload.get("promotion") if isinstance(payload.get("promotion"), dict) else {}
+        metadata = effort.get("metadata_json") if isinstance(effort.get("metadata_json"), dict) else {}
+
+        effort_id = str(effort.get("id") or payload.get("effort_id") or "")
+        artifact_slug = str(effort.get("artifact_slug") or "")
+        repo_key = str(source.get("repo_key") or effort.get("repo_key") or "")
+        repo_url = str(source.get("repo_url") or effort.get("repo_url") or "")
+        repo_subpath = str(source.get("monorepo_subpath") or effort.get("repo_subpath") or "").strip()
+        commit_sha = str(source.get("commit_sha") or metadata.get("commit_sha") or "")
+        source_roots = XynApiAdapter._normalize_change_effort_source_roots(effort, source, metadata)
+        work_branch = str(effort.get("work_branch") or metadata.get("work_branch") or "")
+        base_branch = str(effort.get("base_branch") or "")
+        target_branch = str(effort.get("target_branch") or promotion.get("to_branch") or "")
+        worktree_path = str(effort.get("worktree_path") or metadata.get("worktree_path") or "")
+        worktree_token = str(Path(worktree_path).name if worktree_path else "")
+        allowed_paths = [f"{repo_subpath}/**"] if repo_subpath else []
+        linked_application_id = str(metadata.get("application_id") or metadata.get("linked_application_id") or "")
+        linked_session_id = str(metadata.get("session_id") or metadata.get("linked_session_id") or "")
+        changed_files = XynApiAdapter._extract_effort_changed_files(payload)
+        if not changed_files:
+            changed_files = XynApiAdapter._extract_effort_changed_files(metadata)
+
+        status_code = int(result.get("status_code") or 0)
+        blocked_reason = ""
+        if not result.get("ok"):
+            detail_text = str(payload.get("detail") or payload.get("error") or "").strip().lower()
+            if status_code in {401, 403}:
+                blocked_reason = "permission_denied"
+            elif status_code == 404:
+                blocked_reason = "not_found"
+            elif status_code == 409 and "provenance" in detail_text:
+                blocked_reason = "missing_provenance"
+            elif status_code == 409 and "ambig" in detail_text:
+                blocked_reason = "ambiguous_source"
+            elif status_code == 409 and "artifact not found" in detail_text:
+                blocked_reason = "artifact_not_found"
+            elif status_code == 409:
+                blocked_reason = "conflict"
+            elif status_code >= 500:
+                blocked_reason = "upstream_error"
+            else:
+                blocked_reason = "request_failed"
+
+        result["response"] = {
+            "effort_id": effort_id,
+            "artifact_slug": artifact_slug,
+            "repo_key": repo_key,
+            "repo_url": repo_url,
+            "repo_subpath": repo_subpath,
+            "commit_sha": commit_sha,
+            "source_roots": source_roots,
+            "branch_name": work_branch,
+            "base_branch": base_branch,
+            "promotion_target_branch": target_branch,
+            "worktree_path": worktree_path,
+            "worktree_token": worktree_token,
+            "allowed_paths": allowed_paths,
+            "artifact_ownership_boundaries": {
+                "artifact_slug": artifact_slug,
+                "repo_key": repo_key,
+                "allowed_paths": allowed_paths,
+            },
+            "linked_change_session": {
+                "application_id": linked_application_id,
+                "session_id": linked_session_id,
+                "connected": bool(linked_application_id and linked_session_id),
+            },
+            "changed_files": changed_files,
+            "promotion": promotion,
+            "current_status": str(effort.get("status") or promotion.get("status") or ""),
+            "next_allowed_actions": list(default_next_allowed_actions or []),
+            "blocked_reason": blocked_reason,
+            "raw": body,
+        }
+        return result
+
+    @staticmethod
+    def _normalize_dev_task_row(payload: Dict[str, Any]) -> Dict[str, Any]:
+        run_ids = XynApiAdapter._extract_values_by_keys(payload, {"run_id", "runtime_run_id"})
+        return {
+            "id": str(payload.get("id") or payload.get("task_id") or payload.get("dev_task_id") or ""),
+            "application_id": str(payload.get("application_id") or ""),
+            "session_id": str(payload.get("session_id") or payload.get("change_session_id") or ""),
+            "status": str(payload.get("status") or payload.get("state") or ""),
+            "summary": str(payload.get("summary") or payload.get("title") or ""),
+            "runtime_run_ids": run_ids,
+            "raw": payload,
+        }
+
+    def list_applications(self) -> Dict[str, Any]:
+        result = self._request(method="GET", path="/xyn/api/applications")
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        rows = body.get("applications") if isinstance(body.get("applications"), list) else (body.get("items") if isinstance(body.get("items"), list) else [])
+        normalized = [self._application_discovery_row(row) for row in rows if isinstance(row, dict)]
+        result["response"] = {"applications": normalized, "count": len(normalized)}
+        return result
+
+    def get_application(self, *, application_id: str) -> Dict[str, Any]:
+        result = self._request(method="GET", path=f"/xyn/api/applications/{application_id}")
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        result["response"] = {"application": self._application_discovery_row(body)}
+        return result
+
+    def list_application_change_sessions(self, *, application_id: str) -> Dict[str, Any]:
+        result = self._request(method="GET", path=f"/xyn/api/applications/{application_id}/change-sessions")
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        rows = body.get("change_sessions") if isinstance(body.get("change_sessions"), list) else (body.get("items") if isinstance(body.get("items"), list) else [])
+        normalized = [self._change_session_discovery_row(row) for row in rows if isinstance(row, dict)]
+        result["response"] = {
+            "application_id": str(application_id),
+            "change_sessions": normalized,
+            "count": len(normalized),
+        }
+        return result
+
+    def get_application_change_session(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+        result = self._request(method="GET", path=f"/xyn/api/applications/{application_id}/change-sessions/{session_id}")
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        result["response"] = {
+            "change_session": self._change_session_discovery_row(body),
+            "application_id": str(application_id),
+        }
+        return result
+
+    def create_application_change_session(self, *, application_id: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        result = self._request(
+            method="POST",
+            path=f"/xyn/api/applications/{application_id}/change-sessions",
+            json_payload=dict(payload or {}),
+        )
+        return self._normalize_change_session_result(
+            result,
+            application_id=application_id,
+            default_next_allowed_actions=[
+                "get_application_change_session",
+                "get_application_change_session_plan",
+                "stage_apply_application_change_session",
+            ],
+        )
+
+    def create_decomposition_campaign(
+        self,
+        *,
+        application_id: str,
+        target_source_files: Optional[list[str]] = None,
+        extraction_seams: Optional[list[str]] = None,
+        moved_handlers_modules: Optional[list[str]] = None,
+        required_test_suites: Optional[list[str]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        request_payload = dict(payload or {})
+        request_payload["decomposition_campaign"] = {
+            "kind": "xyn_api_decomposition",
+            "target_source_files": [str(item).strip() for item in (target_source_files or []) if str(item).strip()],
+            "extraction_seams": [str(item).strip() for item in (extraction_seams or []) if str(item).strip()],
+            "moved_handlers_modules": [str(item).strip() for item in (moved_handlers_modules or []) if str(item).strip()],
+            "required_test_suites": [str(item).strip() for item in (required_test_suites or []) if str(item).strip()],
+            "promotion_readiness": str((request_payload.get("promotion_readiness") or "planning")).strip() or "planning",
+        }
+        result = self.create_application_change_session(application_id=application_id, payload=request_payload)
+        if isinstance(result.get("response"), dict):
+            result["response"]["decomposition_campaign"] = dict(request_payload["decomposition_campaign"])
+        return result
+
+    def get_decomposition_campaign(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+        result = self.inspect_change_session_control(application_id=application_id, session_id=session_id)
+        normalized = self._normalize_change_session_result(
+            result,
+            application_id=application_id,
+            session_id=session_id,
+            default_next_allowed_actions=[
+                "stage_apply_application_change_session",
+                "list_runtime_runs",
+                "prepare_preview_application_change_session",
+                "validate_application_change_session",
+                "commit_application_change_session",
+                "promote_application_change_session",
+            ],
+        )
+        body = normalized.get("response") if isinstance(normalized.get("response"), dict) else {}
+        normalized["response"] = {
+            "application_id": str(application_id),
+            "session_id": str(session_id),
+            "current_status": str(body.get("current_status") or ""),
+            "next_allowed_actions": body.get("next_allowed_actions") if isinstance(body.get("next_allowed_actions"), list) else [],
+            "blocked_reason": str(body.get("blocked_reason") or ""),
+            "decomposition_campaign": body.get("decomposition_campaign") if isinstance(body.get("decomposition_campaign"), dict) else {},
+            "guardrails": body.get("guardrails") if isinstance(body.get("guardrails"), dict) else {},
+            "preview": body.get("preview") if isinstance(body.get("preview"), dict) else {},
+            "commit_shas": body.get("commit_shas") if isinstance(body.get("commit_shas"), list) else [],
+            "changed_files": body.get("changed_files") if isinstance(body.get("changed_files"), list) else [],
+            "promotion_evidence_ids": body.get("promotion_evidence_ids") if isinstance(body.get("promotion_evidence_ids"), list) else [],
+            "raw": body.get("raw"),
+        }
+        return normalized
+
+    def inspect_decomposition_guardrails(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+        result = self.inspect_change_session_control(application_id=application_id, session_id=session_id)
+        normalized = self._normalize_change_session_result(
+            result,
+            application_id=application_id,
+            session_id=session_id,
+            default_next_allowed_actions=[
+                "stage_apply_application_change_session",
+                "prepare_preview_application_change_session",
+                "validate_application_change_session",
+                "commit_application_change_session",
+            ],
+        )
+        body = normalized.get("response") if isinstance(normalized.get("response"), dict) else {}
+        guardrails = body.get("guardrails") if isinstance(body.get("guardrails"), dict) else {}
+        normalized["response"] = {
+            "application_id": str(application_id),
+            "session_id": str(session_id),
+            "current_status": str(body.get("current_status") or ""),
+            "blocked_reason": str(body.get("blocked_reason") or ""),
+            "guardrails": guardrails,
+            "preview": body.get("preview") if isinstance(body.get("preview"), dict) else {},
+            "decomposition_campaign": body.get("decomposition_campaign") if isinstance(body.get("decomposition_campaign"), dict) else {},
+            "raw": body.get("raw"),
+        }
+        return normalized
+
+    def get_decomposition_observability(
+        self,
+        *,
+        application_id: str,
+        session_id: str,
+        artifact_id: str = "",
+        artifact_slug: str = "",
+        top_n: int = 50,
+    ) -> Dict[str, Any]:
+        session_status = self.get_decomposition_campaign(application_id=application_id, session_id=session_id)
+        body = session_status.get("response") if isinstance(session_status.get("response"), dict) else {}
+        raw = body.get("raw") if isinstance(body.get("raw"), dict) else {}
+
+        resolved_artifact_id = str(artifact_id or "").strip()
+        resolved_artifact_slug = str(artifact_slug or "").strip()
+        if not resolved_artifact_id:
+            selected_ids = self._extract_string_list(raw, {"selected_artifact_ids", "artifact_ids"})
+            if selected_ids:
+                resolved_artifact_id = selected_ids[0]
+        if not resolved_artifact_slug:
+            selected_slugs = self._extract_string_list(raw, {"artifact_slugs", "selected_artifact_slugs"})
+            if selected_slugs:
+                resolved_artifact_slug = selected_slugs[0]
+
+        metrics_result = self.get_artifact_module_metrics(
+            artifact_id=resolved_artifact_id,
+            artifact_slug=resolved_artifact_slug,
+            top_n=max(1, int(top_n)),
+        )
+        analysis_result = self.analyze_python_api_artifact(
+            artifact_id=resolved_artifact_id,
+            artifact_slug=resolved_artifact_slug,
+        )
+
+        metrics_body = metrics_result.get("response") if isinstance(metrics_result.get("response"), dict) else {}
+        analysis_body = analysis_result.get("response") if isinstance(analysis_result.get("response"), dict) else {}
+        route_inventory = analysis_body.get("route_inventory")
+        if not isinstance(route_inventory, dict):
+            route_inventory = {}
+        route_inventory_delta = analysis_body.get("route_inventory_delta")
+        if not isinstance(route_inventory_delta, dict):
+            route_inventory_delta = {}
+
+        return {
+            "ok": bool(session_status.get("ok")) and bool(metrics_result.get("ok")) and bool(analysis_result.get("ok")),
+            "status_code": 200,
+            "method": "GET",
+            "path": f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/decomposition-observability",
+            "base_url": str(self._config.control_api_base_url).rstrip("/"),
+            "response": {
+                "application_id": str(application_id),
+                "session_id": str(session_id),
+                "artifact_id": resolved_artifact_id,
+                "artifact_slug": resolved_artifact_slug,
+                "current_status": str(body.get("current_status") or ""),
+                "guardrails": body.get("guardrails") if isinstance(body.get("guardrails"), dict) else {},
+                "module_metrics": metrics_body.get("metrics") if isinstance(metrics_body.get("metrics"), list) else [],
+                "module_metrics_count": int(metrics_body.get("count") or 0),
+                "route_inventory": route_inventory,
+                "route_inventory_delta": route_inventory_delta,
+                "analysis_summary": analysis_body.get("summary") if isinstance(analysis_body.get("summary"), dict) else {},
+                "source_mode": str(analysis_body.get("source_mode") or metrics_body.get("source_mode") or ""),
+                "warnings": list(analysis_body.get("warnings") or metrics_body.get("warnings") or []),
+                "raw": {
+                    "session": body.get("raw"),
+                    "metrics": metrics_body,
+                    "analysis": analysis_body,
+                },
+            },
+        }
+
+    def get_application_change_session_plan(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+        result = self._request(
+            method="GET",
+            path=f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/plan",
+        )
+        if not result.get("ok") and int(result.get("status_code") or 0) in {404, 405}:
+            # Compatibility fallback to canonical control inspection when explicit /plan route is unavailable.
+            result = self.inspect_change_session_control(application_id=application_id, session_id=session_id)
+        return self._normalize_change_session_result(
+            result,
+            application_id=application_id,
+            session_id=session_id,
+            default_next_allowed_actions=[
+                "stage_apply_application_change_session",
+                "prepare_preview_application_change_session",
+                "validate_application_change_session",
+            ],
+        )
+
+    def _run_application_change_session_operation(
+        self,
+        *,
+        application_id: str,
+        session_id: str,
+        operation: str,
+        payload: Optional[Dict[str, Any]] = None,
+        next_allowed_actions: Optional[list[str]] = None,
+    ) -> Dict[str, Any]:
+        result = self.run_change_session_control_action(
+            application_id=application_id,
+            session_id=session_id,
+            operation=operation,
+            action_payload=payload,
+        )
+        return self._normalize_change_session_result(
+            result,
+            application_id=application_id,
+            session_id=session_id,
+            default_next_allowed_actions=next_allowed_actions,
+        )
+
+    def stage_apply_application_change_session(
+        self, *, application_id: str, session_id: str, payload: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        return self._run_application_change_session_operation(
+            application_id=application_id,
+            session_id=session_id,
+            operation="stage_apply",
+            payload=payload,
+            next_allowed_actions=[
+                "prepare_preview_application_change_session",
+                "validate_application_change_session",
+                "commit_application_change_session",
+            ],
+        )
+
+    def prepare_preview_application_change_session(
+        self, *, application_id: str, session_id: str, payload: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        return self._run_application_change_session_operation(
+            application_id=application_id,
+            session_id=session_id,
+            operation="prepare_preview",
+            payload=payload,
+            next_allowed_actions=[
+                "validate_application_change_session",
+                "commit_application_change_session",
+            ],
+        )
+
+    def validate_application_change_session(
+        self, *, application_id: str, session_id: str, payload: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        return self._run_application_change_session_operation(
+            application_id=application_id,
+            session_id=session_id,
+            operation="validate",
+            payload=payload,
+            next_allowed_actions=[
+                "commit_application_change_session",
+                "prepare_preview_application_change_session",
+            ],
+        )
+
+    def commit_application_change_session(
+        self, *, application_id: str, session_id: str, payload: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        return self._run_application_change_session_operation(
+            application_id=application_id,
+            session_id=session_id,
+            operation="commit",
+            payload=payload,
+            next_allowed_actions=[
+                "get_application_change_session_commits",
+                "promote_application_change_session",
+            ],
+        )
+
+    def promote_application_change_session(
+        self, *, application_id: str, session_id: str, payload: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        return self._run_application_change_session_operation(
+            application_id=application_id,
+            session_id=session_id,
+            operation="promote",
+            payload=payload,
+            next_allowed_actions=[
+                "get_application_change_session_promotion_evidence",
+                "rollback_application_change_session",
+            ],
+        )
+
+    def rollback_application_change_session(
+        self, *, application_id: str, session_id: str, payload: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        return self._run_application_change_session_operation(
+            application_id=application_id,
+            session_id=session_id,
+            operation="rollback",
+            payload=payload,
+            next_allowed_actions=[
+                "get_application_change_session_promotion_evidence",
+                "inspect_change_session_control",
+            ],
+        )
+
+    def get_application_change_session_commits(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+        result = self._request(
+            method="GET",
+            path=f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/commits",
+        )
+        return self._normalize_change_session_result(
+            result,
+            application_id=application_id,
+            session_id=session_id,
+            default_next_allowed_actions=[
+                "promote_application_change_session",
+                "rollback_application_change_session",
+            ],
+        )
+
+    def get_application_change_session_promotion_evidence(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+        result = self.get_change_session_promotion_evidence(application_id=application_id, session_id=session_id)
+        return self._normalize_change_session_result(
+            result,
+            application_id=application_id,
+            session_id=session_id,
+            default_next_allowed_actions=[
+                "rollback_application_change_session",
+                "inspect_change_session_control",
+            ],
+        )
+
+    def get_application_change_session_preview_status(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+        result = self.inspect_change_session_control(application_id=application_id, session_id=session_id)
+        normalized = self._normalize_change_session_result(
+            result,
+            application_id=application_id,
+            session_id=session_id,
+            default_next_allowed_actions=[
+                "prepare_preview_application_change_session",
+                "validate_application_change_session",
+                "commit_application_change_session",
+            ],
+        )
+        response = normalized.get("response") if isinstance(normalized.get("response"), dict) else {}
+        normalized["response"] = {
+            "application_id": str(application_id),
+            "session_id": str(session_id),
+            "current_status": str(response.get("current_status") or ""),
+            "next_allowed_actions": response.get("next_allowed_actions") if isinstance(response.get("next_allowed_actions"), list) else [],
+            "blocked_reason": str(response.get("blocked_reason") or ""),
+            "preview": response.get("preview") if isinstance(response.get("preview"), dict) else {},
+            "raw": response.get("raw"),
+        }
+        return normalized
+
+    def list_runtime_runs(
+        self,
+        *,
+        application_id: str = "",
+        session_id: str = "",
+        limit: int = 50,
+        cursor: str = "",
+        status: str = "",
+    ) -> Dict[str, Any]:
+        normalized_application_id = str(application_id or "").strip()
+        normalized_session_id = str(session_id or "").strip()
+        paths: list[str] = []
+        if normalized_application_id and normalized_session_id:
+            paths.append(f"/xyn/api/applications/{normalized_application_id}/change-sessions/{normalized_session_id}/runtime-runs")
+        if normalized_session_id:
+            paths.append(f"/xyn/api/change-sessions/{normalized_session_id}/runtime-runs")
+        paths.extend(
+            [
+                "/xyn/api/runtime-runs",
+                "/xyn/api/runs",
+                "/runtime/runs",
+                "/runs",
+                "/api/v1/runs",
+            ]
+        )
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=paths,
+            params={
+                "limit": int(limit),
+                "cursor": str(cursor or "").strip() or None,
+                "status": str(status or "").strip() or None,
+            },
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response")
+        rows = body if isinstance(body, list) else []
+        if isinstance(body, dict):
+            if isinstance(body.get("runtime_runs"), list):
+                rows = body.get("runtime_runs") or []
+            elif isinstance(body.get("runs"), list):
+                rows = body.get("runs") or []
+            elif isinstance(body.get("items"), list):
+                rows = body.get("items") or []
+        normalized = [self._normalize_runtime_run_row(row) for row in rows if isinstance(row, dict)]
+        result["response"] = {
+            "application_id": normalized_application_id,
+            "session_id": normalized_session_id,
+            "runtime_runs": normalized,
+            "count": len(normalized),
+            "next_cursor": str((body or {}).get("next_cursor") or "") if isinstance(body, dict) else "",
+        }
+        return result
+
+    def get_runtime_run(self, *, run_id: str, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
+        normalized_application_id = str(application_id or "").strip()
+        normalized_session_id = str(session_id or "").strip()
+        normalized_run_id = str(run_id or "").strip()
+        paths: list[str] = []
+        if normalized_application_id and normalized_session_id:
+            paths.append(
+                f"/xyn/api/applications/{normalized_application_id}/change-sessions/{normalized_session_id}/runtime-runs/{normalized_run_id}"
+            )
+        if normalized_session_id:
+            paths.append(f"/xyn/api/change-sessions/{normalized_session_id}/runtime-runs/{normalized_run_id}")
+        paths.extend(
+            [
+                f"/xyn/api/runtime-runs/{normalized_run_id}",
+                f"/xyn/api/runs/{normalized_run_id}",
+                f"/runs/{normalized_run_id}",
+                f"/api/v1/runs/{normalized_run_id}",
+            ]
+        )
+        result = self._request_with_fallback_paths(method="GET", paths=paths)
+        return self._normalize_runtime_run_result(
+            result,
+            default_next_allowed_actions=[
+                "get_runtime_run_logs",
+                "get_runtime_run_artifacts",
+                "get_runtime_run_commands",
+                "cancel_runtime_run",
+                "rerun_runtime_run",
+            ],
+        )
+
+    def get_runtime_run_logs(self, *, run_id: str, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
+        normalized_application_id = str(application_id or "").strip()
+        normalized_session_id = str(session_id or "").strip()
+        normalized_run_id = str(run_id or "").strip()
+        paths: list[str] = []
+        if normalized_application_id and normalized_session_id:
+            paths.append(
+                f"/xyn/api/applications/{normalized_application_id}/change-sessions/{normalized_session_id}/runtime-runs/{normalized_run_id}/logs"
+            )
+        if normalized_session_id:
+            paths.append(f"/xyn/api/change-sessions/{normalized_session_id}/runtime-runs/{normalized_run_id}/logs")
+        paths.extend(
+            [
+                f"/xyn/api/runtime-runs/{normalized_run_id}/logs",
+                f"/xyn/api/runs/{normalized_run_id}/logs",
+                f"/xyn/api/runs/{normalized_run_id}/steps",
+                f"/runs/{normalized_run_id}/steps",
+                f"/api/v1/runs/{normalized_run_id}/steps",
+            ]
+        )
+        result = self._request_with_fallback_paths(method="GET", paths=paths)
+        if not result.get("ok"):
+            return result
+        logs = self._normalize_runtime_logs(result.get("response"))
+        result["response"] = {
+            "run_id": normalized_run_id,
+            "logs": logs,
+            "count": len(logs),
+            "raw": result.get("response"),
+        }
+        return result
+
+    def get_runtime_run_artifacts(self, *, run_id: str, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
+        normalized_application_id = str(application_id or "").strip()
+        normalized_session_id = str(session_id or "").strip()
+        normalized_run_id = str(run_id or "").strip()
+        paths: list[str] = []
+        if normalized_application_id and normalized_session_id:
+            paths.append(
+                f"/xyn/api/applications/{normalized_application_id}/change-sessions/{normalized_session_id}/runtime-runs/{normalized_run_id}/artifacts"
+            )
+        if normalized_session_id:
+            paths.append(f"/xyn/api/change-sessions/{normalized_session_id}/runtime-runs/{normalized_run_id}/artifacts")
+        paths.extend(
+            [
+                f"/xyn/api/runtime-runs/{normalized_run_id}/artifacts",
+                f"/xyn/api/runs/{normalized_run_id}/artifacts",
+                f"/runs/{normalized_run_id}/artifacts",
+                f"/api/v1/runs/{normalized_run_id}/artifacts",
+            ]
+        )
+        result = self._request_with_fallback_paths(method="GET", paths=paths)
+        if not result.get("ok"):
+            return result
+        artifacts = self._normalize_runtime_artifacts(result.get("response"))
+        result["response"] = {
+            "run_id": normalized_run_id,
+            "artifacts": artifacts,
+            "count": len(artifacts),
+            "raw": result.get("response"),
+        }
+        return result
+
+    def get_runtime_run_commands(self, *, run_id: str, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
+        normalized_application_id = str(application_id or "").strip()
+        normalized_session_id = str(session_id or "").strip()
+        normalized_run_id = str(run_id or "").strip()
+        paths: list[str] = []
+        if normalized_application_id and normalized_session_id:
+            paths.append(
+                f"/xyn/api/applications/{normalized_application_id}/change-sessions/{normalized_session_id}/runtime-runs/{normalized_run_id}/commands"
+            )
+        if normalized_session_id:
+            paths.append(f"/xyn/api/change-sessions/{normalized_session_id}/runtime-runs/{normalized_run_id}/commands")
+        paths.extend(
+            [
+                f"/xyn/api/runtime-runs/{normalized_run_id}/commands",
+                f"/xyn/api/runs/{normalized_run_id}/commands",
+                f"/xyn/api/runs/{normalized_run_id}/steps",
+                f"/runs/{normalized_run_id}/steps",
+                f"/api/v1/runs/{normalized_run_id}/steps",
+            ]
+        )
+        result = self._request_with_fallback_paths(method="GET", paths=paths)
+        if not result.get("ok"):
+            return result
+        commands = self._normalize_runtime_commands(result.get("response"))
+        result["response"] = {
+            "run_id": normalized_run_id,
+            "commands": commands,
+            "count": len(commands),
+            "raw": result.get("response"),
+        }
+        return result
+
+    def cancel_runtime_run(self, *, run_id: str, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
+        normalized_application_id = str(application_id or "").strip()
+        normalized_session_id = str(session_id or "").strip()
+        normalized_run_id = str(run_id or "").strip()
+        paths: list[str] = []
+        if normalized_application_id and normalized_session_id:
+            paths.append(
+                f"/xyn/api/applications/{normalized_application_id}/change-sessions/{normalized_session_id}/runtime-runs/{normalized_run_id}/cancel"
+            )
+        if normalized_session_id:
+            paths.append(f"/xyn/api/change-sessions/{normalized_session_id}/runtime-runs/{normalized_run_id}/cancel")
+        paths.extend(
+            [
+                f"/xyn/api/runtime-runs/{normalized_run_id}/cancel",
+                f"/xyn/api/runs/{normalized_run_id}/cancel",
+                f"/runs/{normalized_run_id}/cancel",
+                f"/api/v1/runs/{normalized_run_id}/cancel",
+            ]
+        )
+        result = self._request_with_fallback_paths(method="POST", paths=paths, json_payload={})
+        return self._normalize_runtime_run_result(
+            result,
+            default_next_allowed_actions=[
+                "get_runtime_run",
+                "get_runtime_run_logs",
+                "rerun_runtime_run",
+            ],
+        )
+
+    def rerun_runtime_run(self, *, run_id: str, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
+        normalized_application_id = str(application_id or "").strip()
+        normalized_session_id = str(session_id or "").strip()
+        normalized_run_id = str(run_id or "").strip()
+        paths: list[str] = []
+        if normalized_application_id and normalized_session_id:
+            paths.append(
+                f"/xyn/api/applications/{normalized_application_id}/change-sessions/{normalized_session_id}/runtime-runs/{normalized_run_id}/rerun"
+            )
+            paths.append(
+                f"/xyn/api/applications/{normalized_application_id}/change-sessions/{normalized_session_id}/runtime-runs/{normalized_run_id}/retry"
+            )
+        if normalized_session_id:
+            paths.append(f"/xyn/api/change-sessions/{normalized_session_id}/runtime-runs/{normalized_run_id}/rerun")
+            paths.append(f"/xyn/api/change-sessions/{normalized_session_id}/runtime-runs/{normalized_run_id}/retry")
+        paths.extend(
+            [
+                f"/xyn/api/runtime-runs/{normalized_run_id}/rerun",
+                f"/xyn/api/runtime-runs/{normalized_run_id}/retry",
+                f"/xyn/api/runs/{normalized_run_id}/rerun",
+                f"/xyn/api/runs/{normalized_run_id}/retry",
+                f"/runs/{normalized_run_id}/retry",
+                f"/api/v1/runs/{normalized_run_id}/retry",
+            ]
+        )
+        result = self._request_with_fallback_paths(method="POST", paths=paths, json_payload={})
+        if not result.get("ok") and int(result.get("status_code") or 0) in {404, 405}:
+            result["response"] = {
+                "error": "not_supported",
+                "detail": "Runtime rerun/retry endpoint not available in this backend.",
+                "blocked_reason": "not_supported",
+            }
+            return result
+        return self._normalize_runtime_run_result(
+            result,
+            default_next_allowed_actions=[
+                "get_runtime_run",
+                "get_runtime_run_logs",
+                "get_runtime_run_artifacts",
+                "get_runtime_run_commands",
+            ],
+        )
+
+    def get_dev_task_by_id(self, *, task_id: str, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
+        normalized_application_id = str(application_id or "").strip()
+        normalized_session_id = str(session_id or "").strip()
+        normalized_task_id = str(task_id or "").strip()
+        paths: list[str] = []
+        if normalized_application_id and normalized_session_id:
+            paths.append(
+                f"/xyn/api/applications/{normalized_application_id}/change-sessions/{normalized_session_id}/dev-tasks/{normalized_task_id}"
+            )
+            paths.append(
+                f"/xyn/api/applications/{normalized_application_id}/change-sessions/{normalized_session_id}/tasks/{normalized_task_id}"
+            )
+        if normalized_session_id:
+            paths.append(f"/xyn/api/change-sessions/{normalized_session_id}/dev-tasks/{normalized_task_id}")
+            paths.append(f"/xyn/api/change-sessions/{normalized_session_id}/tasks/{normalized_task_id}")
+        paths.extend(
+            [
+                f"/xyn/api/dev-tasks/{normalized_task_id}",
+                f"/xyn/api/dev_tasks/{normalized_task_id}",
+                f"/xyn/api/tasks/{normalized_task_id}",
+                f"/api/v1/dev-tasks/{normalized_task_id}",
+            ]
+        )
+        result = self._request_with_fallback_paths(method="GET", paths=paths)
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        result["response"] = {"dev_task": self._normalize_dev_task_row(body)}
+        return result
+
+    def list_dev_tasks_for_change_session(
+        self,
+        *,
+        application_id: str = "",
+        session_id: str = "",
+        limit: int = 100,
+        status: str = "",
+    ) -> Dict[str, Any]:
+        normalized_application_id = str(application_id or "").strip()
+        normalized_session_id = str(session_id or "").strip()
+        paths: list[str] = []
+        if normalized_application_id and normalized_session_id:
+            paths.append(f"/xyn/api/applications/{normalized_application_id}/change-sessions/{normalized_session_id}/dev-tasks")
+            paths.append(f"/xyn/api/applications/{normalized_application_id}/change-sessions/{normalized_session_id}/tasks")
+        if normalized_session_id:
+            paths.append(f"/xyn/api/change-sessions/{normalized_session_id}/dev-tasks")
+            paths.append(f"/xyn/api/change-sessions/{normalized_session_id}/tasks")
+        paths.extend(
+            [
+                "/xyn/api/dev-tasks",
+                "/xyn/api/dev_tasks",
+                "/xyn/api/tasks",
+                "/api/v1/dev-tasks",
+            ]
+        )
+        params = {"limit": int(limit), "status": str(status or "").strip() or None}
+        if normalized_application_id:
+            params["application_id"] = normalized_application_id
+        if normalized_session_id:
+            params["session_id"] = normalized_session_id
+        result = self._request_with_fallback_paths(method="GET", paths=paths, params=params)
+        if not result.get("ok"):
+            return result
+        body = result.get("response")
+        rows = body if isinstance(body, list) else []
+        if isinstance(body, dict):
+            if isinstance(body.get("dev_tasks"), list):
+                rows = body.get("dev_tasks") or []
+            elif isinstance(body.get("tasks"), list):
+                rows = body.get("tasks") or []
+            elif isinstance(body.get("items"), list):
+                rows = body.get("items") or []
+        normalized = [self._normalize_dev_task_row(row) for row in rows if isinstance(row, dict)]
+        result["response"] = {
+            "application_id": normalized_application_id,
+            "session_id": normalized_session_id,
+            "dev_tasks": normalized,
+            "count": len(normalized),
+        }
+        return result
 
     def inspect_change_session_control(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
         return self._request(
@@ -1195,51 +2680,276 @@ class XynApiAdapter:
         )
 
     def create_change_effort(self, *, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self._request_with_fallback_paths(
+        result = self._request_with_fallback_paths(
             method="POST",
             paths=["/api/v1/change-efforts"],
             json_payload=dict(payload or {}),
             base_urls=self._code_api_base_urls(),
         )
+        return self._normalize_change_effort_result(
+            result,
+            default_next_allowed_actions=[
+                "get_change_effort",
+                "resolve_effort_source",
+                "allocate_effort_branch",
+            ],
+        )
 
     def get_change_effort(self, *, effort_id: str) -> Dict[str, Any]:
-        return self._request_with_fallback_paths(
+        result = self._request_with_fallback_paths(
             method="GET",
             paths=[f"/api/v1/change-efforts/{effort_id}"],
             base_urls=self._code_api_base_urls(),
         )
+        return self._normalize_change_effort_result(
+            result,
+            default_next_allowed_actions=[
+                "resolve_effort_source",
+                "allocate_effort_branch",
+                "allocate_effort_worktree",
+                "get_effort_git_status",
+                "get_effort_changed_files",
+            ],
+        )
+
+    def list_change_efforts(
+        self,
+        *,
+        workspace_id: str = "",
+        artifact_slug: str = "",
+        status: str = "",
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"limit": int(limit)}
+        if str(workspace_id or "").strip():
+            params["workspace_id"] = str(workspace_id).strip()
+        if str(artifact_slug or "").strip():
+            params["artifact_slug"] = str(artifact_slug).strip()
+        if str(status or "").strip():
+            params["status"] = str(status).strip()
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=["/api/v1/change-efforts"],
+            params=params,
+            base_urls=self._code_api_base_urls(),
+        )
+        if not result.get("ok"):
+            if int(result.get("status_code") or 0) in {404, 405}:
+                result["response"] = {
+                    "error": "not_supported",
+                    "detail": "List change-efforts endpoint is not available on this backend.",
+                    "blocked_reason": "not_supported",
+                }
+            return result
+        body = result.get("response")
+        rows = body if isinstance(body, list) else []
+        if isinstance(body, dict):
+            if isinstance(body.get("change_efforts"), list):
+                rows = body.get("change_efforts") or []
+            elif isinstance(body.get("items"), list):
+                rows = body.get("items") or []
+        normalized_rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_result = {"ok": True, "status_code": 200, "response": {"change_effort": row}}
+            normalized_rows.append(self._normalize_change_effort_result(row_result).get("response"))
+        result["response"] = {"change_efforts": normalized_rows, "count": len(normalized_rows)}
+        return result
 
     def resolve_effort_source(self, *, effort_id: str) -> Dict[str, Any]:
-        return self._request_with_fallback_paths(
+        result = self._request_with_fallback_paths(
             method="POST",
             paths=[f"/api/v1/change-efforts/{effort_id}/resolve-source"],
             json_payload={},
             base_urls=self._code_api_base_urls(),
         )
+        return self._normalize_change_effort_result(
+            result,
+            default_next_allowed_actions=[
+                "allocate_effort_branch",
+                "allocate_effort_worktree",
+                "inspect_decomposition_guardrails",
+            ],
+        )
 
     def allocate_effort_branch(self, *, effort_id: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self._request_with_fallback_paths(
+        result = self._request_with_fallback_paths(
             method="POST",
             paths=[f"/api/v1/change-efforts/{effort_id}/allocate-branch"],
             json_payload=dict(payload or {}),
             base_urls=self._code_api_base_urls(),
         )
+        return self._normalize_change_effort_result(
+            result,
+            default_next_allowed_actions=[
+                "allocate_effort_worktree",
+                "get_effort_git_status",
+                "get_effort_diff",
+            ],
+        )
 
     def allocate_effort_worktree(self, *, effort_id: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self._request_with_fallback_paths(
+        result = self._request_with_fallback_paths(
             method="POST",
             paths=[f"/api/v1/change-efforts/{effort_id}/allocate-worktree"],
             json_payload=dict(payload or {}),
             base_urls=self._code_api_base_urls(),
         )
+        return self._normalize_change_effort_result(
+            result,
+            default_next_allowed_actions=[
+                "get_effort_git_status",
+                "get_effort_changed_files",
+                "get_effort_diff",
+                "promote_change_effort",
+            ],
+        )
 
     def promote_change_effort(self, *, effort_id: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self._request_with_fallback_paths(
+        result = self._request_with_fallback_paths(
             method="POST",
             paths=[f"/api/v1/change-efforts/{effort_id}/promote"],
             json_payload=dict(payload or {}),
             base_urls=self._code_api_base_urls(),
         )
+        return self._normalize_change_effort_result(
+            result,
+            default_next_allowed_actions=[
+                "get_effort_preview_binding",
+                "get_application_change_session_preview_status",
+                "declare_release",
+            ],
+        )
+
+    def get_effort_diff(self, *, effort_id: str) -> Dict[str, Any]:
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=[f"/api/v1/change-efforts/{effort_id}/diff"],
+            base_urls=self._code_api_base_urls(),
+        )
+        if not result.get("ok") and int(result.get("status_code") or 0) in {404, 405}:
+            base = self.get_change_effort(effort_id=effort_id)
+            if not base.get("ok"):
+                return base
+            body = base.get("response") if isinstance(base.get("response"), dict) else {}
+            result = {
+                "ok": True,
+                "status_code": 200,
+                "method": "GET",
+                "path": f"/api/v1/change-efforts/{effort_id}/diff",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {
+                    "effort_id": str(body.get("effort_id") or effort_id),
+                    "summary": "Backend diff endpoint unavailable; returning metadata-backed placeholder.",
+                    "diff": "",
+                    "changed_files": body.get("changed_files") if isinstance(body.get("changed_files"), list) else [],
+                    "blocked_reason": "not_supported",
+                },
+            }
+        return result
+
+    def get_effort_changed_files(self, *, effort_id: str) -> Dict[str, Any]:
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=[f"/api/v1/change-efforts/{effort_id}/changed-files"],
+            base_urls=self._code_api_base_urls(),
+        )
+        if not result.get("ok") and int(result.get("status_code") or 0) in {404, 405}:
+            base = self.get_change_effort(effort_id=effort_id)
+            if not base.get("ok"):
+                return base
+            body = base.get("response") if isinstance(base.get("response"), dict) else {}
+            return {
+                "ok": True,
+                "status_code": 200,
+                "method": "GET",
+                "path": f"/api/v1/change-efforts/{effort_id}/changed-files",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {
+                    "effort_id": str(body.get("effort_id") or effort_id),
+                    "changed_files": body.get("changed_files") if isinstance(body.get("changed_files"), list) else [],
+                    "count": len(body.get("changed_files") or []) if isinstance(body.get("changed_files"), list) else 0,
+                    "blocked_reason": "not_supported",
+                },
+            }
+        body = result.get("response")
+        files = body if isinstance(body, list) else []
+        if isinstance(body, dict):
+            if isinstance(body.get("changed_files"), list):
+                files = body.get("changed_files") or []
+            elif isinstance(body.get("items"), list):
+                files = body.get("items") or []
+        normalized_files = [str(item).strip() for item in files if str(item).strip()]
+        result["response"] = {"effort_id": effort_id, "changed_files": normalized_files, "count": len(normalized_files)}
+        return result
+
+    def get_effort_git_status(self, *, effort_id: str) -> Dict[str, Any]:
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=[f"/api/v1/change-efforts/{effort_id}/git-status"],
+            base_urls=self._code_api_base_urls(),
+        )
+        if not result.get("ok") and int(result.get("status_code") or 0) in {404, 405}:
+            base = self.get_change_effort(effort_id=effort_id)
+            if not base.get("ok"):
+                return base
+            body = base.get("response") if isinstance(base.get("response"), dict) else {}
+            return {
+                "ok": True,
+                "status_code": 200,
+                "method": "GET",
+                "path": f"/api/v1/change-efforts/{effort_id}/git-status",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {
+                    "effort_id": str(body.get("effort_id") or effort_id),
+                    "branch_name": str(body.get("branch_name") or ""),
+                    "worktree_path": str(body.get("worktree_path") or ""),
+                    "clean": False,
+                    "status_summary": "unknown",
+                    "blocked_reason": "not_supported",
+                },
+            }
+        return result
+
+    def get_effort_preview_binding(self, *, effort_id: str) -> Dict[str, Any]:
+        effort = self.get_change_effort(effort_id=effort_id)
+        if not effort.get("ok"):
+            return effort
+        body = effort.get("response") if isinstance(effort.get("response"), dict) else {}
+        linked = body.get("linked_change_session") if isinstance(body.get("linked_change_session"), dict) else {}
+        application_id = str(linked.get("application_id") or "")
+        session_id = str(linked.get("session_id") or "")
+        if not application_id or not session_id:
+            return {
+                "ok": True,
+                "status_code": 200,
+                "method": "GET",
+                "path": f"/api/v1/change-efforts/{effort_id}/preview-binding",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {
+                    "effort_id": effort_id,
+                    "linked_change_session": linked,
+                    "preview_binding": {},
+                    "blocked_reason": "not_linked_to_change_session",
+                },
+            }
+        preview = self.get_application_change_session_preview_status(application_id=application_id, session_id=session_id)
+        preview_body = preview.get("response") if isinstance(preview.get("response"), dict) else {}
+        return {
+            "ok": bool(preview.get("ok")),
+            "status_code": int(preview.get("status_code") or 200),
+            "method": "GET",
+            "path": f"/api/v1/change-efforts/{effort_id}/preview-binding",
+            "base_url": str(self._config.control_api_base_url).rstrip("/"),
+            "response": {
+                "effort_id": effort_id,
+                "linked_change_session": linked,
+                "preview_binding": preview_body.get("preview") if isinstance(preview_body.get("preview"), dict) else {},
+                "current_status": str(preview_body.get("current_status") or ""),
+                "blocked_reason": str(preview_body.get("blocked_reason") or ""),
+            },
+        }
 
     def declare_release(self, *, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return self._request_with_fallback_paths(

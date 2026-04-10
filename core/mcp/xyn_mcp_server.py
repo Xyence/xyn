@@ -19,6 +19,34 @@ from core.mcp.xyn_api_adapter import (
 
 
 TOOL_NAMES = [
+    "list_applications",
+    "get_application",
+    "list_application_change_sessions",
+    "get_application_change_session",
+    "create_application_change_session",
+    "create_decomposition_campaign",
+    "get_decomposition_campaign",
+    "inspect_decomposition_guardrails",
+    "get_decomposition_observability",
+    "get_application_change_session_plan",
+    "stage_apply_application_change_session",
+    "prepare_preview_application_change_session",
+    "get_application_change_session_preview_status",
+    "validate_application_change_session",
+    "commit_application_change_session",
+    "promote_application_change_session",
+    "rollback_application_change_session",
+    "get_application_change_session_commits",
+    "get_application_change_session_promotion_evidence",
+    "list_runtime_runs",
+    "get_runtime_run",
+    "get_runtime_run_logs",
+    "get_runtime_run_artifacts",
+    "get_runtime_run_commands",
+    "cancel_runtime_run",
+    "rerun_runtime_run",
+    "get_dev_task_by_id",
+    "list_dev_tasks_for_change_session",
     "list_blueprints",
     "get_blueprint",
     "create_blueprint",
@@ -49,10 +77,15 @@ TOOL_NAMES = [
     "run_release_target_execution_step",
     "get_release_target_execution_step_history",
     "create_change_effort",
+    "list_change_efforts",
     "get_change_effort",
     "resolve_effort_source",
     "allocate_effort_branch",
     "allocate_effort_worktree",
+    "get_effort_diff",
+    "get_effort_changed_files",
+    "get_effort_git_status",
+    "get_effort_preview_binding",
     "promote_change_effort",
     "declare_release",
     "get_artifact_provenance",
@@ -100,6 +133,186 @@ def _register_tool(mcp_server: Any, *, name: str, description: str, fn: Callable
 
 
 def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
+    def list_applications() -> Dict[str, Any]:
+        return adapter.list_applications()
+
+    def get_application(application_id: str) -> Dict[str, Any]:
+        return adapter.get_application(application_id=application_id)
+
+    def list_application_change_sessions(application_id: str) -> Dict[str, Any]:
+        return adapter.list_application_change_sessions(application_id=application_id)
+
+    def get_application_change_session(application_id: str, session_id: str) -> Dict[str, Any]:
+        return adapter.get_application_change_session(application_id=application_id, session_id=session_id)
+
+    def create_application_change_session(application_id: str, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return adapter.create_application_change_session(application_id=application_id, payload=payload)
+
+    def create_decomposition_campaign(
+        application_id: str,
+        target_source_files: list[str] | None = None,
+        extraction_seams: list[str] | None = None,
+        moved_handlers_modules: list[str] | None = None,
+        required_test_suites: list[str] | None = None,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.create_decomposition_campaign(
+            application_id=application_id,
+            target_source_files=target_source_files,
+            extraction_seams=extraction_seams,
+            moved_handlers_modules=moved_handlers_modules,
+            required_test_suites=required_test_suites,
+            payload=payload,
+        )
+
+    def get_decomposition_campaign(application_id: str, session_id: str) -> Dict[str, Any]:
+        return adapter.get_decomposition_campaign(application_id=application_id, session_id=session_id)
+
+    def inspect_decomposition_guardrails(application_id: str, session_id: str) -> Dict[str, Any]:
+        return adapter.inspect_decomposition_guardrails(application_id=application_id, session_id=session_id)
+
+    def get_decomposition_observability(
+        application_id: str,
+        session_id: str,
+        artifact_id: str = "",
+        artifact_slug: str = "",
+        top_n: int = 50,
+    ) -> Dict[str, Any]:
+        return adapter.get_decomposition_observability(
+            application_id=application_id,
+            session_id=session_id,
+            artifact_id=artifact_id,
+            artifact_slug=artifact_slug,
+            top_n=top_n,
+        )
+
+    def get_application_change_session_plan(application_id: str, session_id: str) -> Dict[str, Any]:
+        return adapter.get_application_change_session_plan(application_id=application_id, session_id=session_id)
+
+    def stage_apply_application_change_session(
+        application_id: str,
+        session_id: str,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.stage_apply_application_change_session(
+            application_id=application_id,
+            session_id=session_id,
+            payload=payload,
+        )
+
+    def prepare_preview_application_change_session(
+        application_id: str,
+        session_id: str,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.prepare_preview_application_change_session(
+            application_id=application_id,
+            session_id=session_id,
+            payload=payload,
+        )
+
+    def get_application_change_session_preview_status(application_id: str, session_id: str) -> Dict[str, Any]:
+        return adapter.get_application_change_session_preview_status(application_id=application_id, session_id=session_id)
+
+    def validate_application_change_session(
+        application_id: str,
+        session_id: str,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.validate_application_change_session(
+            application_id=application_id,
+            session_id=session_id,
+            payload=payload,
+        )
+
+    def commit_application_change_session(
+        application_id: str,
+        session_id: str,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.commit_application_change_session(
+            application_id=application_id,
+            session_id=session_id,
+            payload=payload,
+        )
+
+    def promote_application_change_session(
+        application_id: str,
+        session_id: str,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.promote_application_change_session(
+            application_id=application_id,
+            session_id=session_id,
+            payload=payload,
+        )
+
+    def rollback_application_change_session(
+        application_id: str,
+        session_id: str,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.rollback_application_change_session(
+            application_id=application_id,
+            session_id=session_id,
+            payload=payload,
+        )
+
+    def get_application_change_session_commits(application_id: str, session_id: str) -> Dict[str, Any]:
+        return adapter.get_application_change_session_commits(application_id=application_id, session_id=session_id)
+
+    def get_application_change_session_promotion_evidence(application_id: str, session_id: str) -> Dict[str, Any]:
+        return adapter.get_application_change_session_promotion_evidence(application_id=application_id, session_id=session_id)
+
+    def list_runtime_runs(
+        application_id: str = "",
+        session_id: str = "",
+        limit: int = 50,
+        cursor: str = "",
+        status: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.list_runtime_runs(
+            application_id=application_id,
+            session_id=session_id,
+            limit=limit,
+            cursor=cursor,
+            status=status,
+        )
+
+    def get_runtime_run(run_id: str, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
+        return adapter.get_runtime_run(run_id=run_id, application_id=application_id, session_id=session_id)
+
+    def get_runtime_run_logs(run_id: str, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
+        return adapter.get_runtime_run_logs(run_id=run_id, application_id=application_id, session_id=session_id)
+
+    def get_runtime_run_artifacts(run_id: str, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
+        return adapter.get_runtime_run_artifacts(run_id=run_id, application_id=application_id, session_id=session_id)
+
+    def get_runtime_run_commands(run_id: str, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
+        return adapter.get_runtime_run_commands(run_id=run_id, application_id=application_id, session_id=session_id)
+
+    def cancel_runtime_run(run_id: str, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
+        return adapter.cancel_runtime_run(run_id=run_id, application_id=application_id, session_id=session_id)
+
+    def rerun_runtime_run(run_id: str, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
+        return adapter.rerun_runtime_run(run_id=run_id, application_id=application_id, session_id=session_id)
+
+    def get_dev_task_by_id(task_id: str, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
+        return adapter.get_dev_task_by_id(task_id=task_id, application_id=application_id, session_id=session_id)
+
+    def list_dev_tasks_for_change_session(
+        application_id: str = "",
+        session_id: str = "",
+        limit: int = 100,
+        status: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.list_dev_tasks_for_change_session(
+            application_id=application_id,
+            session_id=session_id,
+            limit=limit,
+            status=status,
+        )
+
     def list_blueprints() -> Dict[str, Any]:
         return adapter.list_blueprints()
 
@@ -310,6 +523,19 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     def create_change_effort(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
         return adapter.create_change_effort(payload=payload)
 
+    def list_change_efforts(
+        workspace_id: str = "",
+        artifact_slug: str = "",
+        status: str = "",
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        return adapter.list_change_efforts(
+            workspace_id=workspace_id,
+            artifact_slug=artifact_slug,
+            status=status,
+            limit=limit,
+        )
+
     def get_change_effort(effort_id: str) -> Dict[str, Any]:
         return adapter.get_change_effort(effort_id=effort_id)
 
@@ -322,6 +548,18 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     def allocate_effort_worktree(effort_id: str, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
         return adapter.allocate_effort_worktree(effort_id=effort_id, payload=payload)
 
+    def get_effort_diff(effort_id: str) -> Dict[str, Any]:
+        return adapter.get_effort_diff(effort_id=effort_id)
+
+    def get_effort_changed_files(effort_id: str) -> Dict[str, Any]:
+        return adapter.get_effort_changed_files(effort_id=effort_id)
+
+    def get_effort_git_status(effort_id: str) -> Dict[str, Any]:
+        return adapter.get_effort_git_status(effort_id=effort_id)
+
+    def get_effort_preview_binding(effort_id: str) -> Dict[str, Any]:
+        return adapter.get_effort_preview_binding(effort_id=effort_id)
+
     def promote_change_effort(effort_id: str, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
         return adapter.promote_change_effort(effort_id=effort_id, payload=payload)
 
@@ -330,6 +568,175 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
 
     def get_artifact_provenance(artifact_slug: str, workspace_id: str) -> Dict[str, Any]:
         return adapter.get_artifact_provenance(artifact_slug=artifact_slug, workspace_id=workspace_id)
+
+    _register_tool(
+        mcp_server,
+        name="list_applications",
+        description="List applications available for solution change sessions.",
+        fn=list_applications,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_application",
+        description="Get one application by id.",
+        fn=get_application,
+    )
+    _register_tool(
+        mcp_server,
+        name="list_application_change_sessions",
+        description="List solution change sessions for an application.",
+        fn=list_application_change_sessions,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_application_change_session",
+        description="Get one solution change session by application_id/session_id.",
+        fn=get_application_change_session,
+    )
+    _register_tool(
+        mcp_server,
+        name="create_application_change_session",
+        description="Create a solution change session for an application.",
+        fn=create_application_change_session,
+    )
+    _register_tool(
+        mcp_server,
+        name="create_decomposition_campaign",
+        description="Create a decomposition-focused change session campaign with target files/seams/tests metadata.",
+        fn=create_decomposition_campaign,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_decomposition_campaign",
+        description="Read compact decomposition campaign/session status metadata for safe autonomous orchestration.",
+        fn=get_decomposition_campaign,
+    )
+    _register_tool(
+        mcp_server,
+        name="inspect_decomposition_guardrails",
+        description="Inspect decomposition guardrails: changed routes/imports/files, oversized delta, and test recommendations.",
+        fn=inspect_decomposition_guardrails,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_decomposition_observability",
+        description="Read decomposition observability deltas including module metrics and route inventory data.",
+        fn=get_decomposition_observability,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_application_change_session_plan",
+        description="Get the execution plan/control status for a solution change session.",
+        fn=get_application_change_session_plan,
+    )
+    _register_tool(
+        mcp_server,
+        name="stage_apply_application_change_session",
+        description="Run stage-apply for a solution change session.",
+        fn=stage_apply_application_change_session,
+    )
+    _register_tool(
+        mcp_server,
+        name="prepare_preview_application_change_session",
+        description="Prepare preview environment for a solution change session.",
+        fn=prepare_preview_application_change_session,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_application_change_session_preview_status",
+        description="Get compact, agent-facing preview readiness/status for a solution change session.",
+        fn=get_application_change_session_preview_status,
+    )
+    _register_tool(
+        mcp_server,
+        name="validate_application_change_session",
+        description="Validate a staged solution change session.",
+        fn=validate_application_change_session,
+    )
+    _register_tool(
+        mcp_server,
+        name="commit_application_change_session",
+        description="Commit a validated solution change session.",
+        fn=commit_application_change_session,
+    )
+    _register_tool(
+        mcp_server,
+        name="promote_application_change_session",
+        description="Promote a committed solution change session.",
+        fn=promote_application_change_session,
+    )
+    _register_tool(
+        mcp_server,
+        name="rollback_application_change_session",
+        description="Rollback a promoted solution change session.",
+        fn=rollback_application_change_session,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_application_change_session_commits",
+        description="Read commit metadata for a solution change session.",
+        fn=get_application_change_session_commits,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_application_change_session_promotion_evidence",
+        description="Read promotion evidence for a solution change session.",
+        fn=get_application_change_session_promotion_evidence,
+    )
+    _register_tool(
+        mcp_server,
+        name="list_runtime_runs",
+        description="List runtime runs for a change session or globally.",
+        fn=list_runtime_runs,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_runtime_run",
+        description="Get runtime run status and execution summary.",
+        fn=get_runtime_run,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_runtime_run_logs",
+        description="Get runtime run logs/step summaries for failure analysis.",
+        fn=get_runtime_run_logs,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_runtime_run_artifacts",
+        description="List artifacts produced by a runtime run.",
+        fn=get_runtime_run_artifacts,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_runtime_run_commands",
+        description="Get commands/steps executed by a runtime run.",
+        fn=get_runtime_run_commands,
+    )
+    _register_tool(
+        mcp_server,
+        name="cancel_runtime_run",
+        description="Cancel a running runtime run.",
+        fn=cancel_runtime_run,
+    )
+    _register_tool(
+        mcp_server,
+        name="rerun_runtime_run",
+        description="Rerun or retry a completed/failed runtime run when supported.",
+        fn=rerun_runtime_run,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_dev_task_by_id",
+        description="Get one dev task by id.",
+        fn=get_dev_task_by_id,
+    )
+    _register_tool(
+        mcp_server,
+        name="list_dev_tasks_for_change_session",
+        description="List dev tasks associated with a change session.",
+        fn=list_dev_tasks_for_change_session,
+    )
 
     _register_tool(
         mcp_server,
@@ -514,6 +921,12 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     )
     _register_tool(
         mcp_server,
+        name="list_change_efforts",
+        description="List change efforts filtered by workspace/artifact/status.",
+        fn=list_change_efforts,
+    )
+    _register_tool(
+        mcp_server,
         name="get_change_effort",
         description="Get one change effort by id.",
         fn=get_change_effort,
@@ -535,6 +948,30 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
         name="allocate_effort_worktree",
         description="Allocate deterministic isolated worktree metadata for a change effort.",
         fn=allocate_effort_worktree,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_effort_diff",
+        description="Read effort diff (or metadata-backed diff summary when backend diff endpoint is unavailable).",
+        fn=get_effort_diff,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_effort_changed_files",
+        description="Read changed files for a change effort.",
+        fn=get_effort_changed_files,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_effort_git_status",
+        description="Read git status for a change effort worktree.",
+        fn=get_effort_git_status,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_effort_preview_binding",
+        description="Resolve change-effort linkage to preview/session status.",
+        fn=get_effort_preview_binding,
     )
     _register_tool(
         mcp_server,
