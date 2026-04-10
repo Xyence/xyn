@@ -460,6 +460,50 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(len(files), 1)
         self.assertEqual(files[0].get("path"), "README.md")
 
+    def test_adapter_read_artifact_source_file_returns_candidate_paths_on_near_match(self) -> None:
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        with mock.patch.object(
+            adapter,
+            "_request_with_fallback_paths",
+            return_value={"ok": False, "status_code": 404, "path": "/api/v1/artifacts/source-file"},
+        ), mock.patch.object(
+            adapter,
+            "_artifact_files_via_export_package",
+            return_value={
+                "artifact_id": "a1",
+                "artifact_slug": "xyn-api",
+                "files": {
+                    "apps/a/xyn_api.py": b"def a():\n    return 1\n",
+                    "apps/b/xyn_api.py": b"def b():\n    return 2\n",
+                },
+                "source_mode": "resolved_source",
+                "source_origin": "mirror",
+                "resolution_branch": "provenance_backed",
+                "resolution_details": {},
+                "provenance": {},
+                "resolved_source_roots": ["/workspace/xyn-platform/services/xyn-api/backend"],
+                "warnings": [],
+            },
+        ):
+            result = adapter.read_artifact_source_file(artifact_slug="xyn-api", path="xyn_api.py")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status_code"], 404)
+        response = result.get("response") if isinstance(result.get("response"), dict) else {}
+        self.assertEqual(response.get("error"), "file not found")
+        self.assertEqual(
+            sorted(response.get("candidate_paths") or []),
+            sorted(["apps/a/xyn_api.py", "apps/b/xyn_api.py"]),
+        )
+
     def test_adapter_get_artifact_source_tree_falls_back_on_403(self) -> None:
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
