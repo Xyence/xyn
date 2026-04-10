@@ -22,7 +22,9 @@ from core.artifact_source_resolution import (
 )
 
 _REQUEST_BEARER_TOKEN: ContextVar[str] = ContextVar("xyn_mcp_request_bearer_token", default="")
-_SOURCE_FALLBACK_STATUS_CODES = {400, 404, 422}
+_SOURCE_FALLBACK_STATUS_CODES = {400, 401, 403, 404, 422, 429}
+_SOURCE_FALLBACK_STATUS_MIN = 500
+_SOURCE_FALLBACK_STATUS_MAX = 599
 
 
 def set_request_bearer_token(token: str) -> Token:
@@ -263,6 +265,7 @@ class XynApiAdapter:
             return {}
         body = listing.get("response") if isinstance(listing.get("response"), dict) else {}
         rows = body.get("artifacts") if isinstance(body.get("artifacts"), list) else []
+        slug_matches: list[dict[str, Any]] = []
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -271,8 +274,47 @@ class XynApiAdapter:
             if resolved_id and row_id == resolved_id:
                 return row
             if resolved_slug and row_slug == resolved_slug:
-                return row
+                slug_matches.append(row)
+        if len(slug_matches) == 1:
+            return slug_matches[0]
+        if len(slug_matches) > 1:
+            return {
+                "_resolution_error": "artifact_slug_ambiguous",
+                "slug": resolved_slug,
+                "matches": [
+                    {
+                        "id": str(item.get("id") or ""),
+                        "slug": str(item.get("slug") or ""),
+                        "title": str(item.get("title") or ""),
+                        "artifact_type": str(item.get("artifact_type") or ""),
+                        "status": str(item.get("status") or ""),
+                    }
+                    for item in slug_matches
+                ],
+            }
         return {}
+
+    @staticmethod
+    def _should_source_fallback(status_code: int) -> bool:
+        code = int(status_code or 0)
+        return code in _SOURCE_FALLBACK_STATUS_CODES or (_SOURCE_FALLBACK_STATUS_MIN <= code <= _SOURCE_FALLBACK_STATUS_MAX)
+
+    @staticmethod
+    def _slug_ambiguity_error(*, artifact_slug: str, matches: list[dict[str, Any]]) -> Dict[str, Any]:
+        return {
+            "ok": False,
+            "status_code": 409,
+            "method": "GET",
+            "path": "/api/v1/artifacts/source-tree",
+            "response": {
+                "error": "artifact_slug_ambiguous",
+                "blocked_reason": "artifact_slug_ambiguous",
+                "recommended_action": "retry_with_artifact_id",
+                "artifact_slug": str(artifact_slug or ""),
+                "candidates": matches[:20],
+                "next_allowed_actions": ["list_artifacts", "get_artifact", "get_artifact_source_tree"],
+            },
+        }
 
     def _artifact_files_via_export_package(
         self,
@@ -281,6 +323,12 @@ class XynApiAdapter:
         artifact_slug: str = "",
     ) -> Optional[dict[str, Any]]:
         artifact_row = self._resolve_artifact_record(artifact_id=artifact_id, artifact_slug=artifact_slug)
+        if str(artifact_row.get("_resolution_error") or "") == "artifact_slug_ambiguous":
+            return {
+                "_resolution_error": "artifact_slug_ambiguous",
+                "artifact_slug": str(artifact_slug or ""),
+                "matches": artifact_row.get("matches") if isinstance(artifact_row.get("matches"), list) else [],
+            }
         resolved_artifact_id = str(artifact_row.get("id") or artifact_id or "").strip()
         resolved_artifact_slug = str(artifact_row.get("slug") or artifact_slug or "").strip()
         if not resolved_artifact_id:
@@ -692,15 +740,23 @@ class XynApiAdapter:
     def get_artifact_source_tree(
         self,
         *,
-        artifact_id: str = "",
         artifact_slug: str = "",
+        artifact_id: str = "",
         include_line_counts: bool = True,
+        max_files: Optional[int] = None,
+        max_depth: Optional[int] = None,
+        include_files: bool = True,
     ) -> Dict[str, Any]:
         params: Dict[str, Any] = {"include_line_counts": bool(include_line_counts)}
-        if str(artifact_id or "").strip():
-            params["artifact_id"] = str(artifact_id).strip()
         if str(artifact_slug or "").strip():
             params["artifact_slug"] = str(artifact_slug).strip()
+        if str(artifact_id or "").strip():
+            params["artifact_id"] = str(artifact_id).strip()
+        if max_files is not None:
+            params["max_files"] = int(max_files)
+        if max_depth is not None:
+            params["max_depth"] = int(max_depth)
+        params["include_files"] = bool(include_files)
         result = self._request_with_fallback_paths(
             method="GET",
             paths=[
@@ -709,11 +765,26 @@ class XynApiAdapter:
             params=params,
             base_urls=self._code_api_base_urls(),
         )
-        if not result.get("ok") and int(result.get("status_code") or 0) in _SOURCE_FALLBACK_STATUS_CODES:
+        if not result.get("ok") and self._should_source_fallback(int(result.get("status_code") or 0)):
             resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
             if resolved:
+                if str(resolved.get("_resolution_error") or "") == "artifact_slug_ambiguous":
+                    return self._slug_ambiguity_error(
+                        artifact_slug=str(resolved.get("artifact_slug") or artifact_slug or ""),
+                        matches=resolved.get("matches") if isinstance(resolved.get("matches"), list) else [],
+                    )
                 files = resolved.get("files") if isinstance(resolved.get("files"), dict) else {}
                 index_rows = build_source_index(files, include_line_counts=bool(include_line_counts))
+                if max_depth is not None:
+                    max_depth_int = max(1, int(max_depth))
+                    index_rows = [
+                        row
+                        for row in index_rows
+                        if isinstance(row, dict) and len(str(row.get("path") or "").split("/")) <= max_depth_int
+                    ]
+                if max_files is not None:
+                    index_rows = index_rows[: max(1, int(max_files))]
+                tree = build_hierarchical_tree(index_rows)
                 return {
                     "ok": True,
                     "status_code": 200,
@@ -736,8 +807,9 @@ class XynApiAdapter:
                         "provenance": resolved.get("provenance") if isinstance(resolved.get("provenance"), dict) else {},
                         "resolved_source_roots": list(resolved.get("resolved_source_roots") or []),
                         "warnings": list(resolved.get("warnings") or []),
-                        "files": index_rows,
-                        "tree": build_hierarchical_tree(index_rows),
+                        "file_count": len(index_rows),
+                        "files": index_rows if bool(include_files) else [],
+                        "tree": tree,
                     },
                 }
         return self._with_artifact_not_found_hint(result, artifact_id=artifact_id, artifact_slug=artifact_slug)
@@ -746,18 +818,18 @@ class XynApiAdapter:
         self,
         *,
         path: str,
-        artifact_id: str = "",
         artifact_slug: str = "",
+        artifact_id: str = "",
         start_line: Optional[int] = None,
         end_line: Optional[int] = None,
     ) -> Dict[str, Any]:
         params: Dict[str, Any] = {
             "path": str(path or ""),
         }
-        if str(artifact_id or "").strip():
-            params["artifact_id"] = str(artifact_id).strip()
         if str(artifact_slug or "").strip():
             params["artifact_slug"] = str(artifact_slug).strip()
+        if str(artifact_id or "").strip():
+            params["artifact_id"] = str(artifact_id).strip()
         if start_line is not None:
             params["start_line"] = int(start_line)
         if end_line is not None:
@@ -770,9 +842,14 @@ class XynApiAdapter:
             params=params,
             base_urls=self._code_api_base_urls(),
         )
-        if not result.get("ok") and int(result.get("status_code") or 0) in _SOURCE_FALLBACK_STATUS_CODES:
+        if not result.get("ok") and self._should_source_fallback(int(result.get("status_code") or 0)):
             resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
             if resolved:
+                if str(resolved.get("_resolution_error") or "") == "artifact_slug_ambiguous":
+                    return self._slug_ambiguity_error(
+                        artifact_slug=str(resolved.get("artifact_slug") or artifact_slug or ""),
+                        matches=resolved.get("matches") if isinstance(resolved.get("matches"), list) else [],
+                    )
                 files = resolved.get("files") if isinstance(resolved.get("files"), dict) else {}
                 try:
                     payload = read_file_chunk(
@@ -821,8 +898,8 @@ class XynApiAdapter:
         self,
         *,
         query: str,
-        artifact_id: str = "",
         artifact_slug: str = "",
+        artifact_id: str = "",
         path_glob: str = "",
         file_extensions: str = "",
         regex: bool = False,
@@ -835,10 +912,10 @@ class XynApiAdapter:
             "case_sensitive": bool(case_sensitive),
             "limit": int(limit),
         }
-        if str(artifact_id or "").strip():
-            params["artifact_id"] = str(artifact_id).strip()
         if str(artifact_slug or "").strip():
             params["artifact_slug"] = str(artifact_slug).strip()
+        if str(artifact_id or "").strip():
+            params["artifact_id"] = str(artifact_id).strip()
         if str(path_glob or "").strip():
             params["path_glob"] = str(path_glob).strip()
         if str(file_extensions or "").strip():
@@ -851,9 +928,14 @@ class XynApiAdapter:
             params=params,
             base_urls=self._code_api_base_urls(),
         )
-        if not result.get("ok") and int(result.get("status_code") or 0) in _SOURCE_FALLBACK_STATUS_CODES:
+        if not result.get("ok") and self._should_source_fallback(int(result.get("status_code") or 0)):
             resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
             if resolved:
+                if str(resolved.get("_resolution_error") or "") == "artifact_slug_ambiguous":
+                    return self._slug_ambiguity_error(
+                        artifact_slug=str(resolved.get("artifact_slug") or artifact_slug or ""),
+                        matches=resolved.get("matches") if isinstance(resolved.get("matches"), list) else [],
+                    )
                 files = resolved.get("files") if isinstance(resolved.get("files"), dict) else {}
                 extensions = [part.strip() for part in str(file_extensions or "").split(",") if part.strip()]
                 try:
@@ -905,15 +987,15 @@ class XynApiAdapter:
     def analyze_artifact_codebase(
         self,
         *,
-        artifact_id: str = "",
         artifact_slug: str = "",
+        artifact_id: str = "",
         mode: str = "general",
     ) -> Dict[str, Any]:
         params: Dict[str, Any] = {"mode": str(mode or "general").strip().lower() or "general"}
-        if str(artifact_id or "").strip():
-            params["artifact_id"] = str(artifact_id).strip()
         if str(artifact_slug or "").strip():
             params["artifact_slug"] = str(artifact_slug).strip()
+        if str(artifact_id or "").strip():
+            params["artifact_id"] = str(artifact_id).strip()
         result = self._request_with_fallback_paths(
             method="GET",
             paths=[
@@ -922,9 +1004,14 @@ class XynApiAdapter:
             params=params,
             base_urls=self._code_api_base_urls(),
         )
-        if not result.get("ok") and int(result.get("status_code") or 0) in _SOURCE_FALLBACK_STATUS_CODES:
+        if not result.get("ok") and self._should_source_fallback(int(result.get("status_code") or 0)):
             resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
             if resolved:
+                if str(resolved.get("_resolution_error") or "") == "artifact_slug_ambiguous":
+                    return self._slug_ambiguity_error(
+                        artifact_slug=str(resolved.get("artifact_slug") or artifact_slug or ""),
+                        matches=resolved.get("matches") if isinstance(resolved.get("matches"), list) else [],
+                    )
                 files = resolved.get("files") if isinstance(resolved.get("files"), dict) else {}
                 payload = analyze_codebase(files, mode=params["mode"])
                 return {
@@ -957,14 +1044,14 @@ class XynApiAdapter:
     def analyze_python_api_artifact(
         self,
         *,
-        artifact_id: str = "",
         artifact_slug: str = "",
+        artifact_id: str = "",
     ) -> Dict[str, Any]:
         params: Dict[str, Any] = {}
-        if str(artifact_id or "").strip():
-            params["artifact_id"] = str(artifact_id).strip()
         if str(artifact_slug or "").strip():
             params["artifact_slug"] = str(artifact_slug).strip()
+        if str(artifact_id or "").strip():
+            params["artifact_id"] = str(artifact_id).strip()
         result = self._request_with_fallback_paths(
             method="GET",
             paths=[
@@ -973,9 +1060,14 @@ class XynApiAdapter:
             params=params,
             base_urls=self._code_api_base_urls(),
         )
-        if not result.get("ok") and int(result.get("status_code") or 0) in _SOURCE_FALLBACK_STATUS_CODES:
+        if not result.get("ok") and self._should_source_fallback(int(result.get("status_code") or 0)):
             resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
             if resolved:
+                if str(resolved.get("_resolution_error") or "") == "artifact_slug_ambiguous":
+                    return self._slug_ambiguity_error(
+                        artifact_slug=str(resolved.get("artifact_slug") or artifact_slug or ""),
+                        matches=resolved.get("matches") if isinstance(resolved.get("matches"), list) else [],
+                    )
                 files = resolved.get("files") if isinstance(resolved.get("files"), dict) else {}
                 payload = analyze_codebase(files, mode="python_api")
                 return {
@@ -1008,15 +1100,15 @@ class XynApiAdapter:
     def get_artifact_module_metrics(
         self,
         *,
-        artifact_id: str = "",
         artifact_slug: str = "",
+        artifact_id: str = "",
         top_n: int = 200,
     ) -> Dict[str, Any]:
         params: Dict[str, Any] = {"top_n": int(top_n)}
-        if str(artifact_id or "").strip():
-            params["artifact_id"] = str(artifact_id).strip()
         if str(artifact_slug or "").strip():
             params["artifact_slug"] = str(artifact_slug).strip()
+        if str(artifact_id or "").strip():
+            params["artifact_id"] = str(artifact_id).strip()
         result = self._request_with_fallback_paths(
             method="GET",
             paths=[
@@ -1025,9 +1117,14 @@ class XynApiAdapter:
             params=params,
             base_urls=self._code_api_base_urls(),
         )
-        if not result.get("ok") and int(result.get("status_code") or 0) in _SOURCE_FALLBACK_STATUS_CODES:
+        if not result.get("ok") and self._should_source_fallback(int(result.get("status_code") or 0)):
             resolved = self._artifact_files_via_export_package(artifact_id=artifact_id, artifact_slug=artifact_slug)
             if resolved:
+                if str(resolved.get("_resolution_error") or "") == "artifact_slug_ambiguous":
+                    return self._slug_ambiguity_error(
+                        artifact_slug=str(resolved.get("artifact_slug") or artifact_slug or ""),
+                        matches=resolved.get("matches") if isinstance(resolved.get("matches"), list) else [],
+                    )
                 files = resolved.get("files") if isinstance(resolved.get("files"), dict) else {}
                 metrics = compute_module_metrics(files)[: max(1, int(top_n))]
                 return {

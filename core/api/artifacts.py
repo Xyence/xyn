@@ -25,6 +25,7 @@ from core.artifact_source_resolution import (
     resolve_artifact_source,
 )
 from core.artifact_provenance import extract_provenance_metadata, merge_provenance_metadata
+from core.source_tree_bounds import apply_source_tree_bounds
 from core.access_control import (
     CAP_ARTIFACTS_READ,
     CAP_CAMPAIGNS_MANAGE,
@@ -321,6 +322,9 @@ async def get_artifact_source_tree(
     artifact_id: Optional[uuid.UUID] = Query(default=None),
     artifact_slug: Optional[str] = Query(default=None),
     include_line_counts: bool = Query(default=True),
+    max_files: Optional[int] = Query(default=None, ge=1, le=20000),
+    max_depth: Optional[int] = Query(default=None, ge=1, le=64),
+    include_files: bool = Query(default=True),
     principal: AccessPrincipal = Depends(require_capabilities(CAP_ARTIFACTS_READ)),
     db: Session = Depends(get_db),
 ):
@@ -329,7 +333,8 @@ async def get_artifact_source_tree(
     resolved = _resolved_artifact_source_payload(row, payload)
     files = resolved["files"] if isinstance(resolved.get("files"), dict) else {}
     index_rows = build_source_index(files, include_line_counts=bool(include_line_counts))
-    tree = build_hierarchical_tree(index_rows)
+    bounded_rows = apply_source_tree_bounds(index_rows, max_files=max_files, max_depth=max_depth)
+    tree = build_hierarchical_tree(bounded_rows)
     return {
         "artifact": _artifact_identity_payload(row),
         "source_mode": resolved.get("source_mode") or "packaged_fallback",
@@ -339,9 +344,9 @@ async def get_artifact_source_tree(
         "provenance": resolved.get("provenance") if isinstance(resolved.get("provenance"), dict) else {},
         "resolved_source_roots": resolved.get("resolved_source_roots") or [],
         "warnings": resolved.get("warnings") or [],
-        "file_count": len(index_rows),
+        "file_count": len(bounded_rows),
         "tree": tree,
-        "files": index_rows,
+        "files": bounded_rows if bool(include_files) else [],
     }
 
 
