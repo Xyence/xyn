@@ -88,7 +88,9 @@ class XynApiAdapter:
 
     def _headers(self) -> Dict[str, str]:
         headers: Dict[str, str] = {"Accept": "application/json"}
-        bearer = self._config.bearer_token or get_request_bearer_token()
+        # Prefer per-request bearer propagated by MCP auth middleware so OAuth sessions
+        # can flow through ChatGPT -> MCP -> Xyn backend. Fall back to static config token.
+        bearer = get_request_bearer_token() or self._config.bearer_token
         if bearer:
             headers["Authorization"] = f"Bearer {bearer}"
         if self._config.internal_token:
