@@ -1563,7 +1563,7 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer request-token-abc")
 
     @mock.patch.object(XynApiAdapter, "_request")
-    def test_tool_surface_hides_session_tools_without_cookie_and_hides_unsupported_list_change_efforts(
+    def test_tool_surface_is_not_cookie_gated_and_hides_unsupported_list_change_efforts(
         self, mock_request: mock.Mock
     ) -> None:
         def _fake_request(*_args, **kwargs):
@@ -1588,8 +1588,8 @@ class XynMcpAdapterTests(TestCase):
         surface = _build_tool_surface(adapter)
         enabled_tools = set(surface.get("enabled_tools") or [])
         disabled_tools = set(surface.get("disabled_tools") or [])
-        self.assertIn("list_applications", disabled_tools)
-        self.assertIn("list_runtime_runs", disabled_tools)
+        self.assertIn("list_applications", enabled_tools)
+        self.assertIn("list_runtime_runs", enabled_tools)
         self.assertIn("list_change_efforts", disabled_tools)
         self.assertNotIn("list_change_efforts", enabled_tools)
         parity = surface.get("parity") if isinstance(surface.get("parity"), dict) else {}
@@ -1654,7 +1654,7 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer oauth-request-token")
 
     @mock.patch.object(XynApiAdapter, "_request")
-    def test_tool_surface_enables_session_tools_when_cookie_present(self, mock_request: mock.Mock) -> None:
+    def test_tool_surface_is_consistent_when_cookie_present(self, mock_request: mock.Mock) -> None:
         def _fake_request(*_args, **kwargs):
             path = str(kwargs.get("path") or "")
             if path == "/api/v1/change-efforts":
@@ -1728,7 +1728,6 @@ class XynMcpAdapterTests(TestCase):
         auth = payload.get("auth") if isinstance(payload.get("auth"), dict) else {}
         self.assertTrue(bool(auth.get("has_bearer_token")))
         self.assertFalse(bool(auth.get("has_internal_token")))
-        self.assertTrue(bool(auth.get("has_cookie")))
 
     def test_healthz_remains_unauthenticated_when_mcp_auth_enabled(self) -> None:
         adapter = XynApiAdapter(

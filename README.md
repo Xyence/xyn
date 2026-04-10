@@ -114,7 +114,6 @@ export XYN_MCP_XYN_CONTROL_API_BASE_URL=http://localhost:8001
 export XYN_MCP_AUTH_BEARER_TOKEN=...
 # Optional:
 # export XYN_MCP_INTERNAL_TOKEN=...
-# export XYN_MCP_COOKIE='sessionid=...'
 ```
 
 Run the MCP server:
