@@ -52,6 +52,7 @@ class XynApiAdapterConfig:
     upstream_host_header: str = ""
     upstream_forwarded_proto: str = ""
     code_api_base_url: str = ""
+    default_workspace_id: str = ""
 
     @classmethod
     def from_env(cls) -> "XynApiAdapterConfig":
@@ -76,6 +77,8 @@ class XynApiAdapterConfig:
             timeout_seconds=float(os.getenv("XYN_MCP_TIMEOUT_SECONDS", "30").strip() or "30"),
             upstream_host_header=str(os.getenv("XYN_MCP_UPSTREAM_HOST_HEADER", "")).strip() or derived_host,
             upstream_forwarded_proto=str(os.getenv("XYN_MCP_UPSTREAM_FORWARDED_PROTO", "")).strip() or derived_proto,
+            default_workspace_id=str(os.getenv("XYN_MCP_WORKSPACE_ID", "")).strip()
+            or str(os.getenv("XYN_WORKSPACE_ID", "")).strip(),
         )
 
 
@@ -1376,12 +1379,47 @@ class XynApiAdapter:
             "raw": payload,
         }
 
-    def list_applications(self) -> Dict[str, Any]:
+    def _discover_workspace_id(self) -> str:
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=["/xyn/api/workspaces"],
+            base_urls=[self._config.control_api_base_url],
+        )
+        if not result.get("ok"):
+            return ""
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        rows = body.get("workspaces") if isinstance(body.get("workspaces"), list) else []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            workspace_id = str(row.get("id") or "").strip()
+            if workspace_id:
+                return workspace_id
+        return ""
+
+    def list_applications(self, *, workspace_id: str = "") -> Dict[str, Any]:
+        resolved_workspace_id = str(workspace_id or self._config.default_workspace_id or "").strip()
+        params = {"workspace_id": resolved_workspace_id} if resolved_workspace_id else None
         result = self._request_with_fallback_paths(
             method="GET",
             paths=["/xyn/api/applications"],
             base_urls=[self._config.control_api_base_url],
+            params=params,
         )
+        if not result.get("ok"):
+            code = int(result.get("status_code") or 0)
+            body = result.get("response") if isinstance(result.get("response"), dict) else {}
+            detail = str(body.get("error") or body.get("detail") or "").strip().lower()
+            missing_workspace = code == 400 and "workspace_id" in detail
+            if missing_workspace and not resolved_workspace_id:
+                discovered_workspace_id = self._discover_workspace_id()
+                if discovered_workspace_id:
+                    result = self._request_with_fallback_paths(
+                        method="GET",
+                        paths=["/xyn/api/applications"],
+                        base_urls=[self._config.control_api_base_url],
+                        params={"workspace_id": discovered_workspace_id},
+                    )
         if not result.get("ok"):
             return result
         body = result.get("response") if isinstance(result.get("response"), dict) else {}
