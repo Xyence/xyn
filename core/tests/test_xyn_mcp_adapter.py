@@ -1105,17 +1105,18 @@ class XynMcpAdapterTests(TestCase):
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_runtime_run_missing_and_forbidden_access(self, mock_request: mock.Mock) -> None:
-        def _not_found() -> mock.Mock:
+        def _fake_request(*_args, **kwargs):
+            url = str(kwargs.get("url") or "")
             response = mock.Mock()
-            response.status_code = 404
-            response.json.return_value = {"detail": "Run not found"}
+            if "run-denied" in url:
+                response.status_code = 403
+                response.json.return_value = {"detail": "Forbidden"}
+            else:
+                response.status_code = 404
+                response.json.return_value = {"detail": "Run not found"}
             return response
 
-        forbidden = mock.Mock()
-        forbidden.status_code = 403
-        forbidden.json.return_value = {"detail": "Forbidden"}
-
-        mock_request.side_effect = [_not_found(), _not_found(), _not_found(), _not_found(), forbidden]
+        mock_request.side_effect = _fake_request
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
                 control_api_base_url="http://xyn.local:8001",
@@ -1612,8 +1613,8 @@ class XynMcpAdapterTests(TestCase):
         disabled_tools = set(surface.get("disabled_tools") or [])
         self.assertIn("list_applications", enabled_tools)
         self.assertIn("list_runtime_runs", enabled_tools)
-        self.assertIn("list_change_efforts", enabled_tools)
-        self.assertEqual(disabled_tools, set())
+        self.assertIn("list_change_efforts", disabled_tools)
+        self.assertNotIn("list_change_efforts", enabled_tools)
         parity = surface.get("parity") if isinstance(surface.get("parity"), dict) else {}
         list_effort = parity.get("list_change_efforts") if isinstance(parity.get("list_change_efforts"), dict) else {}
         self.assertEqual(list_effort.get("route_exists"), False)
@@ -1701,8 +1702,7 @@ class XynMcpAdapterTests(TestCase):
         disabled = set(surface.get("disabled_tools") or [])
         self.assertIn("list_applications", enabled)
         self.assertIn("list_runtime_runs", enabled)
-        self.assertIn("list_change_efforts", enabled)
-        self.assertEqual(disabled, set())
+        self.assertIn("list_change_efforts", disabled)
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_normalizes_api_redirect_to_json_401(self, mock_request: mock.Mock) -> None:
@@ -1768,6 +1768,44 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(mock_request.call_args_list[0].kwargs.get("url"), "http://xyn.local:8001/xyn/api/artifacts")
         self.assertEqual(mock_request.call_args_list[1].kwargs.get("url"), "http://xyn.local:8001/xyn/api/artifacts")
         self.assertEqual(mock_request.call_args_list[2].kwargs.get("url"), "http://xyn.local:8001/api/v1/artifacts")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_runtime_runs_retries_with_static_bearer_after_request_token_redirect(self, mock_request: mock.Mock) -> None:
+        first = mock.Mock()
+        first.status_code = 302
+        first.headers = {"location": "/accounts/login/?next=/xyn/api/runs"}
+        first.json.side_effect = ValueError("not json")
+        first.text = ""
+
+        second = mock.Mock()
+        second.status_code = 200
+        second.headers = {}
+        second.json.return_value = {"items": [{"id": "run-1", "status": "completed"}]}
+
+        mock_request.side_effect = [first, second]
+
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                code_api_base_url="http://xyn-core:8000",
+                bearer_token="static-token",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        token = set_request_bearer_token("request-token")
+        try:
+            result = adapter.list_runtime_runs()
+        finally:
+            reset_request_bearer_token(token)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status_code"], 200)
+        first_headers = mock_request.call_args_list[0].kwargs.get("headers") or {}
+        second_headers = mock_request.call_args_list[1].kwargs.get("headers") or {}
+        self.assertEqual(first_headers.get("Authorization"), "Bearer request-token")
+        self.assertEqual(second_headers.get("Authorization"), "Bearer static-token")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_sets_upstream_host_headers_when_configured(self, mock_request: mock.Mock) -> None:
