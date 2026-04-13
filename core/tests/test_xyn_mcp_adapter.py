@@ -856,6 +856,33 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(operations, ["stage_apply", "prepare_preview", "validate", "commit"])
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_get_application_change_session_plan_prefers_post_plan_route(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"status": "draft", "session_id": "sess-1"}
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        result = adapter.get_application_change_session_plan(application_id="app-1", session_id="sess-1")
+
+        self.assertTrue(result["ok"])
+        kwargs = mock_request.call_args.kwargs
+        self.assertEqual(kwargs.get("method"), "POST")
+        self.assertEqual(
+            kwargs.get("url"),
+            "http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/plan",
+        )
+        self.assertEqual(kwargs.get("json"), {})
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_application_change_session_workflow_promote_evidence_rollback(self, mock_request: mock.Mock) -> None:
         promote = mock.Mock()
         promote.status_code = 200

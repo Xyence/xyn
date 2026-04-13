@@ -1754,10 +1754,18 @@ class XynApiAdapter:
         }
 
     def get_application_change_session_plan(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+        # Canonical workflow route is POST-only in xyn-api.
         result = self._request(
-            method="GET",
+            method="POST",
             path=f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/plan",
+            json_payload={},
         )
+        if not result.get("ok") and int(result.get("status_code") or 0) in {404, 405}:
+            # Back-compat for older deployments that exposed GET /plan.
+            result = self._request(
+                method="GET",
+                path=f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/plan",
+            )
         if not result.get("ok") and int(result.get("status_code") or 0) in {404, 405}:
             # Compatibility fallback to canonical control inspection when explicit /plan route is unavailable.
             result = self.inspect_change_session_control(application_id=application_id, session_id=session_id)
