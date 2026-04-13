@@ -141,8 +141,8 @@ def _register_tool(mcp_server: Any, *, name: str, description: str, fn: Callable
 
 
 def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
-    def list_applications() -> Dict[str, Any]:
-        return adapter.list_applications()
+    def list_applications(workspace_id: str = "") -> Dict[str, Any]:
+        return adapter.list_applications(workspace_id=workspace_id)
 
     def get_application(application_id: str) -> Dict[str, Any]:
         return adapter.get_application(application_id=application_id)
@@ -1020,7 +1020,10 @@ def _build_tool_surface(adapter: XynApiAdapter) -> Dict[str, Any]:
     for tool_name, (method, path, base) in _TOOL_ROUTE_PROBES.items():
         probe = _probe_backend_route(adapter, method=method, path=path, base=base)
         status_code = int(probe.get("status_code") or 0)
-        route_exists = bool(status_code) and status_code not in {404, 405} and status_code < 500
+        # Treat only deterministic route-missing statuses as unsupported.
+        # Transient transport/startup failures (e.g. 503) should not cause
+        # tool-registration flapping that yields "Unknown tool" at runtime.
+        route_exists = bool(status_code) and status_code not in {404, 405}
         if not route_exists:
             enabled_tools.discard(tool_name)
         parity[tool_name] = {
