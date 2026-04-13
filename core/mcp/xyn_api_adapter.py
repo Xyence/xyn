@@ -27,6 +27,7 @@ _REQUEST_BEARER_TOKEN: ContextVar[str] = ContextVar("xyn_mcp_request_bearer_toke
 _SOURCE_FALLBACK_STATUS_CODES = {400, 401, 403, 404, 422, 429}
 _SOURCE_FALLBACK_STATUS_MIN = 500
 _SOURCE_FALLBACK_STATUS_MAX = 599
+_REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
 
 
 def set_request_bearer_token(token: str) -> Token:
@@ -107,6 +108,37 @@ class XynApiAdapter:
             headers["X-Forwarded-Proto"] = self._config.upstream_forwarded_proto
         return headers
 
+    @staticmethod
+    def _api_redirect_as_json_error(*, status_code: int, path: str, response: Any) -> Optional[Dict[str, Any]]:
+        code = int(status_code or 0)
+        if code not in _REDIRECT_STATUS_CODES:
+            return None
+        normalized_path = str(path or "").strip()
+        if not (normalized_path.startswith("/xyn/api/") or normalized_path.startswith("/api/v1/")):
+            return None
+        location = str(getattr(response, "headers", {}).get("location", "") or "").strip()
+        lowered_location = location.lower()
+        looks_like_login_redirect = any(
+            token in lowered_location
+            for token in ("/login", "/accounts/login", "/auth/login", "/oauth", "signin", "authorize")
+        )
+        if not looks_like_login_redirect and code not in {302, 303}:
+            return None
+        return {
+            "ok": False,
+            "status_code": 401,
+            "method": "",
+            "path": normalized_path,
+            "base_url": "",
+            "response": {
+                "error": "unauthorized",
+                "blocked_reason": "interactive_login_redirect",
+                "detail": "API request was redirected to an interactive login endpoint.",
+                "redirect_status_code": code,
+                "redirect_location": location,
+            },
+        }
+
     def _request(
         self,
         *,
@@ -136,6 +168,15 @@ class XynApiAdapter:
                 "base_url": resolved_base_url,
                 "response": {"error": "upstream_unreachable", "detail": str(exc)},
             }
+        redirect_error = self._api_redirect_as_json_error(
+            status_code=int(response.status_code),
+            path=path,
+            response=response,
+        )
+        if isinstance(redirect_error, dict):
+            redirect_error["method"] = method.upper()
+            redirect_error["base_url"] = resolved_base_url
+            return redirect_error
         body: Any
         try:
             body = response.json()
@@ -2183,7 +2224,7 @@ class XynApiAdapter:
                         }
                         return result
                     code = int(result.get("status_code") or 0)
-                    if code in {400, 404, 405, 503}:
+                    if code in {400, 401, 403, 404, 405, 503} | _REDIRECT_STATUS_CODES:
                         continue
                     return result
         # Second pass: additional code API bases as compatibility fallback.
@@ -2209,7 +2250,7 @@ class XynApiAdapter:
                         }
                         return result
                     code = int(result.get("status_code") or 0)
-                    if code in {400, 404, 405, 503}:
+                    if code in {400, 401, 403, 404, 405, 503} | _REDIRECT_STATUS_CODES:
                         continue
                     return result
         result = last_result

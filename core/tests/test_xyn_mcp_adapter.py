@@ -1412,6 +1412,28 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(result["status_code"], 409)
         self.assertEqual(result["response"]["status"], "blocked")
 
+    def test_list_change_efforts_tool_is_registered_and_invokable(self) -> None:
+        adapter = mock.Mock()
+        adapter.list_change_efforts.return_value = {
+            "ok": False,
+            "status_code": 404,
+            "response": {"error": "not_supported", "blocked_reason": "not_supported"},
+        }
+        server = FakeMcpServer()
+        register_xyn_tools(server, adapter)
+
+        self.assertIn("list_change_efforts", server.tools)
+        tool = server.tools["list_change_efforts"]["fn"]
+        result = tool(workspace_id="ws-1", artifact_slug="xyn-api", status="open", limit=25)
+        adapter.list_change_efforts.assert_called_once_with(
+            workspace_id="ws-1",
+            artifact_slug="xyn-api",
+            status="open",
+            limit=25,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status_code"], 404)
+
     def test_discovery_tool_calls_underlying_adapter(self) -> None:
         adapter = mock.Mock()
         adapter.list_blueprints.return_value = {"ok": True, "status_code": 200, "response": {"blueprints": []}}
@@ -1590,8 +1612,8 @@ class XynMcpAdapterTests(TestCase):
         disabled_tools = set(surface.get("disabled_tools") or [])
         self.assertIn("list_applications", enabled_tools)
         self.assertIn("list_runtime_runs", enabled_tools)
-        self.assertIn("list_change_efforts", disabled_tools)
-        self.assertNotIn("list_change_efforts", enabled_tools)
+        self.assertIn("list_change_efforts", enabled_tools)
+        self.assertEqual(disabled_tools, set())
         parity = surface.get("parity") if isinstance(surface.get("parity"), dict) else {}
         list_effort = parity.get("list_change_efforts") if isinstance(parity.get("list_change_efforts"), dict) else {}
         self.assertEqual(list_effort.get("route_exists"), False)
@@ -1679,7 +1701,73 @@ class XynMcpAdapterTests(TestCase):
         disabled = set(surface.get("disabled_tools") or [])
         self.assertIn("list_applications", enabled)
         self.assertIn("list_runtime_runs", enabled)
-        self.assertIn("list_change_efforts", disabled)
+        self.assertIn("list_change_efforts", enabled)
+        self.assertEqual(disabled, set())
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_normalizes_api_redirect_to_json_401(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 302
+        response.headers = {"location": "/auth/login?next=/xyn/api/applications"}
+        response.json.side_effect = ValueError("not json")
+        response.text = ""
+        mock_request.return_value = response
+
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.list_applications()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status_code"], 401)
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        self.assertEqual(body.get("error"), "unauthorized")
+        self.assertEqual(body.get("blocked_reason"), "interactive_login_redirect")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_list_artifacts_falls_back_after_control_plane_redirect(self, mock_request: mock.Mock) -> None:
+        first = mock.Mock()
+        first.status_code = 302
+        first.headers = {"location": "/auth/login?next=/xyn/api/artifacts"}
+        first.json.side_effect = ValueError("not json")
+        first.text = ""
+
+        second = mock.Mock()
+        second.status_code = 302
+        second.headers = {"location": "/auth/login?next=/xyn/api/artifacts"}
+        second.json.side_effect = ValueError("not json")
+        second.text = ""
+
+        third = mock.Mock()
+        third.status_code = 200
+        third.headers = {}
+        third.json.return_value = {"artifacts": [{"id": "a1", "title": "xyn-api", "artifact_type": "module"}]}
+
+        mock_request.side_effect = [first, second, third]
+
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.list_artifacts(limit=10, offset=0)
+        self.assertTrue(result["ok"])
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        self.assertEqual(body.get("count"), 1)
+        artifacts = body.get("artifacts") if isinstance(body.get("artifacts"), list) else []
+        self.assertEqual(artifacts[0].get("id"), "a1")
+        self.assertEqual(mock_request.call_args_list[0].kwargs.get("url"), "http://xyn.local:8001/xyn/api/artifacts")
+        self.assertEqual(mock_request.call_args_list[1].kwargs.get("url"), "http://xyn.local:8001/xyn/api/artifacts")
+        self.assertEqual(mock_request.call_args_list[2].kwargs.get("url"), "http://xyn.local:8001/api/v1/artifacts")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_sets_upstream_host_headers_when_configured(self, mock_request: mock.Mock) -> None:

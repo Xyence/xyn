@@ -127,9 +127,6 @@ class McpAuthConfig:
 
 
 def _register_tool(mcp_server: Any, *, name: str, description: str, fn: Callable[..., Dict[str, Any]]) -> None:
-    enabled_tools = getattr(mcp_server, "_xyn_enabled_tools", None)
-    if isinstance(enabled_tools, set) and enabled_tools and name not in enabled_tools:
-        return
     if hasattr(mcp_server, "add_tool"):
         mcp_server.add_tool(fn, name=name, description=description)
         return
@@ -1016,15 +1013,12 @@ def _build_tool_surface(adapter: XynApiAdapter) -> Dict[str, Any]:
     enabled_tools = set(TOOL_NAMES)
     parity: Dict[str, Dict[str, Any]] = {}
 
-    # Probe known optional endpoints and disable tools when route parity fails.
+    # Probe known optional endpoints and expose parity metadata, but keep tool
+    # registration deterministic so advertised tools remain invokable.
     for tool_name, (method, path, base) in _TOOL_ROUTE_PROBES.items():
-        if tool_name not in enabled_tools:
-            continue
         probe = _probe_backend_route(adapter, method=method, path=path, base=base)
         status_code = int(probe.get("status_code") or 0)
         route_exists = bool(status_code) and status_code not in {404, 405} and status_code < 500
-        if not route_exists:
-            enabled_tools.discard(tool_name)
         parity[tool_name] = {
             "enabled": route_exists,
             "reason": "" if route_exists else "backend_route_unavailable",
@@ -1037,7 +1031,7 @@ def _build_tool_surface(adapter: XynApiAdapter) -> Dict[str, Any]:
 
     return {
         "enabled_tools": sorted(enabled_tools),
-        "disabled_tools": sorted([name for name in TOOL_NAMES if name not in enabled_tools]),
+        "disabled_tools": [],
         "parity": parity,
     }
 
