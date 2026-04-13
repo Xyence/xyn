@@ -89,11 +89,12 @@ class XynApiAdapter:
     def config(self) -> XynApiAdapterConfig:
         return self._config
 
-    def _headers(self) -> Dict[str, str]:
+    def _headers(self, *, prefer_request_bearer: bool = True) -> Dict[str, str]:
         headers: Dict[str, str] = {"Accept": "application/json"}
         # Prefer per-request bearer propagated by MCP auth middleware so OAuth sessions
         # can flow through ChatGPT -> MCP -> Xyn backend. Fall back to static config token.
-        bearer = get_request_bearer_token() or self._config.bearer_token
+        request_bearer = get_request_bearer_token() if prefer_request_bearer else ""
+        bearer = request_bearer or self._config.bearer_token
         if bearer:
             headers["Authorization"] = f"Bearer {bearer}"
         if self._config.internal_token:
@@ -150,15 +151,21 @@ class XynApiAdapter:
     ) -> Dict[str, Any]:
         resolved_base_url = str(base_url or self._config.control_api_base_url).rstrip("/")
         url = f"{resolved_base_url}{path}"
-        try:
-            response = httpx.request(
+        request_bearer = get_request_bearer_token()
+        static_bearer = str(self._config.bearer_token or "").strip()
+
+        def _do_request(*, prefer_request_bearer: bool) -> httpx.Response:
+            return httpx.request(
                 method=method.upper(),
                 url=url,
-                headers=self._headers(),
+                headers=self._headers(prefer_request_bearer=prefer_request_bearer),
                 json=json_payload,
                 params=params,
                 timeout=self._config.timeout_seconds,
             )
+
+        try:
+            response = _do_request(prefer_request_bearer=True)
         except httpx.RequestError as exc:
             return {
                 "ok": False,
@@ -176,13 +183,31 @@ class XynApiAdapter:
         if isinstance(redirect_error, dict):
             redirect_error["method"] = method.upper()
             redirect_error["base_url"] = resolved_base_url
-            return redirect_error
+            # Fallback: if a request-scoped bearer was present and differed from configured
+            # static bearer, retry with static bearer before surfacing interactive redirect.
+            should_retry_with_static = bool(request_bearer and static_bearer and request_bearer != static_bearer)
+            if not should_retry_with_static:
+                return redirect_error
+            try:
+                retry_response = _do_request(prefer_request_bearer=False)
+            except httpx.RequestError:
+                return redirect_error
+            retry_redirect = self._api_redirect_as_json_error(
+                status_code=int(retry_response.status_code),
+                path=path,
+                response=retry_response,
+            )
+            if isinstance(retry_redirect, dict):
+                retry_redirect["method"] = method.upper()
+                retry_redirect["base_url"] = resolved_base_url
+                return retry_redirect
+            response = retry_response
         body: Any
         try:
             body = response.json()
         except Exception:
             body = {"raw_text": response.text}
-        return {
+        result = {
             "ok": bool(200 <= response.status_code < 300),
             "status_code": int(response.status_code),
             "method": method.upper(),
@@ -190,6 +215,39 @@ class XynApiAdapter:
             "base_url": resolved_base_url,
             "response": body if isinstance(body, (dict, list)) else {"value": body},
         }
+        should_retry_auth = (
+            bool(request_bearer and static_bearer and request_bearer != static_bearer)
+            and int(result.get("status_code") or 0) in {401, 403}
+            and isinstance(result.get("response"), dict)
+            and str((result.get("response") or {}).get("error") or "").strip().lower() in {"unauthorized", "not authenticated", "not_authenticated"}
+        )
+        if should_retry_auth:
+            try:
+                retry_response = _do_request(prefer_request_bearer=False)
+            except httpx.RequestError:
+                return result
+            retry_redirect = self._api_redirect_as_json_error(
+                status_code=int(retry_response.status_code),
+                path=path,
+                response=retry_response,
+            )
+            if isinstance(retry_redirect, dict):
+                retry_redirect["method"] = method.upper()
+                retry_redirect["base_url"] = resolved_base_url
+                return retry_redirect
+            try:
+                retry_body = retry_response.json()
+            except Exception:
+                retry_body = {"raw_text": retry_response.text}
+            return {
+                "ok": bool(200 <= retry_response.status_code < 300),
+                "status_code": int(retry_response.status_code),
+                "method": method.upper(),
+                "path": path,
+                "base_url": resolved_base_url,
+                "response": retry_body if isinstance(retry_body, (dict, list)) else {"value": retry_body},
+            }
+        return result
 
     def _request_bytes(
         self,
@@ -271,7 +329,11 @@ class XynApiAdapter:
                     return result
                 code = int(result.get("status_code") or 0)
                 # Continue searching across endpoint/base-url variants for compatibility.
-                if code in {400, 404, 405, 503}:
+                blocked_reason = str(
+                    ((result.get("response") or {}).get("blocked_reason") if isinstance(result.get("response"), dict) else "")
+                    or ""
+                ).strip()
+                if code in {400, 401, 403, 404, 405, 503} or blocked_reason == "interactive_login_redirect":
                     continue
                 return result
         return last_result
@@ -1315,7 +1377,11 @@ class XynApiAdapter:
         }
 
     def list_applications(self) -> Dict[str, Any]:
-        result = self._request(method="GET", path="/xyn/api/applications")
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=["/xyn/api/applications"],
+            base_urls=[self._config.control_api_base_url],
+        )
         if not result.get("ok"):
             return result
         body = result.get("response") if isinstance(result.get("response"), dict) else {}
@@ -1325,7 +1391,11 @@ class XynApiAdapter:
         return result
 
     def get_application(self, *, application_id: str) -> Dict[str, Any]:
-        result = self._request(method="GET", path=f"/xyn/api/applications/{application_id}")
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=[f"/xyn/api/applications/{application_id}"],
+            base_urls=[self._config.control_api_base_url],
+        )
         if not result.get("ok"):
             return result
         body = result.get("response") if isinstance(result.get("response"), dict) else {}
@@ -1333,7 +1403,11 @@ class XynApiAdapter:
         return result
 
     def list_application_change_sessions(self, *, application_id: str) -> Dict[str, Any]:
-        result = self._request(method="GET", path=f"/xyn/api/applications/{application_id}/change-sessions")
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=[f"/xyn/api/applications/{application_id}/change-sessions"],
+            base_urls=[self._config.control_api_base_url],
+        )
         if not result.get("ok"):
             return result
         body = result.get("response") if isinstance(result.get("response"), dict) else {}
@@ -1347,7 +1421,11 @@ class XynApiAdapter:
         return result
 
     def get_application_change_session(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
-        result = self._request(method="GET", path=f"/xyn/api/applications/{application_id}/change-sessions/{session_id}")
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=[f"/xyn/api/applications/{application_id}/change-sessions/{session_id}"],
+            base_urls=[self._config.control_api_base_url],
+        )
         if not result.get("ok"):
             return result
         body = result.get("response") if isinstance(result.get("response"), dict) else {}
@@ -1737,6 +1815,7 @@ class XynApiAdapter:
                 "cursor": str(cursor or "").strip() or None,
                 "status": str(status or "").strip() or None,
             },
+            base_urls=self._code_api_base_urls(),
         )
         if not result.get("ok"):
             return result
