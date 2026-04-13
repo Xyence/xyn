@@ -574,7 +574,7 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     def declare_release(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
         return adapter.declare_release(payload=payload)
 
-    def get_artifact_provenance(artifact_slug: str, workspace_id: str) -> Dict[str, Any]:
+    def get_artifact_provenance(artifact_slug: str, workspace_id: str = "") -> Dict[str, Any]:
         return adapter.get_artifact_provenance(artifact_slug=artifact_slug, workspace_id=workspace_id)
 
     _register_tool(

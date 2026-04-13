@@ -1379,27 +1379,147 @@ class XynApiAdapter:
             "raw": payload,
         }
 
-    def _discover_workspace_id(self) -> str:
+    def _list_accessible_workspaces(self) -> Dict[str, Any]:
         result = self._request_with_fallback_paths(
             method="GET",
             paths=["/xyn/api/workspaces"],
             base_urls=[self._config.control_api_base_url],
         )
+        workspace_rows: list[dict[str, str]] = []
         if not result.get("ok"):
-            return ""
+            return {"ok": False, "result": result, "workspaces": workspace_rows}
         body = result.get("response") if isinstance(result.get("response"), dict) else {}
         rows = body.get("workspaces") if isinstance(body.get("workspaces"), list) else []
         for row in rows:
             if not isinstance(row, dict):
                 continue
             workspace_id = str(row.get("id") or "").strip()
-            if workspace_id:
-                return workspace_id
-        return ""
+            if not workspace_id:
+                continue
+            workspace_rows.append(
+                {
+                    "id": workspace_id,
+                    "slug": str(row.get("slug") or "").strip(),
+                    "title": str(row.get("title") or row.get("name") or "").strip(),
+                }
+            )
+        return {"ok": True, "result": result, "workspaces": workspace_rows}
+
+    @staticmethod
+    def _workspace_resolution_error_payload(
+        *,
+        error: str,
+        detail: str,
+        candidate_workspaces: list[dict[str, str]],
+    ) -> Dict[str, Any]:
+        out: Dict[str, Any] = {
+            "error": str(error or "workspace_required"),
+            "detail": str(detail or "").strip(),
+        }
+        if candidate_workspaces:
+            out["candidate_workspaces"] = candidate_workspaces[:50]
+        return out
+
+    def _workspace_resolution_error_result(
+        self,
+        *,
+        method: str,
+        path: str,
+        error: str,
+        detail: str,
+        candidate_workspaces: list[dict[str, str]],
+        status_code: int,
+    ) -> Dict[str, Any]:
+        return {
+            "ok": False,
+            "status_code": int(status_code),
+            "method": str(method).upper(),
+            "path": str(path),
+            "base_url": str(self._config.control_api_base_url).rstrip("/"),
+            "response": self._workspace_resolution_error_payload(
+                error=error,
+                detail=detail,
+                candidate_workspaces=candidate_workspaces,
+            ),
+        }
+
+    def _resolve_workspace_for_request(
+        self,
+        *,
+        explicit_workspace_id: str = "",
+        require_workspace: bool = True,
+    ) -> Dict[str, Any]:
+        explicit = str(explicit_workspace_id or "").strip()
+        if explicit:
+            return {"ok": True, "workspace_id": explicit, "source": "explicit", "candidate_workspaces": []}
+
+        configured_default = str(self._config.default_workspace_id or "").strip()
+        if configured_default:
+            accessible = self._list_accessible_workspaces()
+            candidate_workspaces = accessible.get("workspaces") if isinstance(accessible.get("workspaces"), list) else []
+            accessible_ids = {
+                str(row.get("id") or "").strip()
+                for row in candidate_workspaces
+                if isinstance(row, dict) and str(row.get("id") or "").strip()
+            }
+            if accessible.get("ok") and accessible_ids and configured_default not in accessible_ids:
+                return {
+                    "ok": False,
+                    "status_code": 403,
+                    "error": "workspace_forbidden",
+                    "detail": "Configured default workspace is not accessible to the authenticated principal.",
+                    "candidate_workspaces": candidate_workspaces,
+                }
+            return {
+                "ok": True,
+                "workspace_id": configured_default,
+                "source": "configured_default",
+                "candidate_workspaces": candidate_workspaces,
+            }
+
+        if not require_workspace:
+            return {"ok": True, "workspace_id": "", "source": "none", "candidate_workspaces": []}
+
+        accessible = self._list_accessible_workspaces()
+        candidate_workspaces = accessible.get("workspaces") if isinstance(accessible.get("workspaces"), list) else []
+        if not accessible.get("ok"):
+            return {
+                "ok": False,
+                "status_code": 400,
+                "error": "workspace_required",
+                "detail": "workspace_id is required and no default workspace could be resolved.",
+                "candidate_workspaces": candidate_workspaces,
+            }
+
+        if len(candidate_workspaces) == 1:
+            return {
+                "ok": True,
+                "workspace_id": str(candidate_workspaces[0].get("id") or "").strip(),
+                "source": "single_accessible_workspace",
+                "candidate_workspaces": candidate_workspaces,
+            }
+
+        return {
+            "ok": False,
+            "status_code": 400,
+            "error": "workspace_required",
+            "detail": "workspace_id is required because multiple accessible workspaces were found.",
+            "candidate_workspaces": candidate_workspaces,
+        }
 
     def list_applications(self, *, workspace_id: str = "") -> Dict[str, Any]:
-        resolved_workspace_id = str(workspace_id or self._config.default_workspace_id or "").strip()
-        params = {"workspace_id": resolved_workspace_id} if resolved_workspace_id else None
+        resolved = self._resolve_workspace_for_request(explicit_workspace_id=workspace_id, require_workspace=True)
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="GET",
+                path="/xyn/api/applications",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        params = {"workspace_id": resolved_workspace_id}
         result = self._request_with_fallback_paths(
             method="GET",
             paths=["/xyn/api/applications"],
@@ -1407,25 +1527,15 @@ class XynApiAdapter:
             params=params,
         )
         if not result.get("ok"):
-            code = int(result.get("status_code") or 0)
-            body = result.get("response") if isinstance(result.get("response"), dict) else {}
-            detail = str(body.get("error") or body.get("detail") or "").strip().lower()
-            missing_workspace = code == 400 and "workspace_id" in detail
-            if missing_workspace and not resolved_workspace_id:
-                discovered_workspace_id = self._discover_workspace_id()
-                if discovered_workspace_id:
-                    result = self._request_with_fallback_paths(
-                        method="GET",
-                        paths=["/xyn/api/applications"],
-                        base_urls=[self._config.control_api_base_url],
-                        params={"workspace_id": discovered_workspace_id},
-                    )
-        if not result.get("ok"):
             return result
         body = result.get("response") if isinstance(result.get("response"), dict) else {}
         rows = body.get("applications") if isinstance(body.get("applications"), list) else (body.get("items") if isinstance(body.get("items"), list) else [])
         normalized = [self._application_discovery_row(row) for row in rows if isinstance(row, dict)]
-        result["response"] = {"applications": normalized, "count": len(normalized)}
+        result["response"] = {
+            "applications": normalized,
+            "count": len(normalized),
+            "resolved_workspace_id": resolved_workspace_id,
+        }
         return result
 
     def get_application(self, *, application_id: str) -> Dict[str, Any]:
@@ -2843,13 +2953,29 @@ class XynApiAdapter:
         )
 
     def create_change_effort(self, *, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        request_payload = dict(payload or {})
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=str(request_payload.get("workspace_id") or "").strip(),
+            require_workspace=True,
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="POST",
+                path="/api/v1/change-efforts",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        request_payload["workspace_id"] = resolved_workspace_id
         result = self._request_with_fallback_paths(
             method="POST",
             paths=["/api/v1/change-efforts"],
-            json_payload=dict(payload or {}),
+            json_payload=request_payload,
             base_urls=self._code_api_base_urls(),
         )
-        return self._normalize_change_effort_result(
+        normalized = self._normalize_change_effort_result(
             result,
             default_next_allowed_actions=[
                 "get_change_effort",
@@ -2857,6 +2983,9 @@ class XynApiAdapter:
                 "allocate_effort_branch",
             ],
         )
+        if isinstance(normalized.get("response"), dict):
+            normalized["response"]["resolved_workspace_id"] = resolved_workspace_id
+        return normalized
 
     def get_change_effort(self, *, effort_id: str) -> Dict[str, Any]:
         result = self._request_with_fallback_paths(
@@ -2883,9 +3012,18 @@ class XynApiAdapter:
         status: str = "",
         limit: int = 100,
     ) -> Dict[str, Any]:
-        params: Dict[str, Any] = {"limit": int(limit)}
-        if str(workspace_id or "").strip():
-            params["workspace_id"] = str(workspace_id).strip()
+        resolved = self._resolve_workspace_for_request(explicit_workspace_id=workspace_id, require_workspace=True)
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="GET",
+                path="/api/v1/change-efforts",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        params: Dict[str, Any] = {"limit": int(limit), "workspace_id": resolved_workspace_id}
         if str(artifact_slug or "").strip():
             params["artifact_slug"] = str(artifact_slug).strip()
         if str(status or "").strip():
@@ -2917,7 +3055,11 @@ class XynApiAdapter:
                 continue
             row_result = {"ok": True, "status_code": 200, "response": {"change_effort": row}}
             normalized_rows.append(self._normalize_change_effort_result(row_result).get("response"))
-        result["response"] = {"change_efforts": normalized_rows, "count": len(normalized_rows)}
+        result["response"] = {
+            "change_efforts": normalized_rows,
+            "count": len(normalized_rows),
+            "resolved_workspace_id": resolved_workspace_id,
+        }
         return result
 
     def resolve_effort_source(self, *, effort_id: str) -> Dict[str, Any]:
@@ -3115,17 +3257,50 @@ class XynApiAdapter:
         }
 
     def declare_release(self, *, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self._request_with_fallback_paths(
+        request_payload = dict(payload or {})
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=str(request_payload.get("workspace_id") or "").strip(),
+            require_workspace=True,
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="POST",
+                path="/api/v1/releases/declare",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        request_payload["workspace_id"] = resolved_workspace_id
+        result = self._request_with_fallback_paths(
             method="POST",
             paths=["/api/v1/releases/declare"],
-            json_payload=dict(payload or {}),
+            json_payload=request_payload,
             base_urls=self._code_api_base_urls(),
         )
+        if isinstance(result.get("response"), dict):
+            result["response"]["resolved_workspace_id"] = resolved_workspace_id
+        return result
 
-    def get_artifact_provenance(self, *, artifact_slug: str, workspace_id: str) -> Dict[str, Any]:
-        return self._request_with_fallback_paths(
+    def get_artifact_provenance(self, *, artifact_slug: str, workspace_id: str = "") -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(explicit_workspace_id=workspace_id, require_workspace=True)
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="GET",
+                path=f"/api/v1/provenance/{artifact_slug}",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        result = self._request_with_fallback_paths(
             method="GET",
             paths=[f"/api/v1/provenance/{artifact_slug}"],
-            params={"workspace_id": str(workspace_id or "").strip()},
+            params={"workspace_id": resolved_workspace_id},
             base_urls=self._code_api_base_urls(),
         )
+        if isinstance(result.get("response"), dict):
+            result["response"]["resolved_workspace_id"] = resolved_workspace_id
+        return result
