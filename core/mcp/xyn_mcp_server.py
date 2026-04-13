@@ -1021,10 +1021,18 @@ def _build_tool_surface(adapter: XynApiAdapter) -> Dict[str, Any]:
     for tool_name, (method, path, base) in _TOOL_ROUTE_PROBES.items():
         probe = _probe_backend_route(adapter, method=method, path=path, base=base)
         status_code = int(probe.get("status_code") or 0)
-        # Treat only deterministic route-missing statuses as unsupported.
-        # Transient transport/startup failures (e.g. 503) should not cause
-        # tool-registration flapping that yields "Unknown tool" at runtime.
-        route_exists = bool(status_code) and status_code not in _UNSUPPORTED_ROUTE_STATUS_CODES
+        # list_runtime_runs should tolerate transient startup/transport failures to
+        # avoid catalog flapping ("Unknown tool" race during boot).
+        if tool_name == "list_runtime_runs":
+            route_exists = bool(status_code) and status_code not in _UNSUPPORTED_ROUTE_STATUS_CODES
+        else:
+            # For optional surfaces (e.g., change-efforts), only advertise when
+            # probe indicates route is truly available (exclude transient 5xx).
+            route_exists = (
+                bool(status_code)
+                and status_code not in _UNSUPPORTED_ROUTE_STATUS_CODES
+                and status_code < 500
+            )
         if not route_exists:
             enabled_tools.discard(tool_name)
         parity[tool_name] = {

@@ -1999,6 +1999,34 @@ class XynMcpAdapterTests(TestCase):
         self.assertNotIn("list_runtime_runs", disabled)
         self.assertIn("list_change_efforts", disabled)
 
+    @mock.patch.object(XynApiAdapter, "_request")
+    def test_tool_surface_disables_list_change_efforts_on_transient_5xx(self, mock_request: mock.Mock) -> None:
+        def _fake_request(*_args, **kwargs):
+            path = str(kwargs.get("path") or "")
+            if path == "/api/v1/change-efforts":
+                return {"ok": False, "status_code": 503, "response": {"error": "upstream_unreachable"}}
+            if path == "/api/v1/runs":
+                return {"ok": False, "status_code": 503, "response": {"error": "upstream_unreachable"}}
+            return {"ok": False, "status_code": 404, "response": {"detail": "Not Found"}}
+
+        mock_request.side_effect = _fake_request
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                code_api_base_url="http://xyn-core:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        surface = _build_tool_surface(adapter)
+        enabled = set(surface.get("enabled_tools") or [])
+        disabled = set(surface.get("disabled_tools") or [])
+        self.assertIn("list_runtime_runs", enabled)
+        self.assertIn("list_change_efforts", disabled)
+        self.assertNotIn("list_change_efforts", enabled)
+
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_normalizes_api_redirect_to_json_401(self, mock_request: mock.Mock) -> None:
         response = mock.Mock()
