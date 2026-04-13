@@ -463,6 +463,8 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
             compose_text,
         )
         self.assertIn("XYN_OIDC_CLIENT_SECRET: ${XYN_OIDC_CLIENT_SECRET:-}", compose_text)
+        self.assertIn("OIDC_ISSUER: ${OIDC_ISSUER:-${XYN_OIDC_ISSUER:-}}", compose_text)
+        self.assertIn("OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-${XYN_OIDC_CLIENT_ID:-}}", compose_text)
         self.assertIn("${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn:/workspace/xyn", compose_text)
         self.assertIn(
             "${XYN_PLATFORM_HOST_SRC_PATH:-${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn-platform}:/workspace/xyn-platform",
