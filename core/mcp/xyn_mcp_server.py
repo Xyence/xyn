@@ -95,6 +95,7 @@ _TOOL_ROUTE_PROBES: Dict[str, tuple[str, str, str]] = {
     "list_change_efforts": ("GET", "/api/v1/change-efforts", "code"),
     "list_runtime_runs": ("GET", "/api/v1/runs", "code"),
 }
+_UNSUPPORTED_ROUTE_STATUS_CODES = {404, 405}
 
 
 @dataclass(frozen=True)
@@ -1023,7 +1024,7 @@ def _build_tool_surface(adapter: XynApiAdapter) -> Dict[str, Any]:
         # Treat only deterministic route-missing statuses as unsupported.
         # Transient transport/startup failures (e.g. 503) should not cause
         # tool-registration flapping that yields "Unknown tool" at runtime.
-        route_exists = bool(status_code) and status_code not in {404, 405}
+        route_exists = bool(status_code) and status_code not in _UNSUPPORTED_ROUTE_STATUS_CODES
         if not route_exists:
             enabled_tools.discard(tool_name)
         parity[tool_name] = {
