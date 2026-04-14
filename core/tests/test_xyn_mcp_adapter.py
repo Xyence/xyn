@@ -13,7 +13,13 @@ from core.mcp.xyn_api_adapter import (
     reset_request_bearer_token,
     set_request_bearer_token,
 )
-from core.mcp.xyn_mcp_server import TOOL_NAMES, _build_tool_surface, create_xyn_mcp_http_app, register_xyn_tools
+from core.mcp.xyn_mcp_server import (
+    TOOL_NAMES,
+    _assert_critical_planner_tools_available,
+    _build_tool_surface,
+    create_xyn_mcp_http_app,
+    register_xyn_tools,
+)
 from starlette.testclient import TestClient
 
 
@@ -2159,6 +2165,42 @@ class XynMcpAdapterTests(TestCase):
         self.assertIn("list_runtime_runs", enabled)
         self.assertIn("list_change_efforts", disabled)
         self.assertNotIn("list_change_efforts", enabled)
+
+    @mock.patch.object(XynApiAdapter, "_request")
+    def test_tool_surface_keeps_control_action_tool_enabled_on_method_not_allowed_probe(self, mock_request: mock.Mock) -> None:
+        def _fake_request(*_args, **kwargs):
+            path = str(kwargs.get("path") or "")
+            if path == "/api/v1/change-efforts":
+                return {"ok": False, "status_code": 404, "response": {"detail": "Not Found"}}
+            if path == "/api/v1/runs":
+                return {"ok": True, "status_code": 200, "response": {"items": []}}
+            if path.endswith("/control/actions"):
+                return {"ok": False, "status_code": 405, "response": {"detail": "Method Not Allowed"}}
+            return {"ok": False, "status_code": 404, "response": {"detail": "Not Found"}}
+
+        mock_request.side_effect = _fake_request
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                code_api_base_url="http://xyn-core:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        surface = _build_tool_surface(adapter)
+        enabled = set(surface.get("enabled_tools") or [])
+        self.assertIn("run_change_session_control_action", enabled)
+        _assert_critical_planner_tools_available(surface)
+
+    def test_critical_planner_tool_assertion_fails_when_control_action_missing(self) -> None:
+        with self.assertRaises(RuntimeError):
+            _assert_critical_planner_tools_available(
+                {
+                    "enabled_tools": ["inspect_change_session_control"],
+                }
+            )
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_normalizes_api_redirect_to_json_401(self, mock_request: mock.Mock) -> None:
