@@ -87,6 +87,7 @@ class XynApiAdapter:
 
     def __init__(self, config: XynApiAdapterConfig):
         self._config = config
+        self._planner_preferred_base_url = ""
 
     @property
     def config(self) -> XynApiAdapterConfig:
@@ -139,6 +140,22 @@ class XynApiAdapter:
         if public_base and public_base not in out:
             out.append(public_base)
         return out
+
+    @staticmethod
+    def _is_planner_path(path: str) -> bool:
+        normalized = str(path or "").strip()
+        return normalized.startswith("/xyn/api/applications") or normalized.startswith("/api/v1/applications")
+
+    def _planner_base_urls(self) -> list[str]:
+        base_urls = [base for base in self._control_api_base_urls() if str(base or "").strip()]
+        preferred = str(self._planner_preferred_base_url or "").strip()
+        if preferred:
+            reordered = [preferred]
+            for base in base_urls:
+                if base != preferred:
+                    reordered.append(base)
+            return reordered
+        return base_urls
 
     @staticmethod
     def _normalize_planner_route_error(result: Dict[str, Any], *, attempted_paths: list[str]) -> Dict[str, Any]:
@@ -406,6 +423,7 @@ class XynApiAdapter:
         base_urls: Optional[list[str]] = None,
     ) -> Dict[str, Any]:
         last_result: Dict[str, Any] = {"ok": False, "status_code": 404, "response": {"error": "not_found"}}
+        first_result: Optional[Dict[str, Any]] = None
         preferred_result: Optional[Dict[str, Any]] = None
         deduped_base_urls: list[str] = []
         for candidate in (base_urls or self._control_api_base_urls()):
@@ -415,6 +433,11 @@ class XynApiAdapter:
             deduped_base_urls.append(base)
         if not deduped_base_urls:
             deduped_base_urls = [self._config.control_api_base_url]
+        planner_request = any(self._is_planner_path(path) for path in paths)
+        if planner_request:
+            preferred = str(self._planner_preferred_base_url or "").strip()
+            if preferred:
+                deduped_base_urls = [preferred] + [base for base in deduped_base_urls if base != preferred]
         for base_url in deduped_base_urls:
             for path in paths:
                 result = self._request(
@@ -425,7 +448,11 @@ class XynApiAdapter:
                     base_url=base_url,
                 )
                 last_result = result
+                if first_result is None:
+                    first_result = result
                 if bool(result.get("ok")):
+                    if planner_request:
+                        self._planner_preferred_base_url = str(result.get("base_url") or "").strip()
                     return result
                 code = int(result.get("status_code") or 0)
                 # Continue searching across endpoint/base-url variants for compatibility.
@@ -440,7 +467,7 @@ class XynApiAdapter:
                 if code in {400, 401, 403, 404, 405, 503} or blocked_reason == "interactive_login_redirect":
                     continue
                 return result
-        return preferred_result or last_result
+        return preferred_result or first_result or last_result
 
     def _code_api_base_urls(self) -> list[str]:
         out: list[str] = []
@@ -1625,7 +1652,7 @@ class XynApiAdapter:
         result = self._request_with_fallback_paths(
             method="GET",
             paths=paths,
-            base_urls=self._control_api_base_urls(),
+            base_urls=self._planner_base_urls(),
             params=params,
         )
         if not result.get("ok"):
@@ -1648,7 +1675,7 @@ class XynApiAdapter:
         result = self._request_with_fallback_paths(
             method="GET",
             paths=paths,
-            base_urls=self._control_api_base_urls(),
+            base_urls=self._planner_base_urls(),
         )
         if not result.get("ok"):
             return self._normalize_planner_route_error(result, attempted_paths=paths)
@@ -1664,7 +1691,7 @@ class XynApiAdapter:
         result = self._request_with_fallback_paths(
             method="GET",
             paths=paths,
-            base_urls=self._control_api_base_urls(),
+            base_urls=self._planner_base_urls(),
         )
         if not result.get("ok"):
             return self._normalize_planner_route_error(result, attempted_paths=paths)
@@ -1686,7 +1713,7 @@ class XynApiAdapter:
         result = self._request_with_fallback_paths(
             method="GET",
             paths=paths,
-            base_urls=self._control_api_base_urls(),
+            base_urls=self._planner_base_urls(),
         )
         if not result.get("ok"):
             return self._normalize_planner_route_error(result, attempted_paths=paths)
@@ -1698,10 +1725,15 @@ class XynApiAdapter:
         return result
 
     def create_application_change_session(self, *, application_id: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        result = self._request(
+        paths = [
+            f"/xyn/api/applications/{application_id}/change-sessions",
+            f"/api/v1/applications/{application_id}/change-sessions",
+        ]
+        result = self._request_with_fallback_paths(
             method="POST",
-            path=f"/xyn/api/applications/{application_id}/change-sessions",
+            paths=paths,
             json_payload=dict(payload or {}),
+            base_urls=self._planner_base_urls(),
         )
         return self._normalize_change_session_result(
             result,
@@ -1882,7 +1914,7 @@ class XynApiAdapter:
                 f"/api/v1/applications/{application_id}/change-sessions/{session_id}/plan",
             ],
             json_payload={},
-            base_urls=self._control_api_base_urls(),
+            base_urls=self._planner_base_urls(),
         )
         if not result.get("ok") and int(result.get("status_code") or 0) in {404, 405}:
             # Back-compat for older deployments that exposed GET /plan.
@@ -1892,7 +1924,7 @@ class XynApiAdapter:
                     f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/plan",
                     f"/api/v1/applications/{application_id}/change-sessions/{session_id}/plan",
                 ],
-                base_urls=self._control_api_base_urls(),
+                base_urls=self._planner_base_urls(),
             )
         if not result.get("ok") and int(result.get("status_code") or 0) in {404, 405}:
             # Compatibility fallback to canonical control inspection when explicit /plan route is unavailable.
@@ -2411,7 +2443,7 @@ class XynApiAdapter:
         result = self._request_with_fallback_paths(
             method="GET",
             paths=paths,
-            base_urls=self._control_api_base_urls(),
+            base_urls=self._planner_base_urls(),
         )
         return self._normalize_planner_route_error(result, attempted_paths=paths)
 
@@ -2515,13 +2547,18 @@ class XynApiAdapter:
                     },
                 }
 
-        return self._request(
+        paths = [
+            f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/checkpoints/{resolved_checkpoint_id}/decision",
+            f"/api/v1/applications/{application_id}/change-sessions/{session_id}/checkpoints/{resolved_checkpoint_id}/decision",
+        ]
+        return self._request_with_fallback_paths(
             method="POST",
-            path=f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/checkpoints/{resolved_checkpoint_id}/decision",
+            paths=paths,
             json_payload={
                 "decision": normalized_decision,
                 "notes": str(notes or "").strip(),
             },
+            base_urls=self._planner_base_urls(),
         )
 
     def run_change_session_control_action(
@@ -2557,7 +2594,7 @@ class XynApiAdapter:
             method="POST",
             paths=paths,
             json_payload=payload,
-            base_urls=self._control_api_base_urls(),
+            base_urls=self._planner_base_urls(),
         )
         return self._normalize_planner_route_error(result, attempted_paths=paths)
 

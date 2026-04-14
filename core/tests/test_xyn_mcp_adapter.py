@@ -2296,6 +2296,64 @@ class XynMcpAdapterTests(TestCase):
         body = result.get("response") if isinstance(result.get("response"), dict) else {}
         self.assertEqual(body.get("error"), "not authenticated")
 
+    @mock.patch.dict("os.environ", {"XYN_SEED_URL": "https://seed.xyence.io", "XYN_PUBLIC_BASE_URL": "https://xyn.xyence.io"}, clear=False)
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_control_action_uses_same_planner_base_as_control_read(self, mock_request: mock.Mock) -> None:
+        def _fake_request(*_args, **kwargs):
+            method = str(kwargs.get("method") or "").upper()
+            url = str(kwargs.get("url") or "")
+            response = mock.Mock()
+            response.headers = {}
+            response.text = ""
+            if method == "GET" and "/control" in url and "/control/actions" not in url:
+                if url.startswith("https://seed.xyence.io/"):
+                    response.status_code = 200
+                    response.json.return_value = {"control": {"status": "ok"}}
+                    return response
+                response.status_code = 404
+                response.json.return_value = {"detail": "Not Found"}
+                return response
+            if method == "POST" and "/control/actions" in url:
+                if url.startswith("https://seed.xyence.io/"):
+                    response.status_code = 200
+                    response.json.return_value = {"status": "ok"}
+                    return response
+                response.status_code = 404
+                response.json.return_value = {"detail": "Not Found"}
+                return response
+            response.status_code = 404
+            response.json.return_value = {"detail": "Not Found"}
+            return response
+
+        mock_request.side_effect = _fake_request
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="https://xyn.xyence.io",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        read_result = adapter.inspect_change_session_control(
+            application_id="app-1",
+            session_id="sess-1",
+        )
+        self.assertTrue(read_result.get("ok"))
+        self.assertEqual(read_result.get("base_url"), "https://seed.xyence.io")
+
+        write_result = adapter.run_change_session_control_action(
+            application_id="app-1",
+            session_id="sess-1",
+            operation="stage_apply",
+            action_payload={"dispatch_runtime": True},
+        )
+        self.assertTrue(write_result.get("ok"))
+        self.assertEqual(write_result.get("base_url"), "https://seed.xyence.io")
+        post_calls = [call for call in mock_request.call_args_list if str(call.kwargs.get("method") or "").upper() == "POST"]
+        self.assertTrue(post_calls)
+        self.assertTrue(str(post_calls[0].kwargs.get("url") or "").startswith("https://seed.xyence.io/"))
+
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_list_artifacts_falls_back_after_control_plane_redirect(self, mock_request: mock.Mock) -> None:
         first = mock.Mock()
