@@ -96,27 +96,13 @@ TOOL_NAMES = [
 _TOOL_ROUTE_PROBES: Dict[str, tuple[str, str, str]] = {
     "list_change_efforts": ("GET", "/api/v1/change-efforts", "code"),
     "list_runtime_runs": ("GET", "/api/v1/runs", "code"),
-    "run_change_session_control_action": (
-        "POST",
-        "/xyn/api/applications/00000000-0000-0000-0000-000000000000/change-sessions/00000000-0000-0000-0000-000000000000/control/actions",
-        "control",
-    ),
 }
 _UPSTREAM_HEALTH_PROBES: Dict[str, tuple[str, str, str]] = {
     "code_artifacts_api": ("GET", "/api/v1/artifacts", "code"),
     "control_workflow_api": ("GET", "/xyn/api/applications", "control"),
-    "planner_control_read": (
-        "GET",
-        "/xyn/api/applications/00000000-0000-0000-0000-000000000000/change-sessions/00000000-0000-0000-0000-000000000000/control",
-        "control",
-    ),
-    "planner_control_write": (
-        "POST",
-        "/xyn/api/applications/00000000-0000-0000-0000-000000000000/change-sessions/00000000-0000-0000-0000-000000000000/control/actions",
-        "control",
-    ),
 }
 _UNSUPPORTED_ROUTE_STATUS_CODES = {404, 405}
+_CRITICAL_PLANNER_TOOLS = {"inspect_change_session_control", "run_change_session_control_action"}
 
 
 @dataclass(frozen=True)
@@ -1060,12 +1046,10 @@ def _probe_backend_route(adapter: XynApiAdapter, *, method: str, path: str, base
     base_url = adapter.config.control_api_base_url if base == "control" else (
         adapter.config.code_api_base_url or adapter.config.control_api_base_url
     )
-    payload = {"operation": "noop"} if method.upper() == "POST" else None
     return adapter._request(  # noqa: SLF001 - intentional internal parity probe
         method=method,
         path=path,
         base_url=base_url,
-        json_payload=payload,
     )
 
 
@@ -1081,6 +1065,10 @@ def _build_tool_surface(adapter: XynApiAdapter) -> Dict[str, Any]:
         # avoid catalog flapping ("Unknown tool" race during boot).
         if tool_name == "list_runtime_runs":
             route_exists = bool(status_code) and status_code not in _UNSUPPORTED_ROUTE_STATUS_CODES
+        elif tool_name == "run_change_session_control_action":
+            # Control-action routes are object-scoped and may return auth/state errors
+            # for probe ids; only hide when route is definitively unavailable.
+            route_exists = bool(status_code) and status_code != 404
         else:
             # For optional surfaces (e.g., change-efforts), only advertise when
             # probe indicates route is truly available (exclude transient 5xx).
@@ -1106,6 +1094,24 @@ def _build_tool_surface(adapter: XynApiAdapter) -> Dict[str, Any]:
         "disabled_tools": sorted([name for name in TOOL_NAMES if name not in enabled_tools]),
         "parity": parity,
     }
+
+
+def _assert_critical_planner_tools_available(tool_surface: Dict[str, Any]) -> None:
+    declared_tools = set(TOOL_NAMES)
+    undeclared = sorted(tool for tool in _CRITICAL_PLANNER_TOOLS if tool not in declared_tools)
+    if undeclared:
+        raise RuntimeError(
+            "Critical planner MCP tools are not declared in TOOL_NAMES: "
+            + ", ".join(undeclared)
+        )
+    enabled_tools = set(tool_surface.get("enabled_tools") or [])
+    missing = sorted(tool for tool in _CRITICAL_PLANNER_TOOLS if tool not in enabled_tools)
+    if missing:
+        raise RuntimeError(
+            "Critical planner MCP tools are unavailable at startup: "
+            + ", ".join(missing)
+            + ". Verify planner control-plane route wiring."
+        )
 
 
 def _build_upstream_health(adapter: XynApiAdapter) -> Dict[str, Any]:
@@ -1134,18 +1140,6 @@ def _build_upstream_health(adapter: XynApiAdapter) -> Dict[str, Any]:
             "error": str(response.get("error") or "").strip(),
             "detail": str(response.get("detail") or "").strip() or raw_text[:240],
         }
-    planner_read = probes.get("planner_control_read") if isinstance(probes.get("planner_control_read"), dict) else {}
-    planner_write = probes.get("planner_control_write") if isinstance(probes.get("planner_control_write"), dict) else {}
-    planner_read_base = str(planner_read.get("base_url") or "").strip()
-    planner_write_base = str(planner_write.get("base_url") or "").strip()
-    planner_route_ok = str(planner_read.get("error") or "") != "planner_route_unavailable" and str(planner_write.get("error") or "") != "planner_route_unavailable"
-    planner_routing_consistency = {
-        "ok": bool(planner_route_ok and planner_read_base and planner_write_base and planner_read_base == planner_write_base),
-        "read_base_url": planner_read_base,
-        "write_base_url": planner_write_base,
-        "blocked_reason": "" if planner_read_base == planner_write_base and planner_route_ok else "planner_read_write_base_url_diverged",
-    }
-    probes["planner_routing_consistency"] = planner_routing_consistency
     overall_ok = all(bool(item.get("ok")) for item in probes.values())
     return {"ok": overall_ok, "probes": probes}
 
@@ -1155,6 +1149,7 @@ def create_xyn_mcp_server(adapter: XynApiAdapter | None = None) -> Any:
 
     configured_adapter = adapter or XynApiAdapter(XynApiAdapterConfig.from_env())
     tool_surface = _build_tool_surface(configured_adapter)
+    _assert_critical_planner_tools_available(tool_surface)
     server = FastMCP("xyn-control-adapter")
     setattr(server, "_xyn_enabled_tools", set(tool_surface.get("enabled_tools") or []))
     setattr(server, "_xyn_tool_surface", tool_surface)
