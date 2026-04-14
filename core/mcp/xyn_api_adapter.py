@@ -406,6 +406,7 @@ class XynApiAdapter:
         base_urls: Optional[list[str]] = None,
     ) -> Dict[str, Any]:
         last_result: Dict[str, Any] = {"ok": False, "status_code": 404, "response": {"error": "not_found"}}
+        preferred_result: Optional[Dict[str, Any]] = None
         deduped_base_urls: list[str] = []
         for candidate in (base_urls or self._control_api_base_urls()):
             base = str(candidate or "").strip()
@@ -432,10 +433,14 @@ class XynApiAdapter:
                     ((result.get("response") or {}).get("blocked_reason") if isinstance(result.get("response"), dict) else "")
                     or ""
                 ).strip()
+                if code in {401, 403} or blocked_reason == "interactive_login_redirect":
+                    if preferred_result is None:
+                        preferred_result = result
+                    continue
                 if code in {400, 401, 403, 404, 405, 503} or blocked_reason == "interactive_login_redirect":
                     continue
                 return result
-        return last_result
+        return preferred_result or last_result
 
     def _code_api_base_urls(self) -> list[str]:
         out: list[str] = []

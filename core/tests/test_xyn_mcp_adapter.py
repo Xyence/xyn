@@ -2270,6 +2270,33 @@ class XynMcpAdapterTests(TestCase):
         self.assertIn("/xyn/api/applications", body.get("attempted_paths") or [])
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_list_applications_preserves_auth_error_when_fallback_path_404s(self, mock_request: mock.Mock) -> None:
+        first = mock.Mock()
+        first.status_code = 401
+        first.headers = {}
+        first.json.return_value = {"error": "not authenticated"}
+        second = mock.Mock()
+        second.status_code = 404
+        second.headers = {}
+        second.json.return_value = {"detail": "Not Found"}
+        mock_request.side_effect = [first, second]
+
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="https://xyn.xyence.io",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.list_applications(workspace_id="ws-1")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status_code"], 401)
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        self.assertEqual(body.get("error"), "not authenticated")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_list_artifacts_falls_back_after_control_plane_redirect(self, mock_request: mock.Mock) -> None:
         first = mock.Mock()
         first.status_code = 302

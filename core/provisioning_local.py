@@ -52,6 +52,25 @@ def _state_path(deploy_dir: Path) -> Path:
     return deploy_dir / "deployment_state.json"
 
 
+def _write_compose_env_file(*, deploy_dir: Path, database_url: str = "") -> Path:
+    env_path = deploy_dir / ".env"
+    passthrough_names = {"DATABASE_URL", "DJANGO_ALLOWED_HOSTS", "PWD"}
+    passthrough_prefixes = ("XYN_", "OIDC_", "AWS_")
+    values: dict[str, str] = {}
+    for key, raw in os.environ.items():
+        if key in passthrough_names or key.startswith(passthrough_prefixes):
+            values[str(key)] = str(raw)
+    if str(database_url or "").strip():
+        values["DATABASE_URL"] = str(database_url or "").strip()
+    values.setdefault("PWD", str(Path.cwd()))
+    lines: list[str] = []
+    for key in sorted(values):
+        normalized = str(values[key]).replace("\n", "\\n")
+        lines.append(f"{key}={normalized}")
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return env_path
+
+
 def _sanitize_slug(value: str) -> str:
     slug = re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-")
     return slug or "local"
@@ -1078,6 +1097,10 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
         auth_mode=auth_mode,
     )
     compose_path.write_text(compose_yaml, encoding="utf-8")
+    _write_compose_env_file(
+        deploy_dir=deploy_dir,
+        database_url=str(request.database_url or "").strip(),
+    )
     compose_env = None
     if str(request.database_url or "").strip():
         compose_env = dict(os.environ)
