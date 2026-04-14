@@ -112,6 +112,31 @@ class XynApiAdapter:
             headers["X-Forwarded-Proto"] = self._config.upstream_forwarded_proto
         return headers
 
+    def _control_api_base_urls(self) -> list[str]:
+        out: list[str] = []
+        control_api = str(self._config.control_api_base_url or "").strip()
+        if control_api:
+            out.append(control_api)
+            parsed = urlparse(control_api)
+            host = str(parsed.hostname or "").strip().lower()
+            port = f":{parsed.port}" if parsed.port else ""
+            scheme = str(parsed.scheme or "http").strip() or "http"
+            derived_hosts: list[str] = []
+            if host == "xyn-local-api":
+                derived_hosts.extend(["xyn-api", "local-api"])
+            elif host == "local-api":
+                derived_hosts.extend(["xyn-local-api", "xyn-api"])
+            elif host == "xyn-api":
+                derived_hosts.extend(["xyn-local-api", "local-api"])
+            for candidate_host in derived_hosts:
+                candidate = f"{scheme}://{candidate_host}{port}"
+                if candidate not in out:
+                    out.append(candidate)
+        public_base = str(os.getenv("XYN_PUBLIC_BASE_URL", "")).strip().rstrip("/")
+        if public_base and public_base not in out:
+            out.append(public_base)
+        return out
+
     @staticmethod
     def _api_redirect_as_json_error(*, status_code: int, path: str, response: Any) -> Optional[Dict[str, Any]]:
         code = int(status_code or 0)
@@ -170,13 +195,53 @@ class XynApiAdapter:
         try:
             response = _do_request(prefer_request_bearer=True)
         except httpx.RequestError as exc:
+            if path.startswith("/xyn/api/"):
+                for candidate_base in self._control_api_base_urls():
+                    candidate_base = str(candidate_base or "").rstrip("/")
+                    if not candidate_base or candidate_base == resolved_base_url:
+                        continue
+                    candidate_url = f"{candidate_base}{path}"
+                    try:
+                        response = httpx.request(
+                            method=method.upper(),
+                            url=candidate_url,
+                            headers=self._headers(prefer_request_bearer=True),
+                            json=json_payload,
+                            params=params,
+                            timeout=self._config.timeout_seconds,
+                        )
+                        resolved_base_url = candidate_base
+                        url = candidate_url
+                        break
+                    except httpx.RequestError:
+                        continue
+                else:
+                    response = None
+                if response is not None:
+                    try:
+                        body = response.json()
+                    except Exception:
+                        body = {"raw_text": response.text}
+                    return {
+                        "ok": bool(200 <= response.status_code < 300),
+                        "status_code": int(response.status_code),
+                        "method": method.upper(),
+                        "path": path,
+                        "base_url": resolved_base_url,
+                        "response": body if isinstance(body, (dict, list)) else {"value": body},
+                    }
             return {
                 "ok": False,
                 "status_code": 503,
                 "method": method.upper(),
                 "path": path,
                 "base_url": resolved_base_url,
-                "response": {"error": "upstream_unreachable", "detail": str(exc)},
+                "response": {
+                    "error": "upstream_unreachable",
+                    "blocked_reason": "upstream_unreachable",
+                    "detail": str(exc),
+                    "recommended_action": "verify_control_api_base_url_and_network",
+                },
             }
         redirect_error = self._api_redirect_as_json_error(
             status_code=int(response.status_code),
@@ -311,7 +376,7 @@ class XynApiAdapter:
     ) -> Dict[str, Any]:
         last_result: Dict[str, Any] = {"ok": False, "status_code": 404, "response": {"error": "not_found"}}
         deduped_base_urls: list[str] = []
-        for candidate in (base_urls or [self._config.control_api_base_url]):
+        for candidate in (base_urls or self._control_api_base_urls()):
             base = str(candidate or "").strip()
             if not base or base in deduped_base_urls:
                 continue
@@ -1523,7 +1588,7 @@ class XynApiAdapter:
         result = self._request_with_fallback_paths(
             method="GET",
             paths=["/xyn/api/applications"],
-            base_urls=[self._config.control_api_base_url],
+            base_urls=self._control_api_base_urls(),
             params=params,
         )
         if not result.get("ok"):
@@ -1542,7 +1607,7 @@ class XynApiAdapter:
         result = self._request_with_fallback_paths(
             method="GET",
             paths=[f"/xyn/api/applications/{application_id}"],
-            base_urls=[self._config.control_api_base_url],
+            base_urls=self._control_api_base_urls(),
         )
         if not result.get("ok"):
             return result
@@ -1554,7 +1619,7 @@ class XynApiAdapter:
         result = self._request_with_fallback_paths(
             method="GET",
             paths=[f"/xyn/api/applications/{application_id}/change-sessions"],
-            base_urls=[self._config.control_api_base_url],
+            base_urls=self._control_api_base_urls(),
         )
         if not result.get("ok"):
             return result
@@ -1572,7 +1637,7 @@ class XynApiAdapter:
         result = self._request_with_fallback_paths(
             method="GET",
             paths=[f"/xyn/api/applications/{application_id}/change-sessions/{session_id}"],
-            base_urls=[self._config.control_api_base_url],
+            base_urls=self._control_api_base_urls(),
         )
         if not result.get("ok"):
             return result
@@ -2279,6 +2344,115 @@ class XynApiAdapter:
             path=f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/control",
         )
 
+    @staticmethod
+    def _extract_pending_checkpoints_from_control_response(response_body: Dict[str, Any]) -> list[Dict[str, Any]]:
+        control = response_body.get("control") if isinstance(response_body.get("control"), dict) else {}
+        session = control.get("session") if isinstance(control.get("session"), dict) else {}
+        planning = session.get("planning") if isinstance(session.get("planning"), dict) else {}
+        pending = planning.get("pending_checkpoints")
+        if not isinstance(pending, list):
+            return []
+        rows: list[Dict[str, Any]] = []
+        for item in pending:
+            if not isinstance(item, dict):
+                continue
+            rows.append(
+                {
+                    "id": str(item.get("id") or "").strip(),
+                    "checkpoint_key": str(item.get("checkpoint_key") or "").strip(),
+                    "label": str(item.get("label") or "").strip(),
+                    "status": str(item.get("status") or "").strip(),
+                    "required_before": str(item.get("required_before") or "").strip(),
+                    "payload": item.get("payload") if isinstance(item.get("payload"), dict) else {},
+                }
+            )
+        return rows
+
+    def list_change_session_pending_checkpoints(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+        result = self.inspect_change_session_control(application_id=application_id, session_id=session_id)
+        response_body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        pending = self._extract_pending_checkpoints_from_control_response(response_body)
+        result["response"] = {
+            "application_id": str(application_id),
+            "session_id": str(session_id),
+            "pending_checkpoints": pending,
+            "count": len(pending),
+            "raw": response_body,
+        }
+        return result
+
+    def decide_change_session_checkpoint(
+        self,
+        *,
+        application_id: str,
+        session_id: str,
+        checkpoint_id: str = "",
+        decision: str = "approved",
+        notes: str = "",
+    ) -> Dict[str, Any]:
+        normalized_decision = str(decision or "").strip().lower()
+        if normalized_decision in {"approve", "approved", "accept"}:
+            normalized_decision = "approved"
+        elif normalized_decision in {"reject", "rejected", "deny"}:
+            normalized_decision = "rejected"
+        if normalized_decision not in {"approved", "rejected"}:
+            return {
+                "ok": False,
+                "status_code": 400,
+                "method": "POST",
+                "path": f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/checkpoints/<checkpoint_id>/decision",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {
+                    "error": "invalid_decision",
+                    "detail": "decision must be one of: approved, rejected",
+                    "blocked_reason": "invalid_request",
+                },
+            }
+
+        resolved_checkpoint_id = str(checkpoint_id or "").strip()
+        if not resolved_checkpoint_id:
+            inspect_result = self.inspect_change_session_control(application_id=application_id, session_id=session_id)
+            inspect_body = inspect_result.get("response") if isinstance(inspect_result.get("response"), dict) else {}
+            pending = self._extract_pending_checkpoints_from_control_response(inspect_body)
+            if not pending:
+                return {
+                    "ok": False,
+                    "status_code": 409,
+                    "method": "POST",
+                    "path": f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/checkpoints/<checkpoint_id>/decision",
+                    "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                    "response": {
+                        "error": "checkpoint_not_pending",
+                        "detail": "No pending planning checkpoint was found for this change session.",
+                        "blocked_reason": "checkpoint_not_pending",
+                        "next_allowed_actions": ["inspect_change_session_control", "stage_apply_application_change_session"],
+                    },
+                }
+            resolved_checkpoint_id = str((pending[0] or {}).get("id") or "").strip()
+            if not resolved_checkpoint_id:
+                return {
+                    "ok": False,
+                    "status_code": 409,
+                    "method": "POST",
+                    "path": f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/checkpoints/<checkpoint_id>/decision",
+                    "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                    "response": {
+                        "error": "checkpoint_not_resolved",
+                        "detail": "A pending checkpoint exists but checkpoint id could not be resolved.",
+                        "blocked_reason": "checkpoint_not_resolved",
+                        "next_allowed_actions": ["list_change_session_pending_checkpoints", "inspect_change_session_control"],
+                    },
+                }
+
+        return self._request(
+            method="POST",
+            path=f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/checkpoints/{resolved_checkpoint_id}/decision",
+            json_payload={
+                "decision": normalized_decision,
+                "notes": str(notes or "").strip(),
+            },
+        )
+
     def run_change_session_control_action(
         self,
         *,
@@ -2287,6 +2461,21 @@ class XynApiAdapter:
         operation: str,
         action_payload: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        normalized_operation = str(operation or "").strip().lower()
+        if normalized_operation in {"decide_checkpoint", "approve_checkpoint"}:
+            payload = dict(action_payload or {})
+            checkpoint_id = str(payload.get("checkpoint_id") or payload.get("id") or "").strip()
+            decision = str(payload.get("decision") or "").strip()
+            if not decision and normalized_operation == "approve_checkpoint":
+                decision = "approved"
+            notes = str(payload.get("notes") or "").strip()
+            return self.decide_change_session_checkpoint(
+                application_id=application_id,
+                session_id=session_id,
+                checkpoint_id=checkpoint_id,
+                decision=decision or "approved",
+                notes=notes,
+            )
         payload = dict(action_payload or {})
         payload["operation"] = str(operation or "").strip()
         return self._request(

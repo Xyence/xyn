@@ -1728,6 +1728,112 @@ class XynMcpAdapterTests(TestCase):
         adapter.declare_release.assert_called_once_with(payload={"workspace_id": "w1"})
         server.tools["get_artifact_provenance"]["fn"](artifact_slug="xyn-api", workspace_id="w1")
         adapter.get_artifact_provenance.assert_called_once_with(artifact_slug="xyn-api", workspace_id="w1")
+        server.tools["list_change_session_pending_checkpoints"]["fn"](application_id="app-1", session_id="sess-1")
+        adapter.list_change_session_pending_checkpoints.assert_called_once_with(application_id="app-1", session_id="sess-1")
+        server.tools["decide_change_session_checkpoint"]["fn"](
+            application_id="app-1",
+            session_id="sess-1",
+            checkpoint_id="cp-1",
+            decision="approved",
+            notes="ok",
+        )
+        adapter.decide_change_session_checkpoint.assert_called_once_with(
+            application_id="app-1",
+            session_id="sess-1",
+            checkpoint_id="cp-1",
+            decision="approved",
+            notes="ok",
+        )
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_list_change_session_pending_checkpoints_extracts_planning_checkpoints(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "control": {
+                "session": {
+                    "planning": {
+                        "pending_checkpoints": [
+                            {
+                                "id": "cp-1",
+                                "checkpoint_key": "plan_scope_confirmed",
+                                "label": "Approve planning scope before stage apply",
+                                "status": "pending",
+                                "required_before": "stage",
+                                "payload": {"description": "Confirm scope."},
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=11.0,
+            )
+        )
+
+        result = adapter.list_change_session_pending_checkpoints(application_id="app-1", session_id="sess-1")
+
+        self.assertTrue(result["ok"])
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        self.assertEqual(body.get("count"), 1)
+        pending = body.get("pending_checkpoints") if isinstance(body.get("pending_checkpoints"), list) else []
+        self.assertEqual((pending[0] if pending else {}).get("checkpoint_key"), "plan_scope_confirmed")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_run_change_session_control_action_decide_checkpoint_uses_checkpoint_decision_endpoint(
+        self, mock_request: mock.Mock
+    ) -> None:
+        inspect_response = mock.Mock()
+        inspect_response.status_code = 200
+        inspect_response.json.return_value = {
+            "control": {
+                "session": {
+                    "planning": {
+                        "pending_checkpoints": [
+                            {"id": "cp-123", "checkpoint_key": "plan_scope_confirmed", "status": "pending"}
+                        ]
+                    }
+                }
+            }
+        }
+        decide_response = mock.Mock()
+        decide_response.status_code = 200
+        decide_response.json.return_value = {"recorded": True}
+        mock_request.side_effect = [inspect_response, decide_response]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=11.0,
+            )
+        )
+
+        result = adapter.run_change_session_control_action(
+            application_id="app-1",
+            session_id="sess-1",
+            operation="decide_checkpoint",
+            action_payload={"decision": "approved", "notes": "approved"},
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(mock_request.call_count, 2)
+        inspect_kwargs = mock_request.call_args_list[0].kwargs
+        decide_kwargs = mock_request.call_args_list[1].kwargs
+        self.assertEqual(inspect_kwargs["url"], "http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/control")
+        self.assertEqual(
+            decide_kwargs["url"],
+            "http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/checkpoints/cp-123/decision",
+        )
+        self.assertEqual(decide_kwargs["json"]["decision"], "approved")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_passes_base_url_auth_and_path(self, mock_request: mock.Mock) -> None:
@@ -2079,6 +2185,36 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(body.get("error"), "unauthorized")
         self.assertEqual(body.get("blocked_reason"), "interactive_login_redirect")
 
+    @mock.patch.dict("os.environ", {"XYN_PUBLIC_BASE_URL": "https://xyn.xyence.io"}, clear=False)
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_list_applications_retries_control_base_urls_when_primary_unreachable(
+        self, mock_request: mock.Mock
+    ) -> None:
+        first_exc = httpx.ConnectError("[Errno -3] Temporary failure in name resolution")
+        second = mock.Mock()
+        second.status_code = 200
+        second.headers = {}
+        second.json.return_value = {"applications": [{"application_id": "app-1", "slug": "Xyn", "name": "Xyn"}]}
+        mock_request.side_effect = [first_exc, second]
+
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn-local-api:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.list_applications(workspace_id="ws-1")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status_code"], 200)
+        self.assertEqual(mock_request.call_count, 2)
+        first_url = mock_request.call_args_list[0].kwargs.get("url")
+        second_url = mock_request.call_args_list[1].kwargs.get("url")
+        self.assertEqual(first_url, "http://xyn-local-api:8000/xyn/api/applications")
+        self.assertEqual(second_url, "http://xyn-api:8000/xyn/api/applications")
+
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_list_artifacts_falls_back_after_control_plane_redirect(self, mock_request: mock.Mock) -> None:
         first = mock.Mock()
@@ -2204,6 +2340,10 @@ class XynMcpAdapterTests(TestCase):
         auth = payload.get("auth") if isinstance(payload.get("auth"), dict) else {}
         self.assertTrue(bool(auth.get("has_bearer_token")))
         self.assertFalse(bool(auth.get("has_internal_token")))
+        upstream = payload.get("upstream_health") if isinstance(payload.get("upstream_health"), dict) else {}
+        probes = upstream.get("probes") if isinstance(upstream.get("probes"), dict) else {}
+        self.assertIn("code_artifacts_api", probes)
+        self.assertIn("control_workflow_api", probes)
 
     def test_healthz_remains_unauthenticated_when_mcp_auth_enabled(self) -> None:
         adapter = XynApiAdapter(
