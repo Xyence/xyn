@@ -64,6 +64,8 @@ TOOL_NAMES = [
     "list_deployment_providers",
     "get_provider_capabilities",
     "inspect_change_session_control",
+    "list_change_session_pending_checkpoints",
+    "decide_change_session_checkpoint",
     "run_change_session_control_action",
     "get_change_session_promotion_evidence",
     "get_release_target_deployment_plan",
@@ -94,6 +96,10 @@ TOOL_NAMES = [
 _TOOL_ROUTE_PROBES: Dict[str, tuple[str, str, str]] = {
     "list_change_efforts": ("GET", "/api/v1/change-efforts", "code"),
     "list_runtime_runs": ("GET", "/api/v1/runs", "code"),
+}
+_UPSTREAM_HEALTH_PROBES: Dict[str, tuple[str, str, str]] = {
+    "code_artifacts_api": ("GET", "/api/v1/artifacts", "code"),
+    "control_workflow_api": ("GET", "/xyn/api/applications", "control"),
 }
 _UNSUPPORTED_ROUTE_STATUS_CODES = {404, 405}
 
@@ -433,6 +439,27 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
         return adapter.inspect_change_session_control(
             application_id=application_id,
             session_id=session_id,
+        )
+
+    def list_change_session_pending_checkpoints(application_id: str, session_id: str) -> Dict[str, Any]:
+        return adapter.list_change_session_pending_checkpoints(
+            application_id=application_id,
+            session_id=session_id,
+        )
+
+    def decide_change_session_checkpoint(
+        application_id: str,
+        session_id: str,
+        checkpoint_id: str = "",
+        decision: str = "approved",
+        notes: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.decide_change_session_checkpoint(
+            application_id=application_id,
+            session_id=session_id,
+            checkpoint_id=checkpoint_id,
+            decision=decision,
+            notes=notes,
         )
 
     def run_change_session_control_action(
@@ -852,6 +879,18 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     )
     _register_tool(
         mcp_server,
+        name="list_change_session_pending_checkpoints",
+        description="List pending planning checkpoints that gate stage-apply for a change session.",
+        fn=list_change_session_pending_checkpoints,
+    )
+    _register_tool(
+        mcp_server,
+        name="decide_change_session_checkpoint",
+        description="Approve or reject a planning checkpoint (defaults to first pending checkpoint if checkpoint_id is omitted).",
+        fn=decide_change_session_checkpoint,
+    )
+    _register_tool(
+        mcp_server,
         name="run_change_session_control_action",
         description="Execute a canonical control action for a change session.",
         fn=run_change_session_control_action,
@@ -1052,6 +1091,26 @@ def _build_tool_surface(adapter: XynApiAdapter) -> Dict[str, Any]:
     }
 
 
+def _build_upstream_health(adapter: XynApiAdapter) -> Dict[str, Any]:
+    probes: Dict[str, Dict[str, Any]] = {}
+    for probe_name, (method, path, base) in _UPSTREAM_HEALTH_PROBES.items():
+        result = _probe_backend_route(adapter, method=method, path=path, base=base)
+        status_code = int(result.get("status_code") or 0)
+        response = result.get("response") if isinstance(result.get("response"), dict) else {}
+        probes[probe_name] = {
+            "ok": bool(result.get("ok")),
+            "status_code": status_code,
+            "path": path,
+            "base": base,
+            "base_url": str(result.get("base_url") or ""),
+            "blocked_reason": str(response.get("blocked_reason") or "").strip(),
+            "error": str(response.get("error") or "").strip(),
+            "detail": str(response.get("detail") or "").strip(),
+        }
+    overall_ok = all(bool(item.get("ok")) for item in probes.values())
+    return {"ok": overall_ok, "probes": probes}
+
+
 def create_xyn_mcp_server(adapter: XynApiAdapter | None = None) -> Any:
     from mcp.server.fastmcp import FastMCP
 
@@ -1069,6 +1128,7 @@ def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
     auth_config = McpAuthConfig.from_env()
     mcp_server = create_xyn_mcp_server(configured_adapter)
     tool_surface = getattr(mcp_server, "_xyn_tool_surface", {}) if mcp_server is not None else {}
+    upstream_health = _build_upstream_health(configured_adapter)
     enabled_tools = list(tool_surface.get("enabled_tools") or TOOL_NAMES)
     disabled_tools = list(tool_surface.get("disabled_tools") or [])
     parity = tool_surface.get("parity") if isinstance(tool_surface.get("parity"), dict) else {}
@@ -1088,6 +1148,7 @@ def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
                 "tools": enabled_tools,
                 "disabled_tools": disabled_tools,
                 "tool_parity": parity,
+                "upstream_health": upstream_health,
                 "xyn_control_api_base_url": configured_adapter.config.control_api_base_url,
                 "xyn_code_api_base_url": configured_adapter.config.code_api_base_url
                 or configured_adapter.config.control_api_base_url,
