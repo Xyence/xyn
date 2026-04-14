@@ -1097,15 +1097,25 @@ def _build_upstream_health(adapter: XynApiAdapter) -> Dict[str, Any]:
         result = _probe_backend_route(adapter, method=method, path=path, base=base)
         status_code = int(result.get("status_code") or 0)
         response = result.get("response") if isinstance(result.get("response"), dict) else {}
+        raw_text = str(response.get("raw_text") or "").strip()
+        looks_like_html_404 = status_code == 404 and (
+            "page not found" in raw_text.lower() or "<!doctype html" in raw_text.lower()
+        )
+        looks_like_json = not raw_text
+        if raw_text:
+            stripped = raw_text.lstrip()
+            looks_like_json = stripped.startswith("{") or stripped.startswith("[")
         probes[probe_name] = {
             "ok": bool(result.get("ok")),
             "status_code": status_code,
             "path": path,
             "base": base,
             "base_url": str(result.get("base_url") or ""),
+            "response_is_json": looks_like_json,
+            "html_404": looks_like_html_404,
             "blocked_reason": str(response.get("blocked_reason") or "").strip(),
             "error": str(response.get("error") or "").strip(),
-            "detail": str(response.get("detail") or "").strip(),
+            "detail": str(response.get("detail") or "").strip() or raw_text[:240],
         }
     overall_ok = all(bool(item.get("ok")) for item in probes.values())
     return {"ok": overall_ok, "probes": probes}

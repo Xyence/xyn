@@ -132,10 +132,41 @@ class XynApiAdapter:
                 candidate = f"{scheme}://{candidate_host}{port}"
                 if candidate not in out:
                     out.append(candidate)
+        seed_base = str(os.getenv("XYN_SEED_URL", "")).strip().rstrip("/")
+        if seed_base and seed_base not in out:
+            out.append(seed_base)
         public_base = str(os.getenv("XYN_PUBLIC_BASE_URL", "")).strip().rstrip("/")
         if public_base and public_base not in out:
             out.append(public_base)
         return out
+
+    @staticmethod
+    def _normalize_planner_route_error(result: Dict[str, Any], *, attempted_paths: list[str]) -> Dict[str, Any]:
+        if bool(result.get("ok")):
+            return result
+        status_code = int(result.get("status_code") or 0)
+        if status_code != 404:
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        raw_text = str(body.get("raw_text") or "").strip().lower()
+        detail_text = str(body.get("detail") or "").strip().lower()
+        is_route_miss = (
+            "page not found" in raw_text
+            or "<!doctype html" in raw_text
+            or detail_text == "not found"
+        )
+        if not is_route_miss:
+            return result
+        result["response"] = {
+            "error": "planner_route_unavailable",
+            "blocked_reason": "planner_route_unavailable",
+            "detail": "Planner workflow route is not available on the configured control API upstream.",
+            "attempted_paths": [str(p or "").strip() for p in attempted_paths if str(p or "").strip()],
+            "base_url": str(result.get("base_url") or "").strip(),
+            "recommended_action": "verify_xyn_api_control_plane_route_mount",
+            "next_allowed_actions": ["list_artifacts", "list_runtime_runs"],
+        }
+        return result
 
     @staticmethod
     def _api_redirect_as_json_error(*, status_code: int, path: str, response: Any) -> Optional[Dict[str, Any]]:
@@ -1585,14 +1616,15 @@ class XynApiAdapter:
             )
         resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
         params = {"workspace_id": resolved_workspace_id}
+        paths = ["/xyn/api/applications", "/api/v1/applications"]
         result = self._request_with_fallback_paths(
             method="GET",
-            paths=["/xyn/api/applications"],
+            paths=paths,
             base_urls=self._control_api_base_urls(),
             params=params,
         )
         if not result.get("ok"):
-            return result
+            return self._normalize_planner_route_error(result, attempted_paths=paths)
         body = result.get("response") if isinstance(result.get("response"), dict) else {}
         rows = body.get("applications") if isinstance(body.get("applications"), list) else (body.get("items") if isinstance(body.get("items"), list) else [])
         normalized = [self._application_discovery_row(row) for row in rows if isinstance(row, dict)]
@@ -1604,25 +1636,33 @@ class XynApiAdapter:
         return result
 
     def get_application(self, *, application_id: str) -> Dict[str, Any]:
+        paths = [
+            f"/xyn/api/applications/{application_id}",
+            f"/api/v1/applications/{application_id}",
+        ]
         result = self._request_with_fallback_paths(
             method="GET",
-            paths=[f"/xyn/api/applications/{application_id}"],
+            paths=paths,
             base_urls=self._control_api_base_urls(),
         )
         if not result.get("ok"):
-            return result
+            return self._normalize_planner_route_error(result, attempted_paths=paths)
         body = result.get("response") if isinstance(result.get("response"), dict) else {}
         result["response"] = {"application": self._application_discovery_row(body)}
         return result
 
     def list_application_change_sessions(self, *, application_id: str) -> Dict[str, Any]:
+        paths = [
+            f"/xyn/api/applications/{application_id}/change-sessions",
+            f"/api/v1/applications/{application_id}/change-sessions",
+        ]
         result = self._request_with_fallback_paths(
             method="GET",
-            paths=[f"/xyn/api/applications/{application_id}/change-sessions"],
+            paths=paths,
             base_urls=self._control_api_base_urls(),
         )
         if not result.get("ok"):
-            return result
+            return self._normalize_planner_route_error(result, attempted_paths=paths)
         body = result.get("response") if isinstance(result.get("response"), dict) else {}
         rows = body.get("change_sessions") if isinstance(body.get("change_sessions"), list) else (body.get("items") if isinstance(body.get("items"), list) else [])
         normalized = [self._change_session_discovery_row(row) for row in rows if isinstance(row, dict)]
@@ -1634,13 +1674,17 @@ class XynApiAdapter:
         return result
 
     def get_application_change_session(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+        paths = [
+            f"/xyn/api/applications/{application_id}/change-sessions/{session_id}",
+            f"/api/v1/applications/{application_id}/change-sessions/{session_id}",
+        ]
         result = self._request_with_fallback_paths(
             method="GET",
-            paths=[f"/xyn/api/applications/{application_id}/change-sessions/{session_id}"],
+            paths=paths,
             base_urls=self._control_api_base_urls(),
         )
         if not result.get("ok"):
-            return result
+            return self._normalize_planner_route_error(result, attempted_paths=paths)
         body = result.get("response") if isinstance(result.get("response"), dict) else {}
         result["response"] = {
             "change_session": self._change_session_discovery_row(body),
@@ -1819,21 +1863,37 @@ class XynApiAdapter:
         }
 
     def get_application_change_session_plan(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+        attempted_paths = [
+            f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/plan",
+            f"/api/v1/applications/{application_id}/change-sessions/{session_id}/plan",
+            f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/control",
+            f"/api/v1/applications/{application_id}/change-sessions/{session_id}/control",
+        ]
         # Canonical workflow route is POST-only in xyn-api.
-        result = self._request(
+        result = self._request_with_fallback_paths(
             method="POST",
-            path=f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/plan",
+            paths=[
+                f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/plan",
+                f"/api/v1/applications/{application_id}/change-sessions/{session_id}/plan",
+            ],
             json_payload={},
+            base_urls=self._control_api_base_urls(),
         )
         if not result.get("ok") and int(result.get("status_code") or 0) in {404, 405}:
             # Back-compat for older deployments that exposed GET /plan.
-            result = self._request(
+            result = self._request_with_fallback_paths(
                 method="GET",
-                path=f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/plan",
+                paths=[
+                    f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/plan",
+                    f"/api/v1/applications/{application_id}/change-sessions/{session_id}/plan",
+                ],
+                base_urls=self._control_api_base_urls(),
             )
         if not result.get("ok") and int(result.get("status_code") or 0) in {404, 405}:
             # Compatibility fallback to canonical control inspection when explicit /plan route is unavailable.
             result = self.inspect_change_session_control(application_id=application_id, session_id=session_id)
+        if not result.get("ok"):
+            result = self._normalize_planner_route_error(result, attempted_paths=attempted_paths)
         return self._normalize_change_session_result(
             result,
             application_id=application_id,
@@ -2339,10 +2399,16 @@ class XynApiAdapter:
         return result
 
     def inspect_change_session_control(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
-        return self._request(
+        paths = [
+            f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/control",
+            f"/api/v1/applications/{application_id}/change-sessions/{session_id}/control",
+        ]
+        result = self._request_with_fallback_paths(
             method="GET",
-            path=f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/control",
+            paths=paths,
+            base_urls=self._control_api_base_urls(),
         )
+        return self._normalize_planner_route_error(result, attempted_paths=paths)
 
     @staticmethod
     def _extract_pending_checkpoints_from_control_response(response_body: Dict[str, Any]) -> list[Dict[str, Any]]:
@@ -2478,11 +2544,17 @@ class XynApiAdapter:
             )
         payload = dict(action_payload or {})
         payload["operation"] = str(operation or "").strip()
-        return self._request(
+        paths = [
+            f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/control/actions",
+            f"/api/v1/applications/{application_id}/change-sessions/{session_id}/control/actions",
+        ]
+        result = self._request_with_fallback_paths(
             method="POST",
-            path=f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/control/actions",
+            paths=paths,
             json_payload=payload,
+            base_urls=self._control_api_base_urls(),
         )
+        return self._normalize_planner_route_error(result, attempted_paths=paths)
 
     def get_change_session_promotion_evidence(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
         return self._request(

@@ -2216,6 +2216,60 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(second_url, "http://xyn-api:8000/xyn/api/applications")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_list_applications_uses_api_v1_fallback_path_when_xyn_prefix_missing(self, mock_request: mock.Mock) -> None:
+        first = mock.Mock()
+        first.status_code = 404
+        first.headers = {}
+        first.json.return_value = {"detail": "Not Found"}
+        second = mock.Mock()
+        second.status_code = 200
+        second.headers = {}
+        second.json.return_value = {"applications": [{"application_id": "app-1", "slug": "Xyn", "name": "Xyn"}]}
+        mock_request.side_effect = [first, second]
+
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="https://seed.xyence.io",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        result = adapter.list_applications(workspace_id="ws-1")
+        self.assertTrue(result["ok"])
+        self.assertEqual(mock_request.call_count, 2)
+        self.assertEqual(mock_request.call_args_list[0].kwargs.get("url"), "https://seed.xyence.io/xyn/api/applications")
+        self.assertEqual(mock_request.call_args_list[1].kwargs.get("url"), "https://seed.xyence.io/api/v1/applications")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_list_applications_normalizes_plain_404_to_planner_route_unavailable(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 404
+        response.headers = {}
+        response.json.side_effect = ValueError("not json")
+        response.text = "404 page not found"
+        mock_request.return_value = response
+
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="https://xyn.xyence.io",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.list_applications(workspace_id="ws-1")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status_code"], 404)
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        self.assertEqual(body.get("error"), "planner_route_unavailable")
+        self.assertEqual(body.get("blocked_reason"), "planner_route_unavailable")
+        self.assertIn("/xyn/api/applications", body.get("attempted_paths") or [])
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_list_artifacts_falls_back_after_control_plane_redirect(self, mock_request: mock.Mock) -> None:
         first = mock.Mock()
         first.status_code = 302
@@ -2344,6 +2398,7 @@ class XynMcpAdapterTests(TestCase):
         probes = upstream.get("probes") if isinstance(upstream.get("probes"), dict) else {}
         self.assertIn("code_artifacts_api", probes)
         self.assertIn("control_workflow_api", probes)
+        self.assertIn("response_is_json", probes.get("code_artifacts_api") or {})
 
     def test_healthz_remains_unauthenticated_when_mcp_auth_enabled(self) -> None:
         adapter = XynApiAdapter(
