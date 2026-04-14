@@ -16,6 +16,7 @@ from core.provisioning_local import (
     _compose_down_cmd,
     _ensure_remote_workspace,
     _resolve_images_for_provision,
+    _write_compose_env_file,
 )
 
 
@@ -486,6 +487,32 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         self.assertNotIn("postgres_data:/var/lib/postgresql/data", compose_text)
         self.assertIn("DATABASE_URL: ${DATABASE_URL:-}", compose_text)
         self.assertNotIn("POSTGRES_HOST: postgres", compose_text)
+
+    def test_write_compose_env_file_includes_oidc_and_database_override(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            deploy_dir = Path(tmpdir)
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "XYN_OIDC_ISSUER": "https://accounts.google.com",
+                    "XYN_OIDC_CLIENT_ID": "client-id",
+                    "OIDC_CLIENT_SECRET": "secret",
+                    "XYN_PUBLIC_BASE_URL": "https://xyn.xyence.io",
+                    "DATABASE_URL": "postgresql://old",
+                },
+                clear=False,
+            ):
+                env_path = _write_compose_env_file(
+                    deploy_dir=deploy_dir,
+                    database_url="postgresql://override",
+                )
+            text = env_path.read_text(encoding="utf-8")
+
+        self.assertIn("XYN_OIDC_ISSUER=https://accounts.google.com", text)
+        self.assertIn("XYN_OIDC_CLIENT_ID=client-id", text)
+        self.assertIn("OIDC_CLIENT_SECRET=secret", text)
+        self.assertIn("XYN_PUBLIC_BASE_URL=https://xyn.xyence.io", text)
+        self.assertIn("DATABASE_URL=postgresql://override", text)
 
 
 if __name__ == "__main__":
