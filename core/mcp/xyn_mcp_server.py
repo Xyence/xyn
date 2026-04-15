@@ -64,6 +64,7 @@ TOOL_NAMES = [
     "list_deployment_providers",
     "get_provider_capabilities",
     "inspect_change_session_control",
+    "assess_change_session_readiness",
     "list_change_session_pending_checkpoints",
     "decide_change_session_checkpoint",
     "run_change_session_control_action",
@@ -438,6 +439,12 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
 
     def inspect_change_session_control(application_id: str, session_id: str) -> Dict[str, Any]:
         return adapter.inspect_change_session_control(
+            application_id=application_id,
+            session_id=session_id,
+        )
+
+    def assess_change_session_readiness(application_id: str, session_id: str) -> Dict[str, Any]:
+        return adapter.assess_change_session_readiness(
             application_id=application_id,
             session_id=session_id,
         )
@@ -877,6 +884,12 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
         name="inspect_change_session_control",
         description="Inspect canonical control status for a solution change session.",
         fn=inspect_change_session_control,
+    )
+    _register_tool(
+        mcp_server,
+        name="assess_change_session_readiness",
+        description="Read-only orchestration readiness assessment for binding/auth/prompt/schema/retry safety on a change session.",
+        fn=assess_change_session_readiness,
     )
     _register_tool(
         mcp_server,

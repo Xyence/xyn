@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,9 @@ _SOURCE_FALLBACK_STATUS_CODES = {400, 401, 403, 404, 422, 429}
 _SOURCE_FALLBACK_STATUS_MIN = 500
 _SOURCE_FALLBACK_STATUS_MAX = 599
 _REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
+_TRANSIENT_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+logger = logging.getLogger(__name__)
 
 
 def set_request_bearer_token(token: str) -> Token:
@@ -113,6 +117,26 @@ class XynApiAdapter:
             headers["X-Forwarded-Proto"] = self._config.upstream_forwarded_proto
         return headers
 
+    @staticmethod
+    def _binding_id(base_url: str, path: str) -> str:
+        return f"{str(base_url or '').rstrip('/')}{str(path or '').strip()}"
+
+    @staticmethod
+    def _classify_error(result: Dict[str, Any]) -> str:
+        status_code = int(result.get("status_code") or 0)
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        error_token = str(body.get("error") or "").strip().lower()
+        blocked_reason = str(body.get("blocked_reason") or "").strip().lower()
+        if status_code in {401, 403} or error_token in {"unauthorized", "not authenticated", "not_authenticated"}:
+            return "auth_expired"
+        if blocked_reason in {"planner_route_unavailable", "route_unavailable"} or status_code in {404, 405}:
+            return "contract_mismatch"
+        if status_code in {400, 409, 422}:
+            return "backend_validation_error"
+        if status_code in _TRANSIENT_RETRYABLE_STATUS_CODES or error_token == "upstream_unreachable":
+            return "transient_transport_failure"
+        return "backend_validation_error"
+
     def _control_api_base_urls(self) -> list[str]:
         out: list[str] = []
         control_api = str(self._config.control_api_base_url or "").strip()
@@ -161,6 +185,17 @@ class XynApiAdapter:
     def _normalize_planner_route_error(result: Dict[str, Any], *, attempted_paths: list[str]) -> Dict[str, Any]:
         if bool(result.get("ok")):
             return result
+        if not str(result.get("error_classification") or "").strip():
+            body = result.get("response") if isinstance(result.get("response"), dict) else {}
+            status_code = int(result.get("status_code") or 0)
+            if status_code in {401, 403}:
+                result["error_classification"] = "auth_expired"
+            elif status_code in {404, 405}:
+                result["error_classification"] = "contract_mismatch"
+            elif status_code in {400, 409, 422}:
+                result["error_classification"] = "backend_validation_error"
+            elif status_code in _TRANSIENT_RETRYABLE_STATUS_CODES or str(body.get("error") or "") == "upstream_unreachable":
+                result["error_classification"] = "transient_transport_failure"
         status_code = int(result.get("status_code") or 0)
         if status_code != 404:
             return result
@@ -224,6 +259,7 @@ class XynApiAdapter:
         json_payload: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
         base_url: Optional[str] = None,
+        allow_reissue_on_transport_error: bool = True,
     ) -> Dict[str, Any]:
         resolved_base_url = str(base_url or self._config.control_api_base_url).rstrip("/")
         url = f"{resolved_base_url}{path}"
@@ -243,7 +279,7 @@ class XynApiAdapter:
         try:
             response = _do_request(prefer_request_bearer=True)
         except httpx.RequestError as exc:
-            if path.startswith("/xyn/api/"):
+            if path.startswith("/xyn/api/") and allow_reissue_on_transport_error:
                 for candidate_base in self._control_api_base_urls():
                     candidate_base = str(candidate_base or "").rstrip("/")
                     if not candidate_base or candidate_base == resolved_base_url:
@@ -260,6 +296,12 @@ class XynApiAdapter:
                         )
                         resolved_base_url = candidate_base
                         url = candidate_url
+                        logger.info(
+                            "mcp_request_rebound_on_transport_error path=%s prev_binding=%s new_binding=%s",
+                            path,
+                            self._binding_id(base_url or self._config.control_api_base_url, path),
+                            self._binding_id(candidate_base, path),
+                        )
                         break
                     except httpx.RequestError:
                         continue
@@ -270,7 +312,7 @@ class XynApiAdapter:
                         body = response.json()
                     except Exception:
                         body = {"raw_text": response.text}
-                    return {
+                    result = {
                         "ok": bool(200 <= response.status_code < 300),
                         "status_code": int(response.status_code),
                         "method": method.upper(),
@@ -278,7 +320,9 @@ class XynApiAdapter:
                         "base_url": resolved_base_url,
                         "response": body if isinstance(body, (dict, list)) else {"value": body},
                     }
-            return {
+                    result["error_classification"] = self._classify_error(result) if not bool(result.get("ok")) else ""
+                    return result
+            result = {
                 "ok": False,
                 "status_code": 503,
                 "method": method.upper(),
@@ -291,6 +335,8 @@ class XynApiAdapter:
                     "recommended_action": "verify_control_api_base_url_and_network",
                 },
             }
+            result["error_classification"] = "transient_transport_failure"
+            return result
         redirect_error = self._api_redirect_as_json_error(
             status_code=int(response.status_code),
             path=path,
@@ -303,10 +349,12 @@ class XynApiAdapter:
             # static bearer, retry with static bearer before surfacing interactive redirect.
             should_retry_with_static = bool(request_bearer and static_bearer and request_bearer != static_bearer)
             if not should_retry_with_static:
+                redirect_error["error_classification"] = "auth_expired"
                 return redirect_error
             try:
                 retry_response = _do_request(prefer_request_bearer=False)
             except httpx.RequestError:
+                redirect_error["error_classification"] = "auth_expired"
                 return redirect_error
             retry_redirect = self._api_redirect_as_json_error(
                 status_code=int(retry_response.status_code),
@@ -316,8 +364,15 @@ class XynApiAdapter:
             if isinstance(retry_redirect, dict):
                 retry_redirect["method"] = method.upper()
                 retry_redirect["base_url"] = resolved_base_url
+                retry_redirect["error_classification"] = "auth_expired"
                 return retry_redirect
             response = retry_response
+            logger.info(
+                "mcp_request_auth_refreshed method=%s path=%s binding=%s",
+                method.upper(),
+                path,
+                self._binding_id(resolved_base_url, path),
+            )
         body: Any
         try:
             body = response.json()
@@ -355,14 +410,18 @@ class XynApiAdapter:
                 retry_body = retry_response.json()
             except Exception:
                 retry_body = {"raw_text": retry_response.text}
-            return {
+            result = {
                 "ok": bool(200 <= retry_response.status_code < 300),
                 "status_code": int(retry_response.status_code),
                 "method": method.upper(),
                 "path": path,
                 "base_url": resolved_base_url,
                 "response": retry_body if isinstance(retry_body, (dict, list)) else {"value": retry_body},
+                "_auth_refreshed": True,
             }
+            result["error_classification"] = self._classify_error(result) if not bool(result.get("ok")) else ""
+            return result
+        result["error_classification"] = self._classify_error(result) if not bool(result.get("ok")) else ""
         return result
 
     def _request_bytes(
@@ -421,10 +480,12 @@ class XynApiAdapter:
         json_payload: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
         base_urls: Optional[list[str]] = None,
+        allow_reissue_on_transport_error: bool = True,
     ) -> Dict[str, Any]:
         last_result: Dict[str, Any] = {"ok": False, "status_code": 404, "response": {"error": "not_found"}}
         first_result: Optional[Dict[str, Any]] = None
         preferred_result: Optional[Dict[str, Any]] = None
+        failed_bindings: list[str] = []
         deduped_base_urls: list[str] = []
         for candidate in (base_urls or self._control_api_base_urls()):
             base = str(candidate or "").strip()
@@ -446,15 +507,55 @@ class XynApiAdapter:
                     json_payload=json_payload,
                     params=params,
                     base_url=base_url,
+                    allow_reissue_on_transport_error=allow_reissue_on_transport_error,
                 )
                 last_result = result
                 if first_result is None:
                     first_result = result
                 if bool(result.get("ok")):
+                    current_binding = self._binding_id(str(result.get("base_url") or base_url), path)
+                    previous_binding = failed_bindings[-1] if failed_bindings else ""
+                    if previous_binding and previous_binding != current_binding:
+                        continuity = {
+                            "previous_binding_id": previous_binding,
+                            "new_binding_id": current_binding,
+                            "retry_reason": "binding_rotated",
+                            "auth_refreshed": bool(result.get("_auth_refreshed")),
+                            "action_reissued": True,
+                        }
+                        result["continuity"] = continuity
+                        logger.info(
+                            "mcp_binding_rotated method=%s previous_binding=%s new_binding=%s auth_refreshed=%s",
+                            method.upper(),
+                            previous_binding,
+                            current_binding,
+                            bool(result.get("_auth_refreshed")),
+                        )
+                    elif bool(result.get("_auth_refreshed")):
+                        result["continuity"] = {
+                            "previous_binding_id": current_binding,
+                            "new_binding_id": current_binding,
+                            "retry_reason": "auth_expired",
+                            "auth_refreshed": True,
+                            "action_reissued": True,
+                        }
+                        logger.info(
+                            "mcp_auth_refreshed method=%s binding=%s",
+                            method.upper(),
+                            current_binding,
+                        )
                     if planner_request:
                         self._planner_preferred_base_url = str(result.get("base_url") or "").strip()
                     return result
                 code = int(result.get("status_code") or 0)
+                failed_bindings.append(self._binding_id(str(result.get("base_url") or base_url), path))
+                if (
+                    str(method or "").upper() == "POST"
+                    and not allow_reissue_on_transport_error
+                    and code == 503
+                    and str(result.get("error_classification") or self._classify_error(result)) == "transient_transport_failure"
+                ):
+                    return result
                 # Continue searching across endpoint/base-url variants for compatibility.
                 blocked_reason = str(
                     ((result.get("response") or {}).get("blocked_reason") if isinstance(result.get("response"), dict) else "")
@@ -467,7 +568,23 @@ class XynApiAdapter:
                 if code in {400, 401, 403, 404, 405, 503} or blocked_reason == "interactive_login_redirect":
                     continue
                 return result
-        return preferred_result or first_result or last_result
+        out = preferred_result or first_result or last_result
+        if not bool(out.get("ok")):
+            out["error_classification"] = str(out.get("error_classification") or self._classify_error(out))
+            if failed_bindings:
+                current_binding = self._binding_id(str(out.get("base_url") or ""), str(out.get("path") or ""))
+                previous_binding = failed_bindings[-1]
+                if previous_binding and previous_binding != current_binding:
+                    out["continuity"] = {
+                        "previous_binding_id": previous_binding,
+                        "new_binding_id": current_binding,
+                        "retry_reason": "binding_rotated",
+                        "auth_refreshed": bool(out.get("_auth_refreshed")),
+                        "action_reissued": True,
+                    }
+                    if str(out.get("error_classification") or "") not in {"auth_expired", "backend_validation_error", "contract_mismatch"}:
+                        out["error_classification"] = "binding_rotated"
+        return out
 
     def _code_api_base_urls(self) -> list[str]:
         out: list[str] = []
@@ -1039,6 +1156,8 @@ class XynApiAdapter:
             "promotion_evidence_ids": XynApiAdapter._extract_promotion_evidence_ids(body),
             "decomposition_campaign": XynApiAdapter._extract_decomposition_campaign(body),
             "guardrails": XynApiAdapter._extract_decomposition_guardrails(body),
+            "error_classification": str(result.get("error_classification") or ""),
+            "continuity": result.get("continuity") if isinstance(result.get("continuity"), dict) else {},
             "raw": response,
         }
         result["response"] = normalized
@@ -1734,6 +1853,7 @@ class XynApiAdapter:
             paths=paths,
             json_payload=dict(payload or {}),
             base_urls=self._planner_base_urls(),
+            allow_reissue_on_transport_error=False,
         )
         return self._normalize_change_session_result(
             result,
@@ -2471,6 +2591,159 @@ class XynApiAdapter:
             )
         return rows
 
+    @staticmethod
+    def _extract_planner_prompt_contract(response_body: Dict[str, Any]) -> Dict[str, Any]:
+        control = response_body.get("control") if isinstance(response_body.get("control"), dict) else {}
+        session = control.get("session") if isinstance(control.get("session"), dict) else {}
+        planning = session.get("planning") if isinstance(session.get("planning"), dict) else {}
+
+        prompt_candidates: list[Dict[str, Any]] = []
+        for candidate in (
+            planning.get("pending_prompt"),
+            planning.get("planner_prompt"),
+            planning.get("prompt"),
+            response_body.get("pending_prompt"),
+            response_body.get("planner_prompt"),
+            response_body.get("prompt"),
+        ):
+            if isinstance(candidate, dict):
+                prompt_candidates.append(candidate)
+
+        prompt = prompt_candidates[0] if prompt_candidates else {}
+        if not prompt and isinstance(planning.get("prompts"), list) and planning.get("prompts"):
+            first = planning.get("prompts")[0]
+            if isinstance(first, dict):
+                prompt = first
+
+        status_token = str(prompt.get("status") or planning.get("prompt_status") or "").strip().lower()
+        pending = bool(prompt) and status_token not in {"resolved", "dismissed", "answered", "complete"}
+        if not prompt and str(planning.get("pending_planner_prompt") or "").strip():
+            pending = True
+
+        response_schema = prompt.get("response_schema")
+        if not isinstance(response_schema, dict):
+            response_schema = {}
+        response_examples = prompt.get("response_examples")
+        if not isinstance(response_examples, list):
+            response_examples = []
+        option_set = prompt.get("option_set") if isinstance(prompt.get("option_set"), dict) else {}
+        options = option_set.get("options") if isinstance(option_set.get("options"), list) else []
+        canonical_option_ids = [
+            str(item.get("id") or item.get("option_id") or "").strip()
+            for item in options
+            if isinstance(item, dict) and str(item.get("id") or item.get("option_id") or "").strip()
+        ]
+
+        expected_response_kind = str(
+            prompt.get("expected_response_kind")
+            or option_set.get("expected_response_kind")
+            or ("option_set" if canonical_option_ids else "")
+        ).strip()
+        allows_multiple = bool(
+            prompt.get("allows_multiple")
+            or option_set.get("allows_multiple")
+            or response_schema.get("allows_multiple")
+        )
+        return {
+            "pending": pending,
+            "prompt_id": str(prompt.get("id") or prompt.get("prompt_id") or "").strip(),
+            "message": str(prompt.get("message") or prompt.get("text") or "").strip(),
+            "expected_response_kind": expected_response_kind,
+            "allows_multiple": allows_multiple,
+            "canonical_option_identifiers": canonical_option_ids,
+            "response_schema": response_schema,
+            "response_examples": response_examples,
+        }
+
+    @staticmethod
+    def _assessment_state(
+        *,
+        error_classification: str,
+        blocked_reason: str,
+        prompt_pending: bool,
+        status_code: int,
+        continuity_retry_reason: str,
+    ) -> str:
+        if error_classification == "auth_expired":
+            return "auth_expired"
+        if error_classification == "contract_mismatch":
+            return "control_contract_failure"
+        if status_code == 404 or blocked_reason in {"not_found", "session_not_found", "session_stale"}:
+            return "session_stale"
+        if prompt_pending:
+            return "planner_prompt_pending"
+        if continuity_retry_reason == "binding_rotated":
+            return "binding_rotated"
+        return "ready"
+
+    def assess_change_session_readiness(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+        inspected = self.inspect_change_session_control(application_id=application_id, session_id=session_id)
+        normalized = self._normalize_change_session_result(
+            inspected,
+            application_id=application_id,
+            session_id=session_id,
+            default_next_allowed_actions=[
+                "run_change_session_control_action",
+                "get_application_change_session_plan",
+                "stage_apply_application_change_session",
+            ],
+        )
+        body = normalized.get("response") if isinstance(normalized.get("response"), dict) else {}
+        raw = body.get("raw") if isinstance(body.get("raw"), dict) else {}
+        continuity = body.get("continuity") if isinstance(body.get("continuity"), dict) else {}
+        prompt = self._extract_planner_prompt_contract(raw)
+        status_code = int(normalized.get("status_code") or 0)
+        error_classification = str(body.get("error_classification") or normalized.get("error_classification") or "").strip()
+        blocked_reason = str(body.get("blocked_reason") or "").strip()
+        retry_reason = str(continuity.get("retry_reason") or "").strip()
+
+        auth_state = "fresh" if normalized.get("ok") else ("expired" if error_classification == "auth_expired" else "unknown")
+        assessment_state = self._assessment_state(
+            error_classification=error_classification,
+            blocked_reason=blocked_reason,
+            prompt_pending=bool(prompt.get("pending")),
+            status_code=status_code,
+            continuity_retry_reason=retry_reason,
+        )
+        stale_session_context = assessment_state == "session_stale"
+        binding_base_url = str(normalized.get("base_url") or self._config.control_api_base_url).rstrip("/")
+        binding_path = f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/control"
+        assessment = {
+            "assessment_state": assessment_state,
+            "binding": {
+                "tool_identity": "inspect_change_session_control",
+                "control_path": binding_path,
+                "binding_id": self._binding_id(binding_base_url, binding_path),
+                "base_url": binding_base_url,
+                "previous_binding_id": str(continuity.get("previous_binding_id") or ""),
+                "new_binding_id": str(continuity.get("new_binding_id") or ""),
+                "retry_reason": retry_reason,
+                "auth_refreshed": bool(continuity.get("auth_refreshed")),
+                "action_reissued": bool(continuity.get("action_reissued")),
+            },
+            "auth_session": {
+                "state": auth_state,
+                "request_bearer_present": bool(get_request_bearer_token()),
+                "configured_bearer_present": bool(str(self._config.bearer_token or "").strip()),
+            },
+            "context": {
+                "application_id": str(application_id),
+                "session_id": str(session_id),
+                "stale_session_context": stale_session_context,
+            },
+            "planner_prompt": prompt,
+            "allowed_next_actions": body.get("next_allowed_actions") if isinstance(body.get("next_allowed_actions"), list) else [],
+            "retry_safety": {
+                "idempotent_reads_safe": True,
+                "control_actions_safe_when_idempotency_key_present": True,
+                "session_create_safe_for_auto_retry": False,
+            },
+            "last_known_error_classification": error_classification,
+            "blocked_reason": blocked_reason,
+        }
+        normalized["response"] = assessment
+        return normalized
+
     def list_change_session_pending_checkpoints(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
         result = self.inspect_change_session_control(application_id=application_id, session_id=session_id)
         response_body = result.get("response") if isinstance(result.get("response"), dict) else {}
@@ -2586,6 +2859,7 @@ class XynApiAdapter:
             )
         payload = dict(action_payload or {})
         payload["operation"] = str(operation or "").strip()
+        allow_reissue_on_transport_error = bool(str(payload.get("idempotency_key") or "").strip())
         paths = [
             f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/control/actions",
             f"/api/v1/applications/{application_id}/change-sessions/{session_id}/control/actions",
@@ -2595,6 +2869,7 @@ class XynApiAdapter:
             paths=paths,
             json_payload=payload,
             base_urls=self._planner_base_urls(),
+            allow_reissue_on_transport_error=allow_reissue_on_transport_error,
         )
         return self._normalize_planner_route_error(result, attempted_paths=paths)
 
