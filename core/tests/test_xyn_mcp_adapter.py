@@ -580,7 +580,7 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(((body.get("linked_change_session") or {}).get("application_id")), "app-1")
         urls = [call.kwargs.get("url") for call in mock_request.call_args_list]
         self.assertIn("http://xyn-core:8000/api/v1/change-efforts/eff-9", urls)
-        self.assertIn("http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/control", urls)
+        self.assertIn("http://xyn.local:8001/xyn/api/change-sessions/sess-1/control", urls)
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_effort_changed_files_falls_back_to_effort_metadata_when_endpoint_missing(self, mock_request: mock.Mock) -> None:
@@ -854,7 +854,7 @@ class XynMcpAdapterTests(TestCase):
         urls = [call.kwargs.get("url") for call in mock_request.call_args_list]
         self.assertIn("http://xyn.local:8001/xyn/api/applications/app-1/change-sessions", urls)
         self.assertEqual(
-            urls.count("http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/control/actions"),
+            urls.count("http://xyn.local:8001/xyn/api/change-sessions/sess-1/control/actions"),
             4,
         )
         action_bodies = [call.kwargs.get("json") for call in mock_request.call_args_list if call.kwargs.get("json")]
@@ -932,9 +932,9 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual((rollback_result.get("response") or {}).get("promotion_evidence_ids"), ["rb-1"])
 
         urls = [call.kwargs.get("url") for call in mock_request.call_args_list]
-        self.assertEqual(urls[0], "http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/control/actions")
-        self.assertEqual(urls[1], "http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/promotion-evidence")
-        self.assertEqual(urls[2], "http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/control/actions")
+        self.assertEqual(urls[0], "http://xyn.local:8001/xyn/api/change-sessions/sess-1/control/actions")
+        self.assertEqual(urls[1], "http://xyn.local:8001/xyn/api/change-sessions/sess-1/promotion-evidence")
+        self.assertEqual(urls[2], "http://xyn.local:8001/xyn/api/change-sessions/sess-1/control/actions")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_compact_preview_status_isolated_preview_success(self, mock_request: mock.Mock) -> None:
@@ -1277,6 +1277,440 @@ class XynMcpAdapterTests(TestCase):
             "http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/runtime-runs/run-1",
             urls,
         )
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_create_decomposition_campaign_supports_artifact_scope(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 201
+        response.json.return_value = {
+            "created": True,
+            "application_id": "app-artifact-1",
+            "artifact_id": "art-1",
+            "artifact_slug": "xyn-api",
+            "scope_type": "artifact",
+            "scope": {
+                "scope_type": "artifact",
+                "application_id": "app-artifact-1",
+                "artifact_id": "art-1",
+                "artifact_slug": "xyn-api",
+                "workspace_id": "ws-1",
+            },
+            "session": {
+                "id": "sess-1",
+                "application_id": "app-artifact-1",
+                "scope_type": "artifact",
+                "scope": {
+                    "scope_type": "artifact",
+                    "application_id": "app-artifact-1",
+                    "artifact_id": "art-1",
+                    "artifact_slug": "xyn-api",
+                    "workspace_id": "ws-1",
+                },
+            },
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.create_decomposition_campaign(
+            artifact_id="art-1",
+            artifact_slug="xyn-api",
+            workspace_id="ws-1",
+            target_source_files=["backend/xyn_orchestrator/xyn_api.py"],
+        )
+        self.assertTrue(result.get("ok"))
+        body = result.get("response") or {}
+        self.assertEqual(body.get("scope_type"), "artifact")
+        scope = body.get("scope") or {}
+        self.assertEqual(scope.get("artifact_id"), "art-1")
+        self.assertEqual(scope.get("artifact_slug"), "xyn-api")
+        self.assertEqual(scope.get("workspace_id"), "ws-1")
+        called = mock_request.call_args.kwargs
+        self.assertEqual(called.get("method"), "POST")
+        self.assertEqual(called.get("url"), "http://xyn.local:8001/xyn/api/change-sessions")
+        payload = called.get("json") or {}
+        self.assertEqual(payload.get("artifact_id"), "art-1")
+        self.assertEqual(payload.get("artifact_slug"), "xyn-api")
+        self.assertEqual(payload.get("workspace_id"), "ws-1")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_create_decomposition_campaign_artifact_scope_classifies_missing_artifact(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 404
+        response.json.return_value = {
+            "error": "artifact not found",
+            "blocked_reason": "artifact_not_found",
+            "error_classification": "artifact_not_found",
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.create_decomposition_campaign(
+            artifact_slug="xyn-api",
+            workspace_id="ws-1",
+        )
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("error_classification"), "artifact_not_found")
+        body = result.get("response") or {}
+        self.assertEqual(body.get("blocked_reason"), "artifact_not_found")
+        self.assertEqual(body.get("scope_type"), "artifact")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_create_decomposition_campaign_application_and_artifact_uses_unified_scope_endpoint(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 409
+        response.json.return_value = {
+            "error": "application/artifact scope mismatch",
+            "blocked_reason": "contract_mismatch",
+            "error_classification": "contract_mismatch",
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.create_decomposition_campaign(
+            application_id="app-1",
+            artifact_slug="xyn-api",
+            workspace_id="ws-1",
+            target_source_files=["backend/xyn_orchestrator/xyn_api.py"],
+        )
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("error_classification"), "contract_mismatch")
+        called = mock_request.call_args.kwargs
+        self.assertEqual(called.get("url"), "http://xyn.local:8001/xyn/api/change-sessions")
+        payload = called.get("json") or {}
+        self.assertEqual(payload.get("application_id"), "app-1")
+        self.assertEqual(payload.get("artifact_slug"), "xyn-api")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_create_decomposition_campaign_without_explicit_artifact_allows_backend_inference(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 201
+        response.json.return_value = {
+            "created": True,
+            "application_id": "app-artifact-1",
+            "scope_type": "artifact",
+            "scope": {
+                "scope_type": "artifact",
+                "application_id": "app-artifact-1",
+                "artifact_id": "art-1",
+                "artifact_slug": "xyn-api",
+                "workspace_id": "ws-1",
+            },
+            "session": {"id": "sess-1", "application_id": "app-artifact-1"},
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.create_decomposition_campaign(
+            workspace_id="ws-1",
+            target_source_files=["backend/xyn_orchestrator/xyn_api.py"],
+        )
+        self.assertTrue(result.get("ok"))
+        called = mock_request.call_args.kwargs
+        self.assertEqual(called.get("url"), "http://xyn.local:8001/xyn/api/change-sessions")
+        payload = called.get("json") or {}
+        self.assertEqual(payload.get("workspace_id"), "ws-1")
+        self.assertNotIn("artifact_id", payload)
+        self.assertNotIn("artifact_slug", payload)
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_inspect_change_session_control_supports_session_scoped_route_when_application_unknown(
+        self, mock_request: mock.Mock
+    ) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "control": {"session": {"id": "sess-1", "status": "draft"}},
+            "next_allowed_actions": ["stage_apply_application_change_session"],
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.inspect_change_session_control(application_id="", session_id="sess-1")
+        self.assertTrue(result.get("ok"))
+        called = mock_request.call_args.kwargs
+        self.assertEqual(called.get("url"), "http://xyn.local:8001/xyn/api/change-sessions/sess-1/control")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_decide_checkpoint_supports_session_scoped_route_when_application_unknown(self, mock_request: mock.Mock) -> None:
+        decision = mock.Mock()
+        decision.status_code = 200
+        decision.json.return_value = {"recorded": True}
+        mock_request.return_value = decision
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.decide_change_session_checkpoint(
+            application_id="",
+            session_id="sess-1",
+            checkpoint_id="cp-1",
+            decision="approved",
+        )
+        self.assertTrue(result.get("ok"))
+        called = mock_request.call_args.kwargs
+        self.assertEqual(
+            called.get("url"),
+            "http://xyn.local:8001/xyn/api/change-sessions/sess-1/checkpoints/cp-1/decision",
+        )
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_artifact_scoped_control_read_preserves_scope_after_route_fallback(self, mock_request: mock.Mock) -> None:
+        first = mock.Mock()
+        first.status_code = 404
+        first.json.return_value = {"detail": "Not Found"}
+        second = mock.Mock()
+        second.status_code = 404
+        second.json.return_value = {"detail": "Not Found"}
+        third = mock.Mock()
+        third.status_code = 200
+        third.json.return_value = {
+            "session_id": "sess-1",
+            "application_id": "app-1",
+            "scope_type": "artifact",
+            "scope": {
+                "scope_type": "artifact",
+                "application_id": "app-1",
+                "artifact_id": "art-1",
+                "artifact_slug": "xyn-api",
+                "workspace_id": "ws-1",
+            },
+            "next_allowed_actions": ["stage_apply_application_change_session"],
+            "control": {"session": {"id": "sess-1", "status": "draft"}},
+        }
+        mock_request.side_effect = [first, second, third]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.inspect_change_session_control(application_id="stale-app", session_id="sess-1")
+        self.assertTrue(result.get("ok"))
+        body = result.get("response") or {}
+        self.assertEqual(body.get("scope_type"), "artifact")
+        scope = body.get("scope") or {}
+        self.assertEqual(scope.get("artifact_id"), "art-1")
+        self.assertEqual(scope.get("artifact_slug"), "xyn-api")
+        self.assertEqual(body.get("session_id"), "sess-1")
+        self.assertEqual(body.get("next_allowed_actions"), ["stage_apply_application_change_session"])
+        urls = [call.kwargs.get("url") for call in mock_request.call_args_list]
+        self.assertIn("http://xyn.local:8001/xyn/api/applications/stale-app/change-sessions/sess-1/control", urls)
+        self.assertIn("http://xyn.local:8001/xyn/api/change-sessions/sess-1/control", urls)
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_artifact_identity_parity_across_registry_source_and_decomposition(self, mock_request: mock.Mock) -> None:
+        listed = mock.Mock()
+        listed.status_code = 200
+        listed.json.return_value = {"artifacts": [{"id": "art-1", "slug": "xyn-api", "title": "xyn-api"}]}
+        tree = mock.Mock()
+        tree.status_code = 200
+        tree.json.return_value = {
+            "artifact": {"id": "art-1", "slug": "xyn-api"},
+            "source_mode": "resolved_source",
+            "files": [{"path": "backend/xyn_orchestrator/xyn_api.py"}],
+        }
+        create = mock.Mock()
+        create.status_code = 201
+        create.json.return_value = {
+            "application_id": "app-1",
+            "session": {"id": "sess-1"},
+            "scope_type": "artifact",
+            "scope": {
+                "scope_type": "artifact",
+                "application_id": "app-1",
+                "artifact_id": "art-1",
+                "artifact_slug": "xyn-api",
+                "workspace_id": "ws-1",
+            },
+        }
+        mock_request.side_effect = [listed, tree, create]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                code_api_base_url="http://xyn-core:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        artifacts = adapter.list_artifacts()
+        artifact_id = ((artifacts.get("response") or {}).get("artifacts") or [{}])[0].get("id")
+        self.assertEqual(artifact_id, "art-1")
+        source_tree = adapter.get_artifact_source_tree(artifact_id=str(artifact_id))
+        self.assertTrue(source_tree.get("ok"))
+        campaign = adapter.create_decomposition_campaign(
+            artifact_id=str(artifact_id),
+            artifact_slug="xyn-api",
+            workspace_id="ws-1",
+            target_source_files=["backend/xyn_orchestrator/xyn_api.py"],
+        )
+        self.assertTrue(campaign.get("ok"))
+        scope = (campaign.get("response") or {}).get("scope") or {}
+        self.assertEqual(scope.get("artifact_id"), "art-1")
+        self.assertEqual(scope.get("artifact_slug"), "xyn-api")
+        create_call = mock_request.call_args_list[-1].kwargs
+        payload = create_call.get("json") or {}
+        self.assertEqual(payload.get("artifact_id"), "art-1")
+        self.assertEqual(payload.get("artifact_slug"), "xyn-api")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_artifact_scoped_stage_apply_without_application_id_uses_session_control_route(
+        self, mock_request: mock.Mock
+    ) -> None:
+        response = mock.Mock()
+        response.status_code = 202
+        response.json.return_value = {
+            "session_id": "sess-1",
+            "scope_type": "artifact",
+            "scope": {
+                "scope_type": "artifact",
+                "artifact_id": "art-1",
+                "artifact_slug": "xyn-api",
+                "workspace_id": "ws-1",
+            },
+            "next_allowed_actions": ["list_runtime_runs"],
+            "status": "in_progress",
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.stage_apply_application_change_session(
+            session_id="sess-1",
+            payload={"dispatch_runtime": True},
+        )
+        self.assertTrue(result.get("ok"))
+        body = result.get("response") or {}
+        self.assertEqual(body.get("scope_type"), "artifact")
+        scope = body.get("scope") or {}
+        self.assertEqual(scope.get("artifact_slug"), "xyn-api")
+        called = mock_request.call_args.kwargs
+        self.assertEqual(called.get("url"), "http://xyn.local:8001/xyn/api/change-sessions/sess-1/control/actions")
+
+    def test_tool_contract_allows_artifact_scoped_session_operations(self) -> None:
+        adapter = mock.Mock()
+        server = FakeMcpServer()
+        register_xyn_tools(server, adapter)
+
+        server.tools["create_decomposition_campaign"]["fn"](
+            artifact_slug="xyn-api",
+            workspace_id="ws-1",
+            target_source_files=["backend/xyn_orchestrator/xyn_api.py"],
+        )
+        adapter.create_decomposition_campaign.assert_called_with(
+            application_id="",
+            artifact_id="",
+            artifact_slug="xyn-api",
+            workspace_id="ws-1",
+            target_source_files=["backend/xyn_orchestrator/xyn_api.py"],
+            extraction_seams=None,
+            moved_handlers_modules=None,
+            required_test_suites=None,
+            payload=None,
+        )
+
+        server.tools["stage_apply_application_change_session"]["fn"](session_id="sess-1", payload={"dispatch_runtime": True})
+        adapter.stage_apply_application_change_session.assert_called_with(
+            application_id="",
+            session_id="sess-1",
+            payload={"dispatch_runtime": True},
+        )
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_decomposition_observability_works_without_application_id(self, mock_request: mock.Mock) -> None:
+        control = mock.Mock()
+        control.status_code = 200
+        control.json.return_value = {
+            "session_id": "sess-1",
+            "scope_type": "artifact",
+            "scope": {
+                "scope_type": "artifact",
+                "application_id": "app-1",
+                "artifact_id": "art-1",
+                "artifact_slug": "xyn-api",
+                "workspace_id": "ws-1",
+            },
+            "next_allowed_actions": ["stage_apply_application_change_session"],
+        }
+        metrics = mock.Mock()
+        metrics.status_code = 200
+        metrics.json.return_value = {"metrics": [{"path": "xyn_orchestrator/xyn_api.py", "loc": 1000}], "count": 1}
+        analysis = mock.Mock()
+        analysis.status_code = 200
+        analysis.json.return_value = {
+            "source_mode": "resolved_source",
+            "route_inventory": {"count": 10},
+            "route_inventory_delta": {"changed": 0},
+            "summary": {"largest_module": "xyn_orchestrator/xyn_api.py"},
+            "warnings": [],
+        }
+        mock_request.side_effect = [control, metrics, analysis]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                code_api_base_url="http://xyn-core:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.get_decomposition_observability(session_id="sess-1")
+        self.assertTrue(result.get("ok"))
+        body = result.get("response") or {}
+        self.assertEqual(body.get("scope_type"), "artifact")
+        self.assertEqual((body.get("scope") or {}).get("artifact_id"), "art-1")
+        self.assertEqual(body.get("artifact_id"), "art-1")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_runtime_run_inspection_failure_surfaces_logs_and_errors(self, mock_request: mock.Mock) -> None:
@@ -1973,10 +2407,10 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(mock_request.call_count, 2)
         inspect_kwargs = mock_request.call_args_list[0].kwargs
         decide_kwargs = mock_request.call_args_list[1].kwargs
-        self.assertEqual(inspect_kwargs["url"], "http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/control")
+        self.assertEqual(inspect_kwargs["url"], "http://xyn.local:8001/xyn/api/change-sessions/sess-1/control")
         self.assertEqual(
             decide_kwargs["url"],
-            "http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/checkpoints/cp-123/decision",
+            "http://xyn.local:8001/xyn/api/change-sessions/sess-1/checkpoints/cp-123/decision",
         )
         self.assertEqual(decide_kwargs["json"]["decision"], "approved")
 
@@ -2006,7 +2440,7 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(kwargs["method"], "GET")
         self.assertEqual(
             kwargs["url"],
-            "http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/control",
+            "http://xyn.local:8001/xyn/api/change-sessions/sess-1/control",
         )
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer token-1")
         self.assertEqual(kwargs["headers"]["X-Internal-Token"], "int-1")
@@ -2621,7 +3055,7 @@ class XynMcpAdapterTests(TestCase):
         second_kwargs = mock_request.call_args_list[1].kwargs
         self.assertEqual(
             first_kwargs["url"],
-            "http://xyn.local:8001/xyn/api/applications/app-1/change-sessions/sess-1/control/actions",
+            "http://xyn.local:8001/xyn/api/change-sessions/sess-1/control/actions",
         )
         self.assertEqual(first_kwargs["url"], second_kwargs["url"])
         self.assertEqual((first_kwargs.get("headers") or {}).get("Authorization"), "Bearer request-token")
@@ -2751,7 +3185,10 @@ class XynMcpAdapterTests(TestCase):
             url = str(kwargs.get("url") or "")
             response = mock.Mock()
             response.headers = {}
-            if method == "GET" and url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control"):
+            if method == "GET" and (
+                url.endswith("/xyn/api/change-sessions/sess-1/control")
+                or url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control")
+            ):
                 response.status_code = 200
                 response.json.return_value = {
                     "control": {
@@ -2807,7 +3244,10 @@ class XynMcpAdapterTests(TestCase):
             url = str(kwargs.get("url") or "")
             response = mock.Mock()
             response.headers = {}
-            if method == "GET" and url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control"):
+            if method == "GET" and (
+                url.endswith("/xyn/api/change-sessions/sess-1/control")
+                or url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control")
+            ):
                 response.status_code = 200
                 response.json.return_value = {
                     "control": {
@@ -2857,7 +3297,10 @@ class XynMcpAdapterTests(TestCase):
             url = str(kwargs.get("url") or "")
             response = mock.Mock()
             response.headers = {}
-            if method == "GET" and url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control"):
+            if method == "GET" and (
+                url.endswith("/xyn/api/change-sessions/sess-1/control")
+                or url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control")
+            ):
                 response.status_code = 200
                 response.json.return_value = {
                     "control": {
@@ -2877,7 +3320,10 @@ class XynMcpAdapterTests(TestCase):
                     }
                 }
                 return response
-            if method == "POST" and url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control/actions"):
+            if method == "POST" and (
+                url.endswith("/xyn/api/change-sessions/sess-1/control/actions")
+                or url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control/actions")
+            ):
                 seen_payloads.append(dict(kwargs.get("json") or {}))
                 response.status_code = 200
                 response.json.return_value = {"status": "ok"}
@@ -2924,7 +3370,10 @@ class XynMcpAdapterTests(TestCase):
             calls.append((method, url))
             response = mock.Mock()
             response.headers = {}
-            if method == "GET" and url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control"):
+            if method == "GET" and (
+                url.endswith("/xyn/api/change-sessions/sess-1/control")
+                or url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control")
+            ):
                 if url.startswith("https://xyn.xyence.io/"):
                     response.status_code = 404
                     response.json.return_value = {"detail": "Not Found"}
@@ -2944,7 +3393,10 @@ class XynMcpAdapterTests(TestCase):
                     }
                 }
                 return response
-            if method == "POST" and url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control/actions"):
+            if method == "POST" and (
+                url.endswith("/xyn/api/change-sessions/sess-1/control/actions")
+                or url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control/actions")
+            ):
                 response.status_code = 200
                 response.json.return_value = {"status": "ok"}
                 return response
@@ -3005,7 +3457,10 @@ class XynMcpAdapterTests(TestCase):
             response = mock.Mock()
             response.headers = {}
             response.text = ""
-            if method == "GET" and url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control"):
+            if method == "GET" and (
+                url.endswith("/xyn/api/change-sessions/sess-1/control")
+                or url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control")
+            ):
                 if url.startswith("https://xyn.xyence.io/"):
                     seen_control_calls["xyn"] += 1
                     next_actions = (
@@ -3083,7 +3538,10 @@ class XynMcpAdapterTests(TestCase):
             response = mock.Mock()
             response.headers = {}
             response.text = ""
-            if method == "POST" and url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control/actions"):
+            if method == "POST" and (
+                url.endswith("/xyn/api/change-sessions/sess-1/control/actions")
+                or url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control/actions")
+            ):
                 if url.startswith("https://xyn.xyence.io/"):
                     response.status_code = 404
                     response.json.return_value = {"detail": "Not Found"}
@@ -3123,7 +3581,8 @@ class XynMcpAdapterTests(TestCase):
         self.assertTrue(post_urls[-1].startswith("https://seed.xyence.io/"))
         self.assertTrue(
             all(
-                url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control/actions")
+                url.endswith("/xyn/api/change-sessions/sess-1/control/actions")
+                or url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control/actions")
                 or url.endswith("/api/v1/applications/app-1/change-sessions/sess-1/control/actions")
                 for url in post_urls
             )
@@ -3619,3 +4078,62 @@ class XynMcpAdapterTests(TestCase):
         payload = result.get("response") if isinstance(result.get("response"), dict) else {}
         self.assertEqual(payload.get("path"), "README.md")
         self.assertEqual(payload.get("content"), "line2")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_readiness_and_checkpoint_listing_preserve_artifact_scope_without_application_id(
+        self, mock_request: mock.Mock
+    ) -> None:
+        control_response = mock.Mock()
+        control_response.status_code = 200
+        control_response.headers = {}
+        control_response.json.return_value = {
+            "control": {
+                "session": {
+                    "id": "sess-art-1",
+                    "planning": {
+                        "pending_checkpoints": [
+                            {
+                                "id": "cp-1",
+                                "checkpoint_key": "planner_scope_review",
+                                "label": "Scope review",
+                                "status": "pending",
+                                "required_before": "stage_apply",
+                            }
+                        ]
+                    },
+                }
+            },
+            "scope_type": "artifact",
+            "scope": {
+                "scope_type": "artifact",
+                "artifact_id": "art-1",
+                "artifact_slug": "xyn-api",
+                "workspace_id": "ws-1",
+            },
+            "session_id": "sess-art-1",
+            "next_allowed_actions": ["decide_change_session_checkpoint"],
+        }
+        mock_request.return_value = control_response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        readiness = adapter.assess_change_session_readiness(session_id="sess-art-1")
+        self.assertTrue(readiness.get("ok"))
+        readiness_ctx = ((readiness.get("response") or {}).get("context") or {})
+        self.assertEqual(readiness_ctx.get("session_id"), "sess-art-1")
+        self.assertEqual(readiness_ctx.get("scope_type"), "artifact")
+        self.assertEqual(((readiness_ctx.get("scope") or {}).get("artifact_slug")), "xyn-api")
+
+        pending = adapter.list_change_session_pending_checkpoints(session_id="sess-art-1")
+        self.assertTrue(pending.get("ok"))
+        pending_body = pending.get("response") if isinstance(pending.get("response"), dict) else {}
+        self.assertEqual(pending_body.get("session_id"), "sess-art-1")
+        self.assertEqual(pending_body.get("scope_type"), "artifact")
+        self.assertEqual(((pending_body.get("scope") or {}).get("artifact_id")), "art-1")

@@ -159,14 +159,17 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     def list_application_change_sessions(application_id: str) -> Dict[str, Any]:
         return adapter.list_application_change_sessions(application_id=application_id)
 
-    def get_application_change_session(application_id: str, session_id: str) -> Dict[str, Any]:
+    def get_application_change_session(application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         return adapter.get_application_change_session(application_id=application_id, session_id=session_id)
 
     def create_application_change_session(application_id: str, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
         return adapter.create_application_change_session(application_id=application_id, payload=payload)
 
     def create_decomposition_campaign(
-        application_id: str,
+        application_id: str = "",
+        artifact_id: str = "",
+        artifact_slug: str = "",
+        workspace_id: str = "",
         target_source_files: list[str] | None = None,
         extraction_seams: list[str] | None = None,
         moved_handlers_modules: list[str] | None = None,
@@ -175,6 +178,9 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     ) -> Dict[str, Any]:
         return adapter.create_decomposition_campaign(
             application_id=application_id,
+            artifact_id=artifact_id,
+            artifact_slug=artifact_slug,
+            workspace_id=workspace_id,
             target_source_files=target_source_files,
             extraction_seams=extraction_seams,
             moved_handlers_modules=moved_handlers_modules,
@@ -182,15 +188,15 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
             payload=payload,
         )
 
-    def get_decomposition_campaign(application_id: str, session_id: str) -> Dict[str, Any]:
+    def get_decomposition_campaign(application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         return adapter.get_decomposition_campaign(application_id=application_id, session_id=session_id)
 
-    def inspect_decomposition_guardrails(application_id: str, session_id: str) -> Dict[str, Any]:
+    def inspect_decomposition_guardrails(application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         return adapter.inspect_decomposition_guardrails(application_id=application_id, session_id=session_id)
 
     def get_decomposition_observability(
-        application_id: str,
-        session_id: str,
+        application_id: str = "",
+        session_id: str = "",
         artifact_id: str = "",
         artifact_slug: str = "",
         top_n: int = 50,
@@ -203,12 +209,12 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
             top_n=top_n,
         )
 
-    def get_application_change_session_plan(application_id: str, session_id: str) -> Dict[str, Any]:
+    def get_application_change_session_plan(application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         return adapter.get_application_change_session_plan(application_id=application_id, session_id=session_id)
 
     def stage_apply_application_change_session(
-        application_id: str,
-        session_id: str,
+        application_id: str = "",
+        session_id: str = "",
         payload: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         return adapter.stage_apply_application_change_session(
@@ -218,8 +224,8 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
         )
 
     def prepare_preview_application_change_session(
-        application_id: str,
-        session_id: str,
+        application_id: str = "",
+        session_id: str = "",
         payload: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         return adapter.prepare_preview_application_change_session(
@@ -228,12 +234,12 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
             payload=payload,
         )
 
-    def get_application_change_session_preview_status(application_id: str, session_id: str) -> Dict[str, Any]:
+    def get_application_change_session_preview_status(application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         return adapter.get_application_change_session_preview_status(application_id=application_id, session_id=session_id)
 
     def validate_application_change_session(
-        application_id: str,
-        session_id: str,
+        application_id: str = "",
+        session_id: str = "",
         payload: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         return adapter.validate_application_change_session(
@@ -243,8 +249,8 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
         )
 
     def commit_application_change_session(
-        application_id: str,
-        session_id: str,
+        application_id: str = "",
+        session_id: str = "",
         payload: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         return adapter.commit_application_change_session(
@@ -254,8 +260,8 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
         )
 
     def promote_application_change_session(
-        application_id: str,
-        session_id: str,
+        application_id: str = "",
+        session_id: str = "",
         payload: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         return adapter.promote_application_change_session(
@@ -265,8 +271,8 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
         )
 
     def rollback_application_change_session(
-        application_id: str,
-        session_id: str,
+        application_id: str = "",
+        session_id: str = "",
         payload: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         return adapter.rollback_application_change_session(
@@ -275,10 +281,10 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
             payload=payload,
         )
 
-    def get_application_change_session_commits(application_id: str, session_id: str) -> Dict[str, Any]:
+    def get_application_change_session_commits(application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         return adapter.get_application_change_session_commits(application_id=application_id, session_id=session_id)
 
-    def get_application_change_session_promotion_evidence(application_id: str, session_id: str) -> Dict[str, Any]:
+    def get_application_change_session_promotion_evidence(application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         return adapter.get_application_change_session_promotion_evidence(application_id=application_id, session_id=session_id)
 
     def list_runtime_runs(
@@ -437,27 +443,27 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     def get_provider_capabilities(provider_key: str) -> Dict[str, Any]:
         return adapter.get_provider_capabilities(provider_key=provider_key)
 
-    def inspect_change_session_control(application_id: str, session_id: str) -> Dict[str, Any]:
+    def inspect_change_session_control(application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         return adapter.inspect_change_session_control(
             application_id=application_id,
             session_id=session_id,
         )
 
-    def assess_change_session_readiness(application_id: str, session_id: str) -> Dict[str, Any]:
+    def assess_change_session_readiness(application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         return adapter.assess_change_session_readiness(
             application_id=application_id,
             session_id=session_id,
         )
 
-    def list_change_session_pending_checkpoints(application_id: str, session_id: str) -> Dict[str, Any]:
+    def list_change_session_pending_checkpoints(application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         return adapter.list_change_session_pending_checkpoints(
             application_id=application_id,
             session_id=session_id,
         )
 
     def decide_change_session_checkpoint(
-        application_id: str,
-        session_id: str,
+        application_id: str = "",
+        session_id: str = "",
         checkpoint_id: str = "",
         decision: str = "approved",
         notes: str = "",
@@ -471,9 +477,9 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
         )
 
     def run_change_session_control_action(
-        application_id: str,
-        session_id: str,
-        operation: str,
+        application_id: str = "",
+        session_id: str = "",
+        operation: str = "",
         action_payload: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         return adapter.run_change_session_control_action(
@@ -483,7 +489,7 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
             action_payload=action_payload,
         )
 
-    def get_change_session_promotion_evidence(application_id: str, session_id: str) -> Dict[str, Any]:
+    def get_change_session_promotion_evidence(application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         return adapter.get_change_session_promotion_evidence(
             application_id=application_id,
             session_id=session_id,

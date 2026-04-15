@@ -39,6 +39,10 @@ _MCP_FAILURE_CLASSES = {
     "backend_server_error",
     "contract_mismatch",
     "transient_transport_failure",
+    "application_not_found",
+    "artifact_not_found",
+    "scope_resolution_failed",
+    "unsupported_scope_mode",
     "unknown_mcp_failure",
 }
 
@@ -184,12 +188,17 @@ class XynApiAdapter:
 
     @staticmethod
     def _change_session_control_paths(handle: ChangeSessionHandle, *, suffix: str = "") -> list[str]:
-        base = f"/applications/{handle.application_id}/change-sessions/{handle.session_id}"
         normalized_suffix = f"/{str(suffix or '').lstrip('/')}" if str(suffix or "").strip() else ""
-        return [
-            f"/xyn/api{base}{normalized_suffix}",
-            f"/api/v1{base}{normalized_suffix}",
-        ]
+        paths: list[str] = []
+        if str(handle.session_id or "").strip():
+            session_base = f"/change-sessions/{handle.session_id}"
+            paths.append(f"/xyn/api{session_base}{normalized_suffix}")
+            paths.append(f"/api/v1{session_base}{normalized_suffix}")
+        if str(handle.application_id or "").strip():
+            base = f"/applications/{handle.application_id}/change-sessions/{handle.session_id}"
+            paths.append(f"/xyn/api{base}{normalized_suffix}")
+            paths.append(f"/api/v1{base}{normalized_suffix}")
+        return paths
 
     def _planner_binding_reordered_bases(
         self,
@@ -356,7 +365,12 @@ class XynApiAdapter:
     @staticmethod
     def _is_planner_path(path: str) -> bool:
         normalized = str(path or "").strip()
-        return normalized.startswith("/xyn/api/applications") or normalized.startswith("/api/v1/applications")
+        return (
+            normalized.startswith("/xyn/api/applications")
+            or normalized.startswith("/api/v1/applications")
+            or normalized.startswith("/xyn/api/change-sessions")
+            or normalized.startswith("/api/v1/change-sessions")
+        )
 
     def _planner_base_urls(self) -> list[str]:
         base_urls = [base for base in self._control_api_base_urls() if str(base or "").strip()]
@@ -1459,6 +1473,7 @@ class XynApiAdapter:
         application_id: str = "",
         session_id: str = "",
         default_next_allowed_actions: Optional[list[str]] = None,
+        scope_hint: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         response = result.get("response")
         body = response if isinstance(response, dict) else {}
@@ -1489,18 +1504,82 @@ class XynApiAdapter:
                 blocked_reason = "upstream_error"
             else:
                 blocked_reason = "request_failed"
+        classification = str(result.get("error_classification") or "").strip()
+        if not classification:
+            if blocked_reason == "artifact_not_found":
+                classification = "artifact_not_found"
+            elif blocked_reason in {"scope_resolution_failed", "unsupported_scope_mode"}:
+                classification = blocked_reason
+            elif blocked_reason == "application_not_found":
+                classification = "application_not_found"
+            elif status_code in {400, 409, 422}:
+                classification = "backend_validation_error"
+            elif status_code >= 500:
+                classification = "backend_server_error"
+            elif status_code in {401, 403}:
+                classification = "auth_expired"
 
         next_allowed_actions = body.get("next_allowed_actions") if isinstance(body.get("next_allowed_actions"), list) else []
         if not next_allowed_actions:
             next_allowed_actions = list(default_next_allowed_actions or [])
 
+        scope = body.get("scope") if isinstance(body.get("scope"), dict) else {}
+        hint = scope_hint if isinstance(scope_hint, dict) else {}
+        hint_scope = hint.get("scope") if isinstance(hint.get("scope"), dict) else {}
+        scope_type = str(
+            body.get("scope_type")
+            or scope.get("scope_type")
+            or hint.get("scope_type")
+            or hint_scope.get("scope_type")
+            or "application"
+        ).strip().lower() or "application"
+        if scope_type not in {"application", "artifact"}:
+            scope_type = "application"
+        resolved_application_id = str(
+            application_id
+            or body.get("application_id")
+            or scope.get("application_id")
+            or hint.get("application_id")
+            or hint_scope.get("application_id")
+            or ""
+        )
+        resolved_session_id = str(session_id or body.get("session_id") or hint.get("session_id") or "")
+        resolved_artifact_id = str(
+            scope.get("artifact_id")
+            or body.get("artifact_id")
+            or hint.get("artifact_id")
+            or hint_scope.get("artifact_id")
+            or ""
+        )
+        resolved_artifact_slug = str(
+            scope.get("artifact_slug")
+            or body.get("artifact_slug")
+            or hint.get("artifact_slug")
+            or hint_scope.get("artifact_slug")
+            or ""
+        )
+        resolved_workspace_id = str(
+            scope.get("workspace_id")
+            or body.get("workspace_id")
+            or hint.get("workspace_id")
+            or hint_scope.get("workspace_id")
+            or ""
+        )
         normalized = {
-            "application_id": str(application_id or body.get("application_id") or ""),
-            "session_id": str(session_id or body.get("session_id") or ""),
+            "application_id": resolved_application_id,
+            "session_id": resolved_session_id,
+            "scope_type": scope_type,
+            "scope": {
+                "scope_type": scope_type,
+                "application_id": resolved_application_id,
+                "artifact_id": resolved_artifact_id,
+                "artifact_slug": resolved_artifact_slug,
+                "workspace_id": resolved_workspace_id,
+            },
             "change_session_handle": {
-                "application_id": str(application_id or body.get("application_id") or ""),
-                "session_id": str(session_id or body.get("session_id") or ""),
-                "workspace_id": str(body.get("workspace_id") or ""),
+                "application_id": resolved_application_id,
+                "session_id": resolved_session_id,
+                "workspace_id": resolved_workspace_id,
                 "artifact_scope": XynApiAdapter._extract_string_list(
                     body.get("raw") if isinstance(body.get("raw"), dict) else body,
                     {"selected_artifact_ids", "artifact_ids"},
@@ -1527,7 +1606,7 @@ class XynApiAdapter:
             "planner_prompt": XynApiAdapter._extract_planner_prompt_contract(
                 body.get("raw") if isinstance(body.get("raw"), dict) else body
             ),
-            "error_classification": str(result.get("error_classification") or ""),
+            "error_classification": classification,
             "action_delivery_state": str(result.get("action_delivery_state") or ""),
             "continuity": result.get("continuity") if isinstance(result.get("continuity"), dict) else {},
             "binding_state": result.get("binding_state") if isinstance(result.get("binding_state"), dict) else {},
@@ -2197,7 +2276,7 @@ class XynApiAdapter:
         }
         return result
 
-    def get_application_change_session(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+    def get_application_change_session(self, *, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
         paths = self._change_session_control_paths(handle)
         result = self._request_with_fallback_paths(
@@ -2210,7 +2289,7 @@ class XynApiAdapter:
         body = result.get("response") if isinstance(result.get("response"), dict) else {}
         result["response"] = {
             "change_session": self._change_session_discovery_row(body),
-            "application_id": str(application_id),
+            "application_id": str(application_id or body.get("application_id") or ""),
         }
         return result
 
@@ -2236,10 +2315,100 @@ class XynApiAdapter:
             ],
         )
 
+    def create_change_session_with_scope(
+        self,
+        *,
+        application_id: str = "",
+        artifact_id: str = "",
+        artifact_slug: str = "",
+        workspace_id: str = "",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        normalized_application_id = str(application_id or "").strip()
+        normalized_artifact_id = str(artifact_id or "").strip()
+        normalized_artifact_slug = str(artifact_slug or "").strip()
+        normalized_workspace_id = str(workspace_id or "").strip()
+
+        if normalized_application_id and not (normalized_artifact_id or normalized_artifact_slug):
+            result = self.create_application_change_session(
+                application_id=normalized_application_id,
+                payload=payload,
+            )
+            response = result.get("response") if isinstance(result.get("response"), dict) else {}
+            response["scope_type"] = str(response.get("scope_type") or "application")
+            response["scope"] = {
+                "scope_type": "application",
+                "application_id": str(response.get("application_id") or normalized_application_id),
+                "artifact_id": normalized_artifact_id,
+                "artifact_slug": normalized_artifact_slug,
+                "workspace_id": str(response.get("change_session_handle", {}).get("workspace_id") or normalized_workspace_id),
+            }
+            result["response"] = response
+            return result
+
+        request_payload = dict(payload or {})
+        if normalized_application_id:
+            request_payload["application_id"] = normalized_application_id
+        if normalized_workspace_id:
+            request_payload["workspace_id"] = normalized_workspace_id
+        if normalized_artifact_id:
+            request_payload["artifact_id"] = normalized_artifact_id
+        if normalized_artifact_slug:
+            request_payload["artifact_slug"] = normalized_artifact_slug
+        paths = ["/xyn/api/change-sessions"]
+        result = self._request_with_fallback_paths(
+            method="POST",
+            paths=paths,
+            json_payload=request_payload,
+            base_urls=self._planner_base_urls(),
+            allow_reissue_on_transport_error=False,
+        )
+        normalized = self._normalize_change_session_result(
+            result,
+            default_next_allowed_actions=[
+                "get_application_change_session",
+                "get_application_change_session_plan",
+                "stage_apply_application_change_session",
+            ],
+        )
+        body = normalized.get("response") if isinstance(normalized.get("response"), dict) else {}
+        scope_type = str(body.get("scope_type") or "artifact").strip().lower() or "artifact"
+        if scope_type not in {"application", "artifact"}:
+            scope_type = "artifact"
+        if not normalized.get("ok"):
+            blocked = str(body.get("blocked_reason") or "").strip().lower()
+            if blocked == "artifact_not_found":
+                normalized["error_classification"] = "artifact_not_found"
+            elif blocked == "application_not_found":
+                normalized["error_classification"] = "application_not_found"
+            elif blocked == "scope_resolution_failed":
+                normalized["error_classification"] = "scope_resolution_failed"
+            elif blocked in {"contract_mismatch", "unsupported_scope_mode"}:
+                normalized["error_classification"] = blocked
+            elif blocked == "workspace_forbidden":
+                normalized["error_classification"] = "auth_expired"
+            elif int(normalized.get("status_code") or 0) >= 500:
+                normalized["error_classification"] = "backend_server_error"
+            elif int(normalized.get("status_code") or 0) in {400, 409, 422}:
+                normalized["error_classification"] = "backend_validation_error"
+        body["scope_type"] = scope_type
+        body["scope"] = {
+            "scope_type": scope_type,
+            "application_id": str(body.get("application_id") or normalized_application_id),
+            "artifact_id": str((body.get("scope") or {}).get("artifact_id") or normalized_artifact_id),
+            "artifact_slug": str((body.get("scope") or {}).get("artifact_slug") or normalized_artifact_slug),
+            "workspace_id": str((body.get("scope") or {}).get("workspace_id") or normalized_workspace_id),
+        }
+        normalized["response"] = body
+        return normalized
+
     def create_decomposition_campaign(
         self,
         *,
-        application_id: str,
+        application_id: str = "",
+        artifact_id: str = "",
+        artifact_slug: str = "",
+        workspace_id: str = "",
         target_source_files: Optional[list[str]] = None,
         extraction_seams: Optional[list[str]] = None,
         moved_handlers_modules: Optional[list[str]] = None,
@@ -2255,18 +2424,29 @@ class XynApiAdapter:
             "required_test_suites": [str(item).strip() for item in (required_test_suites or []) if str(item).strip()],
             "promotion_readiness": str((request_payload.get("promotion_readiness") or "planning")).strip() or "planning",
         }
-        result = self.create_application_change_session(application_id=application_id, payload=request_payload)
+        result = self.create_change_session_with_scope(
+            application_id=application_id,
+            artifact_id=artifact_id,
+            artifact_slug=artifact_slug,
+            workspace_id=workspace_id,
+            payload=request_payload,
+        )
         if isinstance(result.get("response"), dict):
             result["response"]["decomposition_campaign"] = dict(request_payload["decomposition_campaign"])
         return result
 
-    def get_decomposition_campaign(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+    def get_decomposition_campaign(self, *, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
         result = self.inspect_change_session_control(handle=handle)
         normalized = self._normalize_change_session_result(
             result,
             application_id=application_id,
             session_id=session_id,
+            scope_hint={
+                "scope_type": "artifact",
+                "application_id": str(application_id or ""),
+                "session_id": str(session_id or ""),
+            },
             default_next_allowed_actions=[
                 "stage_apply_application_change_session",
                 "list_runtime_runs",
@@ -2277,9 +2457,13 @@ class XynApiAdapter:
             ],
         )
         body = normalized.get("response") if isinstance(normalized.get("response"), dict) else {}
+        scope = body.get("scope") if isinstance(body.get("scope"), dict) else {}
+        resolved_application_id = str(body.get("application_id") or scope.get("application_id") or application_id or "")
         normalized["response"] = {
-            "application_id": str(application_id),
-            "session_id": str(session_id),
+            "application_id": resolved_application_id,
+            "session_id": str(body.get("session_id") or session_id),
+            "scope_type": str(body.get("scope_type") or ""),
+            "scope": scope,
             "current_status": str(body.get("current_status") or ""),
             "next_allowed_actions": body.get("next_allowed_actions") if isinstance(body.get("next_allowed_actions"), list) else [],
             "blocked_reason": str(body.get("blocked_reason") or ""),
@@ -2293,13 +2477,18 @@ class XynApiAdapter:
         }
         return normalized
 
-    def inspect_decomposition_guardrails(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+    def inspect_decomposition_guardrails(self, *, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
         result = self.inspect_change_session_control(handle=handle)
         normalized = self._normalize_change_session_result(
             result,
             application_id=application_id,
             session_id=session_id,
+            scope_hint={
+                "scope_type": "artifact",
+                "application_id": str(application_id or ""),
+                "session_id": str(session_id or ""),
+            },
             default_next_allowed_actions=[
                 "stage_apply_application_change_session",
                 "prepare_preview_application_change_session",
@@ -2308,10 +2497,13 @@ class XynApiAdapter:
             ],
         )
         body = normalized.get("response") if isinstance(normalized.get("response"), dict) else {}
+        scope = body.get("scope") if isinstance(body.get("scope"), dict) else {}
         guardrails = body.get("guardrails") if isinstance(body.get("guardrails"), dict) else {}
         normalized["response"] = {
-            "application_id": str(application_id),
-            "session_id": str(session_id),
+            "application_id": str(body.get("application_id") or scope.get("application_id") or application_id or ""),
+            "session_id": str(body.get("session_id") or session_id),
+            "scope_type": str(body.get("scope_type") or ""),
+            "scope": scope,
             "current_status": str(body.get("current_status") or ""),
             "blocked_reason": str(body.get("blocked_reason") or ""),
             "guardrails": guardrails,
@@ -2324,8 +2516,8 @@ class XynApiAdapter:
     def get_decomposition_observability(
         self,
         *,
-        application_id: str,
-        session_id: str,
+        application_id: str = "",
+        session_id: str = "",
         artifact_id: str = "",
         artifact_slug: str = "",
         top_n: int = 50,
@@ -2334,6 +2526,7 @@ class XynApiAdapter:
         session_status = self.get_decomposition_campaign(application_id=handle.application_id, session_id=handle.session_id)
         body = session_status.get("response") if isinstance(session_status.get("response"), dict) else {}
         raw = body.get("raw") if isinstance(body.get("raw"), dict) else {}
+        scope = body.get("scope") if isinstance(body.get("scope"), dict) else {}
 
         resolved_artifact_id = str(artifact_id or "").strip()
         resolved_artifact_slug = str(artifact_slug or "").strip()
@@ -2369,11 +2562,13 @@ class XynApiAdapter:
             "ok": bool(session_status.get("ok")) and bool(metrics_result.get("ok")) and bool(analysis_result.get("ok")),
             "status_code": 200,
             "method": "GET",
-            "path": f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/decomposition-observability",
+            "path": f"/xyn/api/change-sessions/{session_id}/decomposition-observability",
             "base_url": str(self._config.control_api_base_url).rstrip("/"),
             "response": {
-                "application_id": str(application_id),
+                "application_id": str(body.get("application_id") or scope.get("application_id") or application_id or ""),
                 "session_id": str(session_id),
+                "scope_type": str(body.get("scope_type") or ""),
+                "scope": scope,
                 "artifact_id": resolved_artifact_id,
                 "artifact_slug": resolved_artifact_slug,
                 "current_status": str(body.get("current_status") or ""),
@@ -2393,7 +2588,7 @@ class XynApiAdapter:
             },
         }
 
-    def get_application_change_session_plan(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+    def get_application_change_session_plan(self, *, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
         attempted_paths = [
             *self._change_session_control_paths(handle, suffix="/plan"),
@@ -2422,6 +2617,11 @@ class XynApiAdapter:
             result,
             application_id=application_id,
             session_id=session_id,
+            scope_hint={
+                "scope_type": "artifact",
+                "application_id": str(application_id or ""),
+                "session_id": str(session_id or ""),
+            },
             default_next_allowed_actions=[
                 "stage_apply_application_change_session",
                 "prepare_preview_application_change_session",
@@ -2432,9 +2632,9 @@ class XynApiAdapter:
     def _run_application_change_session_operation(
         self,
         *,
-        application_id: str,
-        session_id: str,
-        operation: str,
+        application_id: str = "",
+        session_id: str = "",
+        operation: str = "",
         payload: Optional[Dict[str, Any]] = None,
         next_allowed_actions: Optional[list[str]] = None,
     ) -> Dict[str, Any]:
@@ -2448,11 +2648,16 @@ class XynApiAdapter:
             result,
             application_id=application_id,
             session_id=session_id,
+            scope_hint={
+                "scope_type": "artifact",
+                "application_id": str(application_id or ""),
+                "session_id": str(session_id or ""),
+            },
             default_next_allowed_actions=next_allowed_actions,
         )
 
     def stage_apply_application_change_session(
-        self, *, application_id: str, session_id: str, payload: Optional[Dict[str, Any]] = None
+        self, *, application_id: str = "", session_id: str = "", payload: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         return self._run_application_change_session_operation(
             application_id=application_id,
@@ -2467,7 +2672,7 @@ class XynApiAdapter:
         )
 
     def prepare_preview_application_change_session(
-        self, *, application_id: str, session_id: str, payload: Optional[Dict[str, Any]] = None
+        self, *, application_id: str = "", session_id: str = "", payload: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         return self._run_application_change_session_operation(
             application_id=application_id,
@@ -2481,7 +2686,7 @@ class XynApiAdapter:
         )
 
     def validate_application_change_session(
-        self, *, application_id: str, session_id: str, payload: Optional[Dict[str, Any]] = None
+        self, *, application_id: str = "", session_id: str = "", payload: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         return self._run_application_change_session_operation(
             application_id=application_id,
@@ -2495,7 +2700,7 @@ class XynApiAdapter:
         )
 
     def commit_application_change_session(
-        self, *, application_id: str, session_id: str, payload: Optional[Dict[str, Any]] = None
+        self, *, application_id: str = "", session_id: str = "", payload: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         return self._run_application_change_session_operation(
             application_id=application_id,
@@ -2509,7 +2714,7 @@ class XynApiAdapter:
         )
 
     def promote_application_change_session(
-        self, *, application_id: str, session_id: str, payload: Optional[Dict[str, Any]] = None
+        self, *, application_id: str = "", session_id: str = "", payload: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         return self._run_application_change_session_operation(
             application_id=application_id,
@@ -2523,7 +2728,7 @@ class XynApiAdapter:
         )
 
     def rollback_application_change_session(
-        self, *, application_id: str, session_id: str, payload: Optional[Dict[str, Any]] = None
+        self, *, application_id: str = "", session_id: str = "", payload: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         return self._run_application_change_session_operation(
             application_id=application_id,
@@ -2536,7 +2741,7 @@ class XynApiAdapter:
             ],
         )
 
-    def get_application_change_session_commits(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+    def get_application_change_session_commits(self, *, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
         result = self._request_with_fallback_paths(
             method="GET",
@@ -2547,30 +2752,45 @@ class XynApiAdapter:
             result,
             application_id=application_id,
             session_id=session_id,
+            scope_hint={
+                "scope_type": "artifact",
+                "application_id": str(application_id or ""),
+                "session_id": str(session_id or ""),
+            },
             default_next_allowed_actions=[
                 "promote_application_change_session",
                 "rollback_application_change_session",
             ],
         )
 
-    def get_application_change_session_promotion_evidence(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+    def get_application_change_session_promotion_evidence(self, *, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         result = self.get_change_session_promotion_evidence(application_id=application_id, session_id=session_id)
         return self._normalize_change_session_result(
             result,
             application_id=application_id,
             session_id=session_id,
+            scope_hint={
+                "scope_type": "artifact",
+                "application_id": str(application_id or ""),
+                "session_id": str(session_id or ""),
+            },
             default_next_allowed_actions=[
                 "rollback_application_change_session",
                 "inspect_change_session_control",
             ],
         )
 
-    def get_application_change_session_preview_status(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+    def get_application_change_session_preview_status(self, *, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         result = self.inspect_change_session_control(application_id=application_id, session_id=session_id)
         normalized = self._normalize_change_session_result(
             result,
             application_id=application_id,
             session_id=session_id,
+            scope_hint={
+                "scope_type": "artifact",
+                "application_id": str(application_id or ""),
+                "session_id": str(session_id or ""),
+            },
             default_next_allowed_actions=[
                 "prepare_preview_application_change_session",
                 "validate_application_change_session",
@@ -3220,7 +3440,7 @@ class XynApiAdapter:
             return "binding_rotated"
         return "ready"
 
-    def assess_change_session_readiness(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+    def assess_change_session_readiness(self, *, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         inspected = self.inspect_change_session_control(application_id=application_id, session_id=session_id)
         normalized = self._normalize_change_session_result(
             inspected,
@@ -3279,7 +3499,14 @@ class XynApiAdapter:
         }
         session_recreation_recommended = assessment_state in {"session_stale", "control_contract_failure"}
         binding_base_url = str(normalized.get("base_url") or self._config.control_api_base_url).rstrip("/")
-        binding_path = f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/control"
+        control_paths = self._change_session_control_paths(
+            self._build_change_session_handle(application_id=application_id, session_id=session_id),
+            suffix="/control",
+        )
+        binding_path = str(control_paths[0] if control_paths else f"/xyn/api/change-sessions/{session_id}/control")
+        scope = body.get("scope") if isinstance(body.get("scope"), dict) else {}
+        resolved_application_id = str(body.get("application_id") or scope.get("application_id") or application_id or "")
+        resolved_session_id = str(body.get("session_id") or session_id or "")
         assessment = {
             "assessment_state": assessment_state,
             "binding": {
@@ -3301,8 +3528,10 @@ class XynApiAdapter:
                 "configured_bearer_present": bool(str(self._config.bearer_token or "").strip()),
             },
             "context": {
-                "application_id": str(application_id),
-                "session_id": str(session_id),
+                "application_id": resolved_application_id,
+                "session_id": resolved_session_id,
+                "scope_type": str(body.get("scope_type") or ""),
+                "scope": scope,
                 "stale_session_context": stale_session_context,
             },
             "session_readability": {
@@ -3324,13 +3553,16 @@ class XynApiAdapter:
         normalized["response"] = assessment
         return normalized
 
-    def list_change_session_pending_checkpoints(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+    def list_change_session_pending_checkpoints(self, *, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         result = self.inspect_change_session_control(application_id=application_id, session_id=session_id)
         response_body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        scope = response_body.get("scope") if isinstance(response_body.get("scope"), dict) else {}
         pending = self._extract_pending_checkpoints_from_control_response(response_body)
         result["response"] = {
-            "application_id": str(application_id),
-            "session_id": str(session_id),
+            "application_id": str(response_body.get("application_id") or scope.get("application_id") or application_id or ""),
+            "session_id": str(response_body.get("session_id") or session_id or ""),
+            "scope_type": str(response_body.get("scope_type") or ""),
+            "scope": scope,
             "pending_checkpoints": pending,
             "count": len(pending),
             "raw": response_body,
@@ -3340,8 +3572,8 @@ class XynApiAdapter:
     def decide_change_session_checkpoint(
         self,
         *,
-        application_id: str,
-        session_id: str,
+        application_id: str = "",
+        session_id: str = "",
         checkpoint_id: str = "",
         decision: str = "approved",
         notes: str = "",
@@ -3352,11 +3584,13 @@ class XynApiAdapter:
         elif normalized_decision in {"reject", "rejected", "deny"}:
             normalized_decision = "rejected"
         if normalized_decision not in {"approved", "rejected"}:
+            handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
+            decision_paths = self._change_session_control_paths(handle, suffix="/checkpoints/<checkpoint_id>/decision")
             return {
                 "ok": False,
                 "status_code": 400,
                 "method": "POST",
-                "path": f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/checkpoints/<checkpoint_id>/decision",
+                "path": decision_paths[0] if decision_paths else "/xyn/api/change-sessions/<session_id>/checkpoints/<checkpoint_id>/decision",
                 "base_url": str(self._config.control_api_base_url).rstrip("/"),
                 "response": {
                     "error": "invalid_decision",
@@ -3371,11 +3605,13 @@ class XynApiAdapter:
             inspect_body = inspect_result.get("response") if isinstance(inspect_result.get("response"), dict) else {}
             pending = self._extract_pending_checkpoints_from_control_response(inspect_body)
             if not pending:
+                handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
+                decision_paths = self._change_session_control_paths(handle, suffix="/checkpoints/<checkpoint_id>/decision")
                 return {
                     "ok": False,
                     "status_code": 409,
                     "method": "POST",
-                    "path": f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/checkpoints/<checkpoint_id>/decision",
+                    "path": decision_paths[0] if decision_paths else "/xyn/api/change-sessions/<session_id>/checkpoints/<checkpoint_id>/decision",
                     "base_url": str(self._config.control_api_base_url).rstrip("/"),
                     "response": {
                         "error": "checkpoint_not_pending",
@@ -3386,11 +3622,13 @@ class XynApiAdapter:
                 }
             resolved_checkpoint_id = str((pending[0] or {}).get("id") or "").strip()
             if not resolved_checkpoint_id:
+                handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
+                decision_paths = self._change_session_control_paths(handle, suffix="/checkpoints/<checkpoint_id>/decision")
                 return {
                     "ok": False,
                     "status_code": 409,
                     "method": "POST",
-                    "path": f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/checkpoints/<checkpoint_id>/decision",
+                    "path": decision_paths[0] if decision_paths else "/xyn/api/change-sessions/<session_id>/checkpoints/<checkpoint_id>/decision",
                     "base_url": str(self._config.control_api_base_url).rstrip("/"),
                     "response": {
                         "error": "checkpoint_not_resolved",
@@ -3400,10 +3638,9 @@ class XynApiAdapter:
                     },
                 }
 
-        paths = [
-            f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/checkpoints/{resolved_checkpoint_id}/decision",
-            f"/api/v1/applications/{application_id}/change-sessions/{session_id}/checkpoints/{resolved_checkpoint_id}/decision",
-        ]
+        handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
+        suffix = f"/checkpoints/{resolved_checkpoint_id}/decision"
+        paths = self._change_session_control_paths(handle, suffix=suffix)
         return self._request_with_fallback_paths(
             method="POST",
             paths=paths,
@@ -3419,11 +3656,30 @@ class XynApiAdapter:
         *,
         application_id: str = "",
         session_id: str = "",
-        operation: str,
+        operation: str = "",
         action_payload: Optional[Dict[str, Any]] = None,
         handle: Optional[ChangeSessionHandle] = None,
     ) -> Dict[str, Any]:
         normalized_operation = str(operation or "").strip().lower()
+        if not normalized_operation:
+            handle_for_error = handle or self._build_change_session_handle(
+                application_id=application_id,
+                session_id=session_id,
+            )
+            paths = self._change_session_control_paths(handle_for_error, suffix="/control/actions")
+            return {
+                "ok": False,
+                "status_code": 400,
+                "method": "POST",
+                "path": paths[0] if paths else "/xyn/api/change-sessions/<session_id>/control/actions",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {
+                    "error": "operation is required",
+                    "blocked_reason": "backend_validation_error",
+                    "next_allowed_actions": ["inspect_change_session_control"],
+                },
+                "error_classification": "backend_validation_error",
+            }
         if normalized_operation in {"decide_checkpoint", "approve_checkpoint"}:
             payload = dict(action_payload or {})
             checkpoint_id = str(payload.get("checkpoint_id") or payload.get("id") or "").strip()
@@ -3527,7 +3783,7 @@ class XynApiAdapter:
         )
         return self._normalize_planner_route_error(result, attempted_paths=paths)
 
-    def get_change_session_promotion_evidence(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+    def get_change_session_promotion_evidence(self, *, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
         return self._request_with_fallback_paths(
             method="GET",
