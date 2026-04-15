@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import logging
+import re
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,16 @@ _SOURCE_FALLBACK_STATUS_MIN = 500
 _SOURCE_FALLBACK_STATUS_MAX = 599
 _REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
 _TRANSIENT_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+_MCP_FAILURE_CLASSES = {
+    "binding_rotated",
+    "empty_tool_surface",
+    "auth_expired",
+    "backend_validation_error",
+    "backend_server_error",
+    "contract_mismatch",
+    "transient_transport_failure",
+    "unknown_mcp_failure",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -86,16 +97,175 @@ class XynApiAdapterConfig:
         )
 
 
+@dataclass
+class McpBindingState:
+    binding_id: str = ""
+    base_url: str = ""
+    resolved_at: float = 0.0
+    last_success_at: float = 0.0
+    last_failure_at: float = 0.0
+    failure_reason: str = ""
+    tool_surface_count: int = 0
+
+
+@dataclass(frozen=True)
+class ChangeSessionHandle:
+    application_id: str
+    session_id: str
+    workspace_id: str = ""
+    artifact_scope: tuple[str, ...] = ()
+    last_known_binding_id: str = ""
+
+
 class XynApiAdapter:
     """Thin HTTP adapter over existing Xyn API/control/evidence endpoints."""
 
     def __init__(self, config: XynApiAdapterConfig):
         self._config = config
         self._planner_preferred_base_url = ""
+        self._planner_binding_state = McpBindingState()
+        self._session_last_success_read_at: dict[str, float] = {}
+        self._session_last_failure_classification: dict[str, str] = {}
 
     @property
     def config(self) -> XynApiAdapterConfig:
         return self._config
+
+    @staticmethod
+    def _now_ts() -> float:
+        import time
+
+        return float(time.time())
+
+    def _planner_binding_snapshot(self) -> Dict[str, Any]:
+        state = self._planner_binding_state
+        return {
+            "binding_id": str(state.binding_id or ""),
+            "base_url": str(state.base_url or ""),
+            "resolved_at": float(state.resolved_at or 0.0),
+            "last_success_at": float(state.last_success_at or 0.0),
+            "last_failure_at": float(state.last_failure_at or 0.0),
+            "failure_reason": str(state.failure_reason or ""),
+            "tool_surface_count": int(state.tool_surface_count or 0),
+        }
+
+    @staticmethod
+    def _session_state_key(application_id: str, session_id: str) -> str:
+        return f"{str(application_id or '').strip()}::{str(session_id or '').strip()}"
+
+    @staticmethod
+    def _session_context_from_paths(paths: list[str]) -> Dict[str, str]:
+        for path in paths:
+            token = str(path or "").strip()
+            match = re.search(r"/applications/([^/]+)/change-sessions/([^/]+)", token)
+            if match:
+                return {
+                    "application_id": str(match.group(1) or "").strip(),
+                    "session_id": str(match.group(2) or "").strip(),
+                }
+        return {"application_id": "", "session_id": ""}
+
+    def _build_change_session_handle(
+        self,
+        *,
+        application_id: str,
+        session_id: str,
+        workspace_id: str = "",
+        artifact_scope: Optional[list[str]] = None,
+        last_known_binding_id: str = "",
+    ) -> ChangeSessionHandle:
+        return ChangeSessionHandle(
+            application_id=str(application_id or "").strip(),
+            session_id=str(session_id or "").strip(),
+            workspace_id=str(workspace_id or "").strip(),
+            artifact_scope=tuple(str(item or "").strip() for item in (artifact_scope or []) if str(item or "").strip()),
+            last_known_binding_id=str(last_known_binding_id or "").strip(),
+        )
+
+    @staticmethod
+    def _change_session_control_paths(handle: ChangeSessionHandle, *, suffix: str = "") -> list[str]:
+        base = f"/applications/{handle.application_id}/change-sessions/{handle.session_id}"
+        normalized_suffix = f"/{str(suffix or '').lstrip('/')}" if str(suffix or "").strip() else ""
+        return [
+            f"/xyn/api{base}{normalized_suffix}",
+            f"/api/v1{base}{normalized_suffix}",
+        ]
+
+    def _planner_binding_reordered_bases(
+        self,
+        *,
+        base_urls: list[str],
+        force_refresh: bool = False,
+    ) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for item in base_urls:
+            token = str(item or "").strip()
+            if token and token not in seen:
+                seen.add(token)
+                ordered.append(token)
+        if not ordered:
+            return []
+        preferred = str(self._planner_binding_state.base_url or self._planner_preferred_base_url or "").strip()
+        if not preferred or preferred not in ordered:
+            return ordered
+        if force_refresh:
+            return [base for base in ordered if base != preferred] + [preferred]
+        return [preferred] + [base for base in ordered if base != preferred]
+
+    def _record_planner_binding_success(
+        self,
+        *,
+        base_url: str,
+        path: str,
+        response: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        ts = self._now_ts()
+        payload = response if isinstance(response, dict) else {}
+        control = payload.get("control") if isinstance(payload.get("control"), dict) else {}
+        next_actions = payload.get("next_allowed_actions") if isinstance(payload.get("next_allowed_actions"), list) else []
+        if not next_actions and isinstance(control, dict):
+            next_actions = control.get("next_allowed_actions") if isinstance(control.get("next_allowed_actions"), list) else []
+        surface_count = len(next_actions)
+        previous_surface_count = int(self._planner_binding_state.tool_surface_count or 0)
+        self._planner_binding_state = McpBindingState(
+            binding_id=self._binding_id(base_url, path),
+            base_url=str(base_url or "").strip(),
+            resolved_at=float(self._planner_binding_state.resolved_at or ts),
+            last_success_at=ts,
+            last_failure_at=float(self._planner_binding_state.last_failure_at or 0.0),
+            failure_reason="",
+            tool_surface_count=surface_count if surface_count > 0 else previous_surface_count,
+        )
+        self._planner_preferred_base_url = str(base_url or "").strip()
+
+    def _record_planner_binding_failure(self, *, reason: str) -> None:
+        ts = self._now_ts()
+        self._planner_binding_state = McpBindingState(
+            binding_id=str(self._planner_binding_state.binding_id or ""),
+            base_url=str(self._planner_binding_state.base_url or ""),
+            resolved_at=float(self._planner_binding_state.resolved_at or ts),
+            last_success_at=float(self._planner_binding_state.last_success_at or 0.0),
+            last_failure_at=ts,
+            failure_reason=str(reason or "").strip(),
+            tool_surface_count=int(self._planner_binding_state.tool_surface_count or 0),
+        )
+
+    def _planner_surface_is_empty(self, response: Any) -> bool:
+        if not isinstance(response, dict):
+            return False
+        control = response.get("control") if isinstance(response.get("control"), dict) else {}
+        session = control.get("session") if isinstance(control.get("session"), dict) else {}
+        planning = session.get("planning") if isinstance(session.get("planning"), dict) else {}
+        next_actions = response.get("next_allowed_actions") if isinstance(response.get("next_allowed_actions"), list) else []
+        if not next_actions and isinstance(control, dict):
+            next_actions = control.get("next_allowed_actions") if isinstance(control.get("next_allowed_actions"), list) else []
+        if next_actions:
+            return False
+        if bool(planning.get("pending_prompt")) or bool(planning.get("pending_question")) or bool(planning.get("pending_option_set")):
+            return False
+        # Treat explicit empty surfaces as stale only if we previously had a non-empty surface.
+        return bool(int(self._planner_binding_state.tool_surface_count or 0) > 0)
 
     def _headers(self, *, prefer_request_bearer: bool = True) -> Dict[str, str]:
         headers: Dict[str, str] = {"Accept": "application/json"}
@@ -123,19 +293,37 @@ class XynApiAdapter:
 
     @staticmethod
     def _classify_error(result: Dict[str, Any]) -> str:
+        current = str(result.get("error_classification") or "").strip()
+        if current in _MCP_FAILURE_CLASSES:
+            return current
         status_code = int(result.get("status_code") or 0)
         body = result.get("response") if isinstance(result.get("response"), dict) else {}
         error_token = str(body.get("error") or "").strip().lower()
         blocked_reason = str(body.get("blocked_reason") or "").strip().lower()
+        raw_text = str(body.get("raw_text") or "").strip().lower()
+        detail_text = str(body.get("detail") or "").strip().lower()
+
+        if error_token in {"upstream_unreachable"}:
+            return "transient_transport_failure"
+        if error_token in {"empty_surface", "empty_tool_surface"} or blocked_reason in {"empty_surface", "empty_tool_surface"}:
+            return "empty_tool_surface"
         if status_code in {401, 403} or error_token in {"unauthorized", "not authenticated", "not_authenticated"}:
             return "auth_expired"
-        if blocked_reason in {"planner_route_unavailable", "route_unavailable"} or status_code in {404, 405}:
+        if blocked_reason in {"planner_route_unavailable", "route_unavailable", "schema_mismatch"}:
             return "contract_mismatch"
+        if status_code in {404, 405}:
+            return "binding_rotated"
         if status_code in {400, 409, 422}:
             return "backend_validation_error"
-        if status_code in _TRANSIENT_RETRYABLE_STATUS_CODES or error_token == "upstream_unreachable":
+        if status_code in {429}:
             return "transient_transport_failure"
-        return "backend_validation_error"
+        if status_code in _TRANSIENT_RETRYABLE_STATUS_CODES:
+            return "backend_server_error"
+        if status_code >= 500:
+            return "backend_server_error"
+        if "<!doctype html" in raw_text or "page not found" in raw_text or detail_text == "internal server error":
+            return "backend_server_error"
+        return "unknown_mcp_failure"
 
     def _control_api_base_urls(self) -> list[str]:
         out: list[str] = []
@@ -172,14 +360,7 @@ class XynApiAdapter:
 
     def _planner_base_urls(self) -> list[str]:
         base_urls = [base for base in self._control_api_base_urls() if str(base or "").strip()]
-        preferred = str(self._planner_preferred_base_url or "").strip()
-        if preferred:
-            reordered = [preferred]
-            for base in base_urls:
-                if base != preferred:
-                    reordered.append(base)
-            return reordered
-        return base_urls
+        return self._planner_binding_reordered_bases(base_urls=base_urls, force_refresh=False)
 
     @staticmethod
     def _normalize_planner_route_error(result: Dict[str, Any], *, attempted_paths: list[str]) -> Dict[str, Any]:
@@ -191,11 +372,11 @@ class XynApiAdapter:
             if status_code in {401, 403}:
                 result["error_classification"] = "auth_expired"
             elif status_code in {404, 405}:
-                result["error_classification"] = "contract_mismatch"
+                result["error_classification"] = "binding_rotated"
             elif status_code in {400, 409, 422}:
                 result["error_classification"] = "backend_validation_error"
             elif status_code in _TRANSIENT_RETRYABLE_STATUS_CODES or str(body.get("error") or "") == "upstream_unreachable":
-                result["error_classification"] = "transient_transport_failure"
+                result["error_classification"] = "backend_server_error"
         status_code = int(result.get("status_code") or 0)
         if status_code != 404:
             return result
@@ -209,6 +390,18 @@ class XynApiAdapter:
         )
         if not is_route_miss:
             return result
+        looks_like_session_route = any("/change-sessions/" in str(p or "") for p in attempted_paths)
+        if looks_like_session_route:
+            result["response"] = {
+                "error": "stale_binding_path",
+                "blocked_reason": "binding_rotated",
+                "detail": "The active change-session route appears stale after binding rotation.",
+                "attempted_paths": [str(p or "").strip() for p in attempted_paths if str(p or "").strip()],
+                "base_url": str(result.get("base_url") or "").strip(),
+                "recommended_action": "refresh_binding_and_retry",
+            }
+            result["error_classification"] = "binding_rotated"
+            return result
         result["response"] = {
             "error": "planner_route_unavailable",
             "blocked_reason": "planner_route_unavailable",
@@ -218,6 +411,7 @@ class XynApiAdapter:
             "recommended_action": "verify_xyn_api_control_plane_route_mount",
             "next_allowed_actions": ["list_artifacts", "list_runtime_runs"],
         }
+        result["error_classification"] = "contract_mismatch"
         return result
 
     @staticmethod
@@ -261,7 +455,17 @@ class XynApiAdapter:
         base_url: Optional[str] = None,
         allow_reissue_on_transport_error: bool = True,
     ) -> Dict[str, Any]:
-        resolved_base_url = str(base_url or self._config.control_api_base_url).rstrip("/")
+        is_planner_path = self._is_planner_path(path)
+        if base_url:
+            resolved_base_url = str(base_url).rstrip("/")
+        elif is_planner_path:
+            planner_bases = self._planner_binding_reordered_bases(
+                base_urls=self._control_api_base_urls(),
+                force_refresh=False,
+            )
+            resolved_base_url = str((planner_bases[0] if planner_bases else self._config.control_api_base_url) or "").rstrip("/")
+        else:
+            resolved_base_url = str(self._config.control_api_base_url).rstrip("/")
         url = f"{resolved_base_url}{path}"
         request_bearer = get_request_bearer_token()
         static_bearer = str(self._config.bearer_token or "").strip()
@@ -336,6 +540,8 @@ class XynApiAdapter:
                 },
             }
             result["error_classification"] = "transient_transport_failure"
+            if is_planner_path:
+                self._record_planner_binding_failure(reason="transient_transport_failure")
             return result
         redirect_error = self._api_redirect_as_json_error(
             status_code=int(response.status_code),
@@ -350,11 +556,15 @@ class XynApiAdapter:
             should_retry_with_static = bool(request_bearer and static_bearer and request_bearer != static_bearer)
             if not should_retry_with_static:
                 redirect_error["error_classification"] = "auth_expired"
+                if is_planner_path:
+                    self._record_planner_binding_failure(reason="auth_expired")
                 return redirect_error
             try:
                 retry_response = _do_request(prefer_request_bearer=False)
             except httpx.RequestError:
                 redirect_error["error_classification"] = "auth_expired"
+                if is_planner_path:
+                    self._record_planner_binding_failure(reason="transient_transport_failure")
                 return redirect_error
             retry_redirect = self._api_redirect_as_json_error(
                 status_code=int(retry_response.status_code),
@@ -365,6 +575,8 @@ class XynApiAdapter:
                 retry_redirect["method"] = method.upper()
                 retry_redirect["base_url"] = resolved_base_url
                 retry_redirect["error_classification"] = "auth_expired"
+                if is_planner_path:
+                    self._record_planner_binding_failure(reason="auth_expired")
                 return retry_redirect
             response = retry_response
             logger.info(
@@ -420,8 +632,61 @@ class XynApiAdapter:
                 "_auth_refreshed": True,
             }
             result["error_classification"] = self._classify_error(result) if not bool(result.get("ok")) else ""
+            if is_planner_path and bool(result.get("ok")):
+                self._record_planner_binding_success(
+                    base_url=resolved_base_url,
+                    path=path,
+                    response=result.get("response") if isinstance(result.get("response"), dict) else {},
+                )
             return result
         result["error_classification"] = self._classify_error(result) if not bool(result.get("ok")) else ""
+
+        if is_planner_path and bool(result.get("ok")):
+            if str(method or "").upper() == "GET" and self._planner_surface_is_empty(result.get("response")):
+                self._record_planner_binding_failure(reason="empty_tool_surface")
+            else:
+                self._record_planner_binding_success(
+                    base_url=resolved_base_url,
+                    path=path,
+                    response=result.get("response") if isinstance(result.get("response"), dict) else {},
+                )
+            return result
+
+        if is_planner_path and not bool(result.get("ok")):
+            classification = str(result.get("error_classification") or "").strip()
+            stale_binding = classification in {"auth_expired", "binding_rotated"} or int(result.get("status_code") or 0) in {404, 405}
+            if stale_binding:
+                self._record_planner_binding_failure(
+                    reason="auth_expired" if classification == "auth_expired" else "binding_rotated"
+                )
+            else:
+                self._record_planner_binding_failure(reason=classification or "unknown_mcp_failure")
+
+            safe_to_retry = str(method or "").upper() == "GET" or bool(allow_reissue_on_transport_error)
+            if safe_to_retry and stale_binding:
+                refreshed_bases = self._planner_binding_reordered_bases(
+                    base_urls=self._control_api_base_urls(),
+                    force_refresh=True,
+                )
+                retry_base = str((refreshed_bases[0] if refreshed_bases else "") or "").rstrip("/")
+                if retry_base and retry_base != resolved_base_url:
+                    retry_result = self._request(
+                        method=method,
+                        path=path,
+                        json_payload=json_payload,
+                        params=params,
+                        base_url=retry_base,
+                        allow_reissue_on_transport_error=False,
+                    )
+                    if bool(retry_result.get("ok")):
+                        retry_result["continuity"] = {
+                            "previous_binding_id": self._binding_id(resolved_base_url, path),
+                            "new_binding_id": self._binding_id(retry_base, path),
+                            "retry_reason": "binding_rotated",
+                            "auth_refreshed": classification == "auth_expired",
+                            "action_reissued": True,
+                        }
+                    return retry_result
         return result
 
     def _request_bytes(
@@ -482,12 +747,26 @@ class XynApiAdapter:
         base_urls: Optional[list[str]] = None,
         allow_reissue_on_transport_error: bool = True,
     ) -> Dict[str, Any]:
+        # MCP failure recovery matrix:
+        # - binding_rotated: re-resolve binding/base URL and retry safely.
+        # - empty_tool_surface: treat as stale discovery state, refresh candidates and retry reads.
+        # - auth_expired: surface auth-required; do not blind-retry mutating actions.
+        # - backend_validation_error: return server validation details without retry.
+        # - backend_server_error: preserve session context; avoid mutation retries unless idempotent-safe.
+        # - contract_mismatch: surface schema/route mismatch details for operator fix.
+        # - transient_transport_failure: bounded retry on safe reads only.
+        # - unknown_mcp_failure: no retry, surface diagnostics.
+        request_method = str(method or "").upper()
+        session_ctx = self._session_context_from_paths(paths)
+        application_id = str(session_ctx.get("application_id") or "").strip()
+        session_id = str(session_ctx.get("session_id") or "").strip()
         last_result: Dict[str, Any] = {"ok": False, "status_code": 404, "response": {"error": "not_found"}}
         first_result: Optional[Dict[str, Any]] = None
         preferred_result: Optional[Dict[str, Any]] = None
         failed_bindings: list[str] = []
         deduped_base_urls: list[str] = []
-        for candidate in (base_urls or self._control_api_base_urls()):
+        input_base_urls = list(base_urls or self._control_api_base_urls())
+        for candidate in input_base_urls:
             base = str(candidate or "").strip()
             if not base or base in deduped_base_urls:
                 continue
@@ -496,9 +775,10 @@ class XynApiAdapter:
             deduped_base_urls = [self._config.control_api_base_url]
         planner_request = any(self._is_planner_path(path) for path in paths)
         if planner_request:
-            preferred = str(self._planner_preferred_base_url or "").strip()
-            if preferred:
-                deduped_base_urls = [preferred] + [base for base in deduped_base_urls if base != preferred]
+            deduped_base_urls = self._planner_binding_reordered_bases(
+                base_urls=deduped_base_urls,
+                force_refresh=False,
+            )
         for base_url in deduped_base_urls:
             for path in paths:
                 result = self._request(
@@ -513,6 +793,10 @@ class XynApiAdapter:
                 if first_result is None:
                     first_result = result
                 if bool(result.get("ok")):
+                    if planner_request and str(method or "").upper() == "GET" and self._planner_surface_is_empty(result.get("response")):
+                        self._record_planner_binding_failure(reason="empty_tool_surface")
+                        failed_bindings.append(self._binding_id(str(result.get("base_url") or base_url), path))
+                        continue
                     current_binding = self._binding_id(str(result.get("base_url") or base_url), path)
                     previous_binding = failed_bindings[-1] if failed_bindings else ""
                     if previous_binding and previous_binding != current_binding:
@@ -525,8 +809,10 @@ class XynApiAdapter:
                         }
                         result["continuity"] = continuity
                         logger.info(
-                            "mcp_binding_rotated method=%s previous_binding=%s new_binding=%s auth_refreshed=%s",
-                            method.upper(),
+                            "mcp_binding_rotated method=%s application_id=%s session_id=%s previous_binding=%s new_binding=%s auth_refreshed=%s",
+                            request_method,
+                            application_id,
+                            session_id,
                             previous_binding,
                             current_binding,
                             bool(result.get("_auth_refreshed")),
@@ -540,21 +826,48 @@ class XynApiAdapter:
                             "action_reissued": True,
                         }
                         logger.info(
-                            "mcp_auth_refreshed method=%s binding=%s",
-                            method.upper(),
+                            "mcp_auth_refreshed method=%s application_id=%s session_id=%s binding=%s",
+                            request_method,
+                            application_id,
+                            session_id,
                             current_binding,
                         )
+                    if request_method == "POST":
+                        result["action_delivery_state"] = "definitely_applied"
                     if planner_request:
-                        self._planner_preferred_base_url = str(result.get("base_url") or "").strip()
+                        self._record_planner_binding_success(
+                            base_url=str(result.get("base_url") or base_url),
+                            path=path,
+                            response=result.get("response") if isinstance(result.get("response"), dict) else {},
+                        )
+                        result["binding_state"] = self._planner_binding_snapshot()
                     return result
                 code = int(result.get("status_code") or 0)
                 failed_bindings.append(self._binding_id(str(result.get("base_url") or base_url), path))
+                if planner_request:
+                    failure_class = str(result.get("error_classification") or self._classify_error(result))
+                    if failure_class == "auth_expired":
+                        self._record_planner_binding_failure(reason="auth_expired")
+                    elif failure_class in {"contract_mismatch", "binding_rotated"} or code in {404, 405}:
+                        self._record_planner_binding_failure(reason="binding_rotated")
+                    elif failure_class in {"backend_server_error", "transient_transport_failure", "backend_validation_error"}:
+                        self._record_planner_binding_failure(reason=failure_class)
+                    elif code >= 500:
+                        self._record_planner_binding_failure(reason="backend_server_error")
                 if (
-                    str(method or "").upper() == "POST"
+                    request_method == "POST"
                     and not allow_reissue_on_transport_error
                     and code == 503
-                    and str(result.get("error_classification") or self._classify_error(result)) == "transient_transport_failure"
+                    and str((result.get("response") if isinstance(result.get("response"), dict) else {}).get("error") or "") == "upstream_unreachable"
                 ):
+                    result["action_delivery_state"] = "unknown"
+                    return result
+                # Mutating actions: only retry when previous attempt is known not to have
+                # reached a viable backend route (404/405 stale binding/route).
+                if request_method == "POST" and code not in {404, 405}:
+                    result["action_delivery_state"] = (
+                        "unknown" if code >= 500 else "not_sent"
+                    )
                     return result
                 # Continue searching across endpoint/base-url variants for compatibility.
                 blocked_reason = str(
@@ -569,6 +882,21 @@ class XynApiAdapter:
                     continue
                 return result
         out = preferred_result or first_result or last_result
+        if planner_request and str(method or "").upper() == "GET" and bool(out.get("ok")) and self._planner_surface_is_empty(out.get("response")):
+            out = {
+                **out,
+                "ok": False,
+                "status_code": 503,
+                "response": {
+                    "error": "empty_tool_surface",
+                    "blocked_reason": "empty_tool_surface",
+                    "detail": "Planner binding resolved an empty tool surface after refresh.",
+                },
+                "error_classification": "empty_tool_surface",
+            }
+            self._record_planner_binding_failure(reason="empty_tool_surface")
+        if request_method == "POST" and bool(out.get("ok")):
+            out["action_delivery_state"] = "definitely_applied"
         if not bool(out.get("ok")):
             out["error_classification"] = str(out.get("error_classification") or self._classify_error(out))
             if failed_bindings:
@@ -582,8 +910,31 @@ class XynApiAdapter:
                         "auth_refreshed": bool(out.get("_auth_refreshed")),
                         "action_reissued": True,
                     }
-                    if str(out.get("error_classification") or "") not in {"auth_expired", "backend_validation_error", "contract_mismatch"}:
+                    if str(out.get("error_classification") or "") not in {
+                        "auth_expired",
+                        "contract_mismatch",
+                        "backend_validation_error",
+                        "backend_server_error",
+                        "transient_transport_failure",
+                    }:
                         out["error_classification"] = "binding_rotated"
+        if request_method == "POST" and not bool(out.get("ok")):
+            status_code = int(out.get("status_code") or 0)
+            out["action_delivery_state"] = "unknown" if status_code >= 500 else "not_sent"
+        if planner_request:
+            out["binding_state"] = self._planner_binding_snapshot()
+        if request_method == "POST":
+            continuity = out.get("continuity") if isinstance(out.get("continuity"), dict) else {}
+            logger.info(
+                "mcp_change_session_action_result application_id=%s session_id=%s prior_binding=%s new_binding=%s retry=%s delivery_state=%s classification=%s",
+                application_id,
+                session_id,
+                str(continuity.get("previous_binding_id") or ""),
+                str(continuity.get("new_binding_id") or ""),
+                bool(continuity.get("action_reissued")),
+                str(out.get("action_delivery_state") or ""),
+                str(out.get("error_classification") or ""),
+            )
         return out
 
     def _code_api_base_urls(self) -> list[str]:
@@ -1146,6 +1497,23 @@ class XynApiAdapter:
         normalized = {
             "application_id": str(application_id or body.get("application_id") or ""),
             "session_id": str(session_id or body.get("session_id") or ""),
+            "change_session_handle": {
+                "application_id": str(application_id or body.get("application_id") or ""),
+                "session_id": str(session_id or body.get("session_id") or ""),
+                "workspace_id": str(body.get("workspace_id") or ""),
+                "artifact_scope": XynApiAdapter._extract_string_list(
+                    body.get("raw") if isinstance(body.get("raw"), dict) else body,
+                    {"selected_artifact_ids", "artifact_ids"},
+                ),
+                "last_known_binding_id": str(
+                    (
+                        result.get("continuity")
+                        if isinstance(result.get("continuity"), dict)
+                        else {}
+                    ).get("new_binding_id")
+                    or XynApiAdapter._binding_id(str(result.get("base_url") or ""), str(result.get("path") or ""))
+                ),
+            },
             "current_status": current_status,
             "next_allowed_actions": next_allowed_actions,
             "blocked_reason": blocked_reason,
@@ -1156,8 +1524,13 @@ class XynApiAdapter:
             "promotion_evidence_ids": XynApiAdapter._extract_promotion_evidence_ids(body),
             "decomposition_campaign": XynApiAdapter._extract_decomposition_campaign(body),
             "guardrails": XynApiAdapter._extract_decomposition_guardrails(body),
+            "planner_prompt": XynApiAdapter._extract_planner_prompt_contract(
+                body.get("raw") if isinstance(body.get("raw"), dict) else body
+            ),
             "error_classification": str(result.get("error_classification") or ""),
+            "action_delivery_state": str(result.get("action_delivery_state") or ""),
             "continuity": result.get("continuity") if isinstance(result.get("continuity"), dict) else {},
+            "binding_state": result.get("binding_state") if isinstance(result.get("binding_state"), dict) else {},
             "raw": response,
         }
         result["response"] = normalized
@@ -1825,10 +2198,8 @@ class XynApiAdapter:
         return result
 
     def get_application_change_session(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
-        paths = [
-            f"/xyn/api/applications/{application_id}/change-sessions/{session_id}",
-            f"/api/v1/applications/{application_id}/change-sessions/{session_id}",
-        ]
+        handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
+        paths = self._change_session_control_paths(handle)
         result = self._request_with_fallback_paths(
             method="GET",
             paths=paths,
@@ -1890,7 +2261,8 @@ class XynApiAdapter:
         return result
 
     def get_decomposition_campaign(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
-        result = self.inspect_change_session_control(application_id=application_id, session_id=session_id)
+        handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
+        result = self.inspect_change_session_control(handle=handle)
         normalized = self._normalize_change_session_result(
             result,
             application_id=application_id,
@@ -1922,7 +2294,8 @@ class XynApiAdapter:
         return normalized
 
     def inspect_decomposition_guardrails(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
-        result = self.inspect_change_session_control(application_id=application_id, session_id=session_id)
+        handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
+        result = self.inspect_change_session_control(handle=handle)
         normalized = self._normalize_change_session_result(
             result,
             application_id=application_id,
@@ -1957,7 +2330,8 @@ class XynApiAdapter:
         artifact_slug: str = "",
         top_n: int = 50,
     ) -> Dict[str, Any]:
-        session_status = self.get_decomposition_campaign(application_id=application_id, session_id=session_id)
+        handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
+        session_status = self.get_decomposition_campaign(application_id=handle.application_id, session_id=handle.session_id)
         body = session_status.get("response") if isinstance(session_status.get("response"), dict) else {}
         raw = body.get("raw") if isinstance(body.get("raw"), dict) else {}
 
@@ -2020,19 +2394,15 @@ class XynApiAdapter:
         }
 
     def get_application_change_session_plan(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
+        handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
         attempted_paths = [
-            f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/plan",
-            f"/api/v1/applications/{application_id}/change-sessions/{session_id}/plan",
-            f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/control",
-            f"/api/v1/applications/{application_id}/change-sessions/{session_id}/control",
+            *self._change_session_control_paths(handle, suffix="/plan"),
+            *self._change_session_control_paths(handle, suffix="/control"),
         ]
         # Canonical workflow route is POST-only in xyn-api.
         result = self._request_with_fallback_paths(
             method="POST",
-            paths=[
-                f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/plan",
-                f"/api/v1/applications/{application_id}/change-sessions/{session_id}/plan",
-            ],
+            paths=self._change_session_control_paths(handle, suffix="/plan"),
             json_payload={},
             base_urls=self._planner_base_urls(),
         )
@@ -2040,15 +2410,12 @@ class XynApiAdapter:
             # Back-compat for older deployments that exposed GET /plan.
             result = self._request_with_fallback_paths(
                 method="GET",
-                paths=[
-                    f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/plan",
-                    f"/api/v1/applications/{application_id}/change-sessions/{session_id}/plan",
-                ],
+                paths=self._change_session_control_paths(handle, suffix="/plan"),
                 base_urls=self._planner_base_urls(),
             )
         if not result.get("ok") and int(result.get("status_code") or 0) in {404, 405}:
             # Compatibility fallback to canonical control inspection when explicit /plan route is unavailable.
-            result = self.inspect_change_session_control(application_id=application_id, session_id=session_id)
+            result = self.inspect_change_session_control(handle=handle)
         if not result.get("ok"):
             result = self._normalize_planner_route_error(result, attempted_paths=attempted_paths)
         return self._normalize_change_session_result(
@@ -2071,9 +2438,9 @@ class XynApiAdapter:
         payload: Optional[Dict[str, Any]] = None,
         next_allowed_actions: Optional[list[str]] = None,
     ) -> Dict[str, Any]:
+        handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
         result = self.run_change_session_control_action(
-            application_id=application_id,
-            session_id=session_id,
+            handle=handle,
             operation=operation,
             action_payload=payload,
         )
@@ -2170,9 +2537,11 @@ class XynApiAdapter:
         )
 
     def get_application_change_session_commits(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
-        result = self._request(
+        handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
+        result = self._request_with_fallback_paths(
             method="GET",
-            path=f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/commits",
+            paths=self._change_session_control_paths(handle, suffix="/commits"),
+            base_urls=self._planner_base_urls(),
         )
         return self._normalize_change_session_result(
             result,
@@ -2555,11 +2924,18 @@ class XynApiAdapter:
         }
         return result
 
-    def inspect_change_session_control(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
-        paths = [
-            f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/control",
-            f"/api/v1/applications/{application_id}/change-sessions/{session_id}/control",
-        ]
+    def inspect_change_session_control(
+        self,
+        *,
+        application_id: str = "",
+        session_id: str = "",
+        handle: Optional[ChangeSessionHandle] = None,
+    ) -> Dict[str, Any]:
+        resolved_handle = handle or self._build_change_session_handle(
+            application_id=application_id,
+            session_id=session_id,
+        )
+        paths = self._change_session_control_paths(resolved_handle, suffix="/control")
         result = self._request_with_fallback_paths(
             method="GET",
             paths=paths,
@@ -2633,6 +3009,20 @@ class XynApiAdapter:
             for item in options
             if isinstance(item, dict) and str(item.get("id") or item.get("option_id") or "").strip()
         ]
+        canonical_options: list[Dict[str, Any]] = []
+        for item in options:
+            if not isinstance(item, dict):
+                continue
+            option_id = str(item.get("id") or item.get("option_id") or "").strip()
+            if not option_id:
+                continue
+            canonical_options.append(
+                {
+                    "id": option_id,
+                    "label": str(item.get("label") or item.get("title") or option_id),
+                    "description": str(item.get("description") or item.get("summary") or ""),
+                }
+            )
 
         expected_response_kind = str(
             prompt.get("expected_response_kind")
@@ -2644,16 +3034,162 @@ class XynApiAdapter:
             or option_set.get("allows_multiple")
             or response_schema.get("allows_multiple")
         )
+        prompt_kind = str(prompt.get("kind") or expected_response_kind or "").strip()
+        if not prompt_kind:
+            prompt_kind = "option_set" if canonical_option_ids else "freeform"
+        prompt_id = str(prompt.get("id") or prompt.get("prompt_id") or "").strip()
         return {
             "pending": pending,
-            "prompt_id": str(prompt.get("id") or prompt.get("prompt_id") or "").strip(),
+            "prompt_id": prompt_id,
+            "kind": prompt_kind,
             "message": str(prompt.get("message") or prompt.get("text") or "").strip(),
             "expected_response_kind": expected_response_kind,
             "allows_multiple": allows_multiple,
+            "options": canonical_options,
             "canonical_option_identifiers": canonical_option_ids,
             "response_schema": response_schema,
             "response_examples": response_examples,
+            "answer_payload_schema": {
+                "type": "object",
+                "required": ["prompt_id", "response"],
+                "properties": {
+                    "prompt_id": {"type": "string", "const": prompt_id},
+                    "response": response_schema if isinstance(response_schema, dict) else {},
+                    "metadata": {"type": "object"},
+                },
+                "accepted_legacy_fields": ["selected_option_id", "selected_option_ids", "option_id"],
+            },
         }
+
+    @staticmethod
+    def _validate_prompt_response_schema(*, response_value: Any, response_schema: Dict[str, Any]) -> list[str]:
+        if not isinstance(response_schema, dict) or not response_schema:
+            return []
+        errors: list[str] = []
+        schema_type = str(response_schema.get("type") or "").strip().lower()
+        if schema_type == "object" and not isinstance(response_value, dict):
+            errors.append("response must be an object")
+            return errors
+        if schema_type == "array" and not isinstance(response_value, list):
+            errors.append("response must be an array")
+            return errors
+        if schema_type == "string" and not isinstance(response_value, str):
+            errors.append("response must be a string")
+            return errors
+        if isinstance(response_value, dict):
+            required = response_schema.get("required")
+            if isinstance(required, list):
+                for field in required:
+                    token = str(field or "").strip()
+                    if token and token not in response_value:
+                        errors.append(f"response.{token} is required")
+            properties = response_schema.get("properties")
+            if isinstance(properties, dict):
+                for key, descriptor in properties.items():
+                    if key not in response_value or not isinstance(descriptor, dict):
+                        continue
+                    expected = str(descriptor.get("type") or "").strip().lower()
+                    value = response_value.get(key)
+                    if expected == "string" and not isinstance(value, str):
+                        errors.append(f"response.{key} must be a string")
+                    elif expected == "array" and not isinstance(value, list):
+                        errors.append(f"response.{key} must be an array")
+                    elif expected == "object" and not isinstance(value, dict):
+                        errors.append(f"response.{key} must be an object")
+                    enum_values = descriptor.get("enum")
+                    if isinstance(enum_values, list) and value not in enum_values:
+                        errors.append(f"response.{key} must be one of {enum_values}")
+        return errors
+
+    @staticmethod
+    def _normalize_planner_prompt_answer_payload(
+        *,
+        payload: Dict[str, Any],
+        prompt_contract: Dict[str, Any],
+    ) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        prompt_id = str(payload.get("prompt_id") or "").strip()
+        response_value = payload.get("response")
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        compatibility_notes: list[str] = []
+
+        if response_value is None:
+            if "selected_option_id" in payload:
+                response_value = {"selected_option_id": payload.get("selected_option_id")}
+                compatibility_notes.append("selected_option_id")
+            elif "option_id" in payload:
+                response_value = {"selected_option_id": payload.get("option_id")}
+                compatibility_notes.append("option_id")
+            elif "selected_option_ids" in payload:
+                response_value = {"selected_option_ids": payload.get("selected_option_ids")}
+                compatibility_notes.append("selected_option_ids")
+
+        if not prompt_id and compatibility_notes:
+            prompt_id = str(prompt_contract.get("prompt_id") or "").strip()
+            if prompt_id:
+                compatibility_notes.append("prompt_id_from_pending_prompt")
+
+        if not prompt_id:
+            return None, {
+                "error": "invalid_prompt_response",
+                "detail": "prompt_id is required",
+                "blocked_reason": "prompt_response_invalid",
+                "required_fields": ["prompt_id", "response"],
+                "response_schema": prompt_contract.get("response_schema") if isinstance(prompt_contract.get("response_schema"), dict) else {},
+                "response_examples": prompt_contract.get("response_examples") if isinstance(prompt_contract.get("response_examples"), list) else [],
+            }
+        if response_value is None:
+            return None, {
+                "error": "invalid_prompt_response",
+                "detail": "response is required",
+                "blocked_reason": "prompt_response_invalid",
+                "required_fields": ["prompt_id", "response"],
+                "response_schema": prompt_contract.get("response_schema") if isinstance(prompt_contract.get("response_schema"), dict) else {},
+                "response_examples": prompt_contract.get("response_examples") if isinstance(prompt_contract.get("response_examples"), list) else [],
+            }
+
+        schema_errors = XynApiAdapter._validate_prompt_response_schema(
+            response_value=response_value,
+            response_schema=prompt_contract.get("response_schema") if isinstance(prompt_contract.get("response_schema"), dict) else {},
+        )
+        if schema_errors:
+            return None, {
+                "error": "invalid_prompt_response_schema",
+                "detail": "response did not satisfy planner prompt response schema",
+                "blocked_reason": "prompt_response_invalid",
+                "validation_errors": schema_errors,
+                "required_fields": ["prompt_id", "response"],
+                "response_schema": prompt_contract.get("response_schema") if isinstance(prompt_contract.get("response_schema"), dict) else {},
+                "response_examples": prompt_contract.get("response_examples") if isinstance(prompt_contract.get("response_examples"), list) else [],
+            }
+
+        canonical_option_ids = prompt_contract.get("canonical_option_identifiers")
+        if isinstance(canonical_option_ids, list) and canonical_option_ids:
+            selected: list[str] = []
+            if isinstance(response_value, dict):
+                if isinstance(response_value.get("selected_option_id"), str):
+                    selected = [str(response_value.get("selected_option_id") or "").strip()]
+                elif isinstance(response_value.get("selected_option_ids"), list):
+                    selected = [str(item).strip() for item in response_value.get("selected_option_ids") if str(item).strip()]
+            if selected:
+                invalid = [item for item in selected if item not in canonical_option_ids]
+                if invalid:
+                    return None, {
+                        "error": "invalid_prompt_option",
+                        "detail": "response references unknown prompt option id",
+                        "blocked_reason": "prompt_response_invalid",
+                        "invalid_option_ids": invalid,
+                        "canonical_option_ids": canonical_option_ids,
+                    }
+
+        normalized: Dict[str, Any] = {
+            "prompt_id": prompt_id,
+            "response": response_value,
+        }
+        if metadata:
+            normalized["metadata"] = metadata
+        if compatibility_notes:
+            normalized["compatibility_notes"] = compatibility_notes
+        return normalized, None
 
     @staticmethod
     def _assessment_state(
@@ -2666,8 +3202,16 @@ class XynApiAdapter:
     ) -> str:
         if error_classification == "auth_expired":
             return "auth_expired"
+        if error_classification == "binding_rotated":
+            return "binding_rotated"
+        if error_classification == "empty_tool_surface":
+            return "empty_tool_surface"
         if error_classification == "contract_mismatch":
             return "control_contract_failure"
+        if error_classification == "backend_validation_error":
+            return "backend_validation_error"
+        if error_classification in {"backend_server_error", "transient_transport_failure"}:
+            return "backend_server_error"
         if status_code == 404 or blocked_reason in {"not_found", "session_not_found", "session_stale"}:
             return "session_stale"
         if prompt_pending:
@@ -2696,6 +3240,7 @@ class XynApiAdapter:
         error_classification = str(body.get("error_classification") or normalized.get("error_classification") or "").strip()
         blocked_reason = str(body.get("blocked_reason") or "").strip()
         retry_reason = str(continuity.get("retry_reason") or "").strip()
+        session_key = self._session_state_key(application_id=application_id, session_id=session_id)
 
         auth_state = "fresh" if normalized.get("ok") else ("expired" if error_classification == "auth_expired" else "unknown")
         assessment_state = self._assessment_state(
@@ -2706,6 +3251,33 @@ class XynApiAdapter:
             continuity_retry_reason=retry_reason,
         )
         stale_session_context = assessment_state == "session_stale"
+        session_readable = bool(normalized.get("ok")) and assessment_state not in {
+            "auth_expired",
+            "backend_server_error",
+            "control_contract_failure",
+            "session_stale",
+        }
+        now_ts = self._now_ts()
+        if session_readable:
+            self._session_last_success_read_at[session_key] = now_ts
+            self._session_last_failure_classification[session_key] = ""
+        elif error_classification:
+            self._session_last_failure_classification[session_key] = error_classification
+        tools_discoverable = bool(int(self._planner_binding_state.tool_surface_count or 0) > 0)
+        last_success_read_ts = float(self._session_last_success_read_at.get(session_key) or 0.0)
+        last_failure_classification = str(
+            self._session_last_failure_classification.get(session_key)
+            or error_classification
+            or ""
+        ).strip()
+        auto_retry_safe = assessment_state in {
+            "binding_rotated",
+            "empty_tool_surface",
+            "transient_transport_failure",
+            "ready",
+            "planner_prompt_pending",
+        }
+        session_recreation_recommended = assessment_state in {"session_stale", "control_contract_failure"}
         binding_base_url = str(normalized.get("base_url") or self._config.control_api_base_url).rstrip("/")
         binding_path = f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/control"
         assessment = {
@@ -2721,6 +3293,8 @@ class XynApiAdapter:
                 "auth_refreshed": bool(continuity.get("auth_refreshed")),
                 "action_reissued": bool(continuity.get("action_reissued")),
             },
+            "binding_state": self._planner_binding_snapshot(),
+            "tools_discoverable": tools_discoverable,
             "auth_session": {
                 "state": auth_state,
                 "request_bearer_present": bool(get_request_bearer_token()),
@@ -2731,15 +3305,21 @@ class XynApiAdapter:
                 "session_id": str(session_id),
                 "stale_session_context": stale_session_context,
             },
+            "session_readability": {
+                "readable": session_readable,
+                "last_successful_read_timestamp": last_success_read_ts,
+            },
             "planner_prompt": prompt,
             "allowed_next_actions": body.get("next_allowed_actions") if isinstance(body.get("next_allowed_actions"), list) else [],
             "retry_safety": {
                 "idempotent_reads_safe": True,
                 "control_actions_safe_when_idempotency_key_present": True,
                 "session_create_safe_for_auto_retry": False,
+                "automatic_retry_safe": auto_retry_safe,
             },
-            "last_known_error_classification": error_classification,
+            "last_known_error_classification": last_failure_classification,
             "blocked_reason": blocked_reason,
+            "session_recreation_recommended": session_recreation_recommended,
         }
         normalized["response"] = assessment
         return normalized
@@ -2837,10 +3417,11 @@ class XynApiAdapter:
     def run_change_session_control_action(
         self,
         *,
-        application_id: str,
-        session_id: str,
+        application_id: str = "",
+        session_id: str = "",
         operation: str,
         action_payload: Optional[Dict[str, Any]] = None,
+        handle: Optional[ChangeSessionHandle] = None,
     ) -> Dict[str, Any]:
         normalized_operation = str(operation or "").strip().lower()
         if normalized_operation in {"decide_checkpoint", "approve_checkpoint"}:
@@ -2857,13 +3438,86 @@ class XynApiAdapter:
                 decision=decision or "approved",
                 notes=notes,
             )
+        resolved_handle = handle or self._build_change_session_handle(
+            application_id=application_id,
+            session_id=session_id,
+        )
         payload = dict(action_payload or {})
         payload["operation"] = str(operation or "").strip()
-        allow_reissue_on_transport_error = bool(str(payload.get("idempotency_key") or "").strip())
-        paths = [
-            f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/control/actions",
-            f"/api/v1/applications/{application_id}/change-sessions/{session_id}/control/actions",
-        ]
+        if normalized_operation == "respond_to_planner_prompt":
+            control = self.inspect_change_session_control(handle=resolved_handle)
+            if not bool(control.get("ok")):
+                return self._normalize_planner_route_error(
+                    control,
+                    attempted_paths=self._change_session_control_paths(resolved_handle, suffix="/control"),
+                )
+            control_body = control.get("response") if isinstance(control.get("response"), dict) else {}
+            prompt_contract = self._extract_planner_prompt_contract(control_body)
+            if not bool(prompt_contract.get("pending")):
+                return {
+                    "ok": False,
+                    "status_code": 409,
+                    "method": "POST",
+                    "path": self._change_session_control_paths(resolved_handle, suffix="/control/actions")[0],
+                    "base_url": str(control.get("base_url") or self._config.control_api_base_url).rstrip("/"),
+                    "response": {
+                        "error": "planner_prompt_not_pending",
+                        "detail": "No pending planner prompt is available for this change session.",
+                        "blocked_reason": "planner_prompt_not_pending",
+                        "next_allowed_actions": ["inspect_change_session_control", "get_application_change_session_plan"],
+                    },
+                    "error_classification": "backend_validation_error",
+                }
+            normalized_prompt_payload, validation_error = self._normalize_planner_prompt_answer_payload(
+                payload=payload,
+                prompt_contract=prompt_contract,
+            )
+            if validation_error:
+                return {
+                    "ok": False,
+                    "status_code": 400,
+                    "method": "POST",
+                    "path": self._change_session_control_paths(resolved_handle, suffix="/control/actions")[0],
+                    "base_url": str(control.get("base_url") or self._config.control_api_base_url).rstrip("/"),
+                    "response": validation_error,
+                    "error_classification": "backend_validation_error",
+                }
+            expected_prompt_id = str(prompt_contract.get("prompt_id") or "").strip()
+            supplied_prompt_id = str((normalized_prompt_payload or {}).get("prompt_id") or "").strip()
+            if expected_prompt_id and supplied_prompt_id and expected_prompt_id != supplied_prompt_id:
+                return {
+                    "ok": False,
+                    "status_code": 409,
+                    "method": "POST",
+                    "path": self._change_session_control_paths(resolved_handle, suffix="/control/actions")[0],
+                    "base_url": str(control.get("base_url") or self._config.control_api_base_url).rstrip("/"),
+                    "response": {
+                        "error": "planner_prompt_superseded",
+                        "detail": "Provided prompt_id does not match current pending planner prompt.",
+                        "blocked_reason": "planner_prompt_superseded",
+                        "provided_prompt_id": supplied_prompt_id,
+                        "current_prompt_id": expected_prompt_id,
+                        "next_allowed_actions": ["inspect_change_session_control"],
+                    },
+                    "error_classification": "backend_validation_error",
+                }
+            payload = {
+                "operation": "respond_to_planner_prompt",
+                "prompt_id": supplied_prompt_id,
+                "response": (normalized_prompt_payload or {}).get("response"),
+            }
+            metadata = (normalized_prompt_payload or {}).get("metadata")
+            if isinstance(metadata, dict) and metadata:
+                payload["metadata"] = metadata
+            compatibility_notes = (normalized_prompt_payload or {}).get("compatibility_notes")
+            if isinstance(compatibility_notes, list) and compatibility_notes:
+                payload["client_compatibility_notes"] = compatibility_notes
+
+        # Mutating control actions may only retry when we can prove the prior request
+        # did not reach a viable route (e.g. stale binding 404/405). Transport errors
+        # are reported as unknown delivery state unless idempotency is handled upstream.
+        allow_reissue_on_transport_error = False
+        paths = self._change_session_control_paths(resolved_handle, suffix="/control/actions")
         result = self._request_with_fallback_paths(
             method="POST",
             paths=paths,
@@ -2874,9 +3528,11 @@ class XynApiAdapter:
         return self._normalize_planner_route_error(result, attempted_paths=paths)
 
     def get_change_session_promotion_evidence(self, *, application_id: str, session_id: str) -> Dict[str, Any]:
-        return self._request(
+        handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
+        return self._request_with_fallback_paths(
             method="GET",
-            path=f"/xyn/api/applications/{application_id}/change-sessions/{session_id}/promotion-evidence",
+            paths=self._change_session_control_paths(handle, suffix="/promotion-evidence"),
+            base_urls=self._planner_base_urls(),
         )
 
     def get_release_target_deployment_plan(self, *, target_id: str) -> Dict[str, Any]:

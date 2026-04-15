@@ -1059,11 +1059,14 @@ def _probe_backend_route(adapter: XynApiAdapter, *, method: str, path: str, base
     base_url = adapter.config.control_api_base_url if base == "control" else (
         adapter.config.code_api_base_url or adapter.config.control_api_base_url
     )
-    return adapter._request(  # noqa: SLF001 - intentional internal parity probe
+    result = adapter._request(  # noqa: SLF001 - intentional internal parity probe
         method=method,
         path=path,
         base_url=base_url,
     )
+    if not result.get("ok"):
+        result["error_classification"] = str(result.get("error_classification") or adapter._classify_error(result))  # noqa: SLF001
+    return result
 
 
 def _build_tool_surface(adapter: XynApiAdapter) -> Dict[str, Any]:
@@ -1095,6 +1098,7 @@ def _build_tool_surface(adapter: XynApiAdapter) -> Dict[str, Any]:
         parity[tool_name] = {
             "enabled": route_exists,
             "reason": "" if route_exists else "backend_route_unavailable",
+            "error_classification": str(probe.get("error_classification") or ""),
             "auth_required": status_code in {401, 403},
             "route_exists": route_exists,
             "status_code": status_code,
