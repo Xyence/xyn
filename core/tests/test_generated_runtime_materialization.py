@@ -491,11 +491,11 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         self.assertNotIn("image: postgres:16-alpine", compose_text)
         self.assertNotIn("postgres_data:/var/lib/postgresql/data", compose_text)
         self.assertIn("DATABASE_URL: ${DATABASE_URL:-}", compose_text)
-        self.assertIn("POSTGRES_HOST: ${POSTGRES_HOST:-}", compose_text)
-        self.assertIn("POSTGRES_DB: ${POSTGRES_DB:-}", compose_text)
-        self.assertIn("POSTGRES_USER: ${POSTGRES_USER:-}", compose_text)
-        self.assertIn("POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}", compose_text)
-        self.assertIn("POSTGRES_PORT: ${POSTGRES_PORT:-}", compose_text)
+        self.assertIn("POSTGRES_HOST: ${POSTGRES_HOST:-db}", compose_text)
+        self.assertIn("POSTGRES_DB: ${POSTGRES_DB:-xyn}", compose_text)
+        self.assertIn("POSTGRES_USER: ${POSTGRES_USER:-xyn}", compose_text)
+        self.assertIn("POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-xyn_dev_password}", compose_text)
+        self.assertIn("POSTGRES_PORT: ${POSTGRES_PORT:-5432}", compose_text)
 
     def test_write_compose_env_file_includes_oidc_and_database_override(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -537,6 +537,23 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         self.assertIn("POSTGRES_DB=xyn_preview_123", text)
         self.assertIn("POSTGRES_USER=scoped_user", text)
         self.assertIn("POSTGRES_PASSWORD=scoped_pass", text)
+
+    def test_write_compose_env_file_derives_postgres_env_from_inherited_database_url(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            deploy_dir = Path(tmpdir)
+            with mock.patch.dict(
+                "os.environ",
+                {"DATABASE_URL": "postgresql://inherited_user:inherited_pass@inherited-rds.internal:5432/inherited_db"},
+                clear=False,
+            ):
+                env_path = _write_compose_env_file(deploy_dir=deploy_dir)
+            text = env_path.read_text(encoding="utf-8")
+
+        self.assertIn("POSTGRES_HOST=inherited-rds.internal", text)
+        self.assertIn("POSTGRES_PORT=5432", text)
+        self.assertIn("POSTGRES_DB=inherited_db", text)
+        self.assertIn("POSTGRES_USER=inherited_user", text)
+        self.assertIn("POSTGRES_PASSWORD=inherited_pass", text)
 
 
 if __name__ == "__main__":

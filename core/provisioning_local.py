@@ -72,7 +72,9 @@ def _write_compose_env_file(*, deploy_dir: Path, database_url: str = "") -> Path
     database_url_value = str(database_url or "").strip()
     if database_url_value:
         values["DATABASE_URL"] = database_url_value
-        values.update(_postgres_env_from_database_url(database_url_value))
+    effective_database_url = str(values.get("DATABASE_URL") or "").strip()
+    if effective_database_url:
+        values.update(_postgres_env_from_database_url(effective_database_url))
     values.setdefault("PWD", str(Path.cwd()))
     lines: list[str] = []
     for key in sorted(values):
@@ -415,11 +417,11 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
 """
         migrate_postgres_dependency = backend_postgres_dependency
     else:
-        postgres_backend_env = """      POSTGRES_DB: ${POSTGRES_DB:-}
-      POSTGRES_USER: ${POSTGRES_USER:-}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
-      POSTGRES_HOST: ${POSTGRES_HOST:-}
-      POSTGRES_PORT: ${POSTGRES_PORT:-}
+        postgres_backend_env = """      POSTGRES_DB: ${POSTGRES_DB:-xyn}
+      POSTGRES_USER: ${POSTGRES_USER:-xyn}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-xyn_dev_password}
+      POSTGRES_HOST: ${POSTGRES_HOST:-db}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
 """
         postgres_migrate_env = postgres_backend_env
         volumes_block = ""
