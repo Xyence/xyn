@@ -48,6 +48,11 @@ _MCP_FAILURE_CLASSES = {
 
 logger = logging.getLogger(__name__)
 
+_RUNTIME_JSON_PATH_PATTERN = re.compile(
+    r"^/(?:xyn/api/|api/v1/)?(?:runs|runtime-runs)(?:/|$)",
+    re.IGNORECASE,
+)
+
 
 def set_request_bearer_token(token: str) -> Token:
     return _REQUEST_BEARER_TOKEN.set(str(token or "").strip())
@@ -299,6 +304,18 @@ class XynApiAdapter:
     @staticmethod
     def _binding_id(base_url: str, path: str) -> str:
         return f"{str(base_url or '').rstrip('/')}{str(path or '').strip()}"
+
+    @staticmethod
+    def _is_runtime_json_path(path: str) -> bool:
+        normalized = str(path or "").strip()
+        return bool(_RUNTIME_JSON_PATH_PATTERN.match(normalized))
+
+    @staticmethod
+    def _looks_like_html(raw_text: str) -> bool:
+        token = str(raw_text or "").strip().lower()
+        if not token:
+            return False
+        return token.startswith("<!doctype html") or token.startswith("<html") or "<body" in token
 
     @staticmethod
     def _classify_error(result: Dict[str, Any]) -> str:
@@ -625,6 +642,26 @@ class XynApiAdapter:
             "base_url": resolved_base_url,
             "response": body if isinstance(body, (dict, list)) else {"value": body},
         }
+        if bool(result.get("ok")) and self._is_runtime_json_path(path):
+            payload = result.get("response") if isinstance(result.get("response"), dict) else {}
+            raw_text = str(payload.get("raw_text") or "").strip()
+            content_type = str(getattr(response, "headers", {}).get("content-type", "") or "").lower()
+            if self._looks_like_html(raw_text) or ("text/html" in content_type and not isinstance(body, (dict, list))):
+                result = {
+                    "ok": False,
+                    "status_code": 502,
+                    "method": method.upper(),
+                    "path": path,
+                    "base_url": resolved_base_url,
+                    "response": {
+                        "error": "runtime_route_contract_mismatch",
+                        "blocked_reason": "contract_mismatch",
+                        "detail": "Runtime endpoint returned HTML instead of JSON.",
+                        "content_type": content_type,
+                    },
+                    "error_classification": "contract_mismatch",
+                }
+                return result
         should_retry_auth = (
             bool(request_bearer and static_bearer and request_bearer != static_bearer)
             and int(result.get("status_code") or 0) in {401, 403}
@@ -1947,9 +1984,11 @@ class XynApiAdapter:
         run_payload = payload.get("run") if isinstance(payload.get("run"), dict) else payload
         normalized_run = XynApiAdapter._normalize_runtime_run_row(run_payload) if isinstance(run_payload, dict) else {}
         status_code = int(result.get("status_code") or 0)
-        blocked_reason = ""
+        blocked_reason = str(payload.get("blocked_reason") or "").strip()
         if not result.get("ok"):
-            if status_code in {401, 403}:
+            if blocked_reason:
+                pass
+            elif status_code in {401, 403}:
                 blocked_reason = "permission_denied"
             elif status_code == 404:
                 blocked_reason = "not_found"
@@ -2909,8 +2948,6 @@ class XynApiAdapter:
             [
                 "/xyn/api/runtime-runs",
                 "/xyn/api/runs",
-                "/runtime/runs",
-                "/runs",
                 "/api/v1/runs",
             ]
         )
@@ -2960,7 +2997,6 @@ class XynApiAdapter:
             [
                 f"/xyn/api/runtime-runs/{normalized_run_id}",
                 f"/xyn/api/runs/{normalized_run_id}",
-                f"/runs/{normalized_run_id}",
                 f"/api/v1/runs/{normalized_run_id}",
             ]
         )
@@ -2992,7 +3028,6 @@ class XynApiAdapter:
                 f"/xyn/api/runtime-runs/{normalized_run_id}/logs",
                 f"/xyn/api/runs/{normalized_run_id}/logs",
                 f"/xyn/api/runs/{normalized_run_id}/steps",
-                f"/runs/{normalized_run_id}/steps",
                 f"/api/v1/runs/{normalized_run_id}/steps",
             ]
         )
@@ -3023,7 +3058,6 @@ class XynApiAdapter:
             [
                 f"/xyn/api/runtime-runs/{normalized_run_id}/artifacts",
                 f"/xyn/api/runs/{normalized_run_id}/artifacts",
-                f"/runs/{normalized_run_id}/artifacts",
                 f"/api/v1/runs/{normalized_run_id}/artifacts",
             ]
         )
@@ -3055,7 +3089,6 @@ class XynApiAdapter:
                 f"/xyn/api/runtime-runs/{normalized_run_id}/commands",
                 f"/xyn/api/runs/{normalized_run_id}/commands",
                 f"/xyn/api/runs/{normalized_run_id}/steps",
-                f"/runs/{normalized_run_id}/steps",
                 f"/api/v1/runs/{normalized_run_id}/steps",
             ]
         )
@@ -3086,7 +3119,6 @@ class XynApiAdapter:
             [
                 f"/xyn/api/runtime-runs/{normalized_run_id}/cancel",
                 f"/xyn/api/runs/{normalized_run_id}/cancel",
-                f"/runs/{normalized_run_id}/cancel",
                 f"/api/v1/runs/{normalized_run_id}/cancel",
             ]
         )
@@ -3121,7 +3153,6 @@ class XynApiAdapter:
                 f"/xyn/api/runtime-runs/{normalized_run_id}/retry",
                 f"/xyn/api/runs/{normalized_run_id}/rerun",
                 f"/xyn/api/runs/{normalized_run_id}/retry",
-                f"/runs/{normalized_run_id}/retry",
                 f"/api/v1/runs/{normalized_run_id}/retry",
             ]
         )

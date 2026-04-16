@@ -1941,6 +1941,117 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(first_log.get("summary"), "2 tests failed")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_runtime_run_binding_preserves_api_prefix(self, mock_request: mock.Mock) -> None:
+        def _fake_request(*_args, **kwargs):
+            url = str(kwargs.get("url") or "")
+            response = mock.Mock()
+            if url.endswith("/xyn/api/runs/run-42"):
+                response.status_code = 200
+                response.json.return_value = {"id": "run-42", "status": "running"}
+                response.headers = {"content-type": "application/json"}
+                return response
+            response.status_code = 404
+            response.json.return_value = {"detail": "Not Found"}
+            response.headers = {"content-type": "application/json"}
+            return response
+
+        mock_request.side_effect = _fake_request
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="https://xyn.xyence.io",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        result = adapter.get_runtime_run(run_id="run-42")
+        self.assertTrue(result.get("ok"))
+        called_urls = [str(call.kwargs.get("url") or "") for call in mock_request.call_args_list]
+        self.assertIn("https://xyn.xyence.io/xyn/api/runs/run-42", called_urls)
+        self.assertNotIn("https://xyn.xyence.io/runs/run-42", called_urls)
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_runtime_run_retry_preserves_api_namespace(self, mock_request: mock.Mock) -> None:
+        first = mock.Mock()
+        first.status_code = 404
+        first.json.return_value = {"detail": "Not Found"}
+        first.headers = {"content-type": "application/json"}
+
+        second = mock.Mock()
+        second.status_code = 200
+        second.json.return_value = {"id": "run-77", "status": "completed"}
+        second.headers = {"content-type": "application/json"}
+
+        mock_request.side_effect = [first, second]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        result = adapter.get_runtime_run(run_id="run-77")
+        self.assertTrue(result.get("ok"))
+        called_urls = [str(call.kwargs.get("url") or "") for call in mock_request.call_args_list]
+        self.assertEqual(called_urls[0], "http://xyn.local:8001/xyn/api/runtime-runs/run-77")
+        self.assertEqual(called_urls[1], "http://xyn.local:8001/xyn/api/runs/run-77")
+        self.assertNotIn("http://xyn.local:8001/runs/run-77", called_urls)
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_runtime_run_html_response_is_contract_mismatch(self, mock_request: mock.Mock) -> None:
+        def _html_response() -> mock.Mock:
+            response = mock.Mock()
+            response.status_code = 200
+            response.json.side_effect = ValueError("not json")
+            response.text = "<!doctype html><html><body>SPA shell</body></html>"
+            response.headers = {"content-type": "text/html; charset=utf-8"}
+            return response
+
+        mock_request.side_effect = [_html_response(), _html_response(), _html_response()]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="https://xyn.xyence.io",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        result = adapter.get_runtime_run(run_id="run-html")
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(str(result.get("error_classification") or ""), "contract_mismatch")
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        self.assertEqual(str(body.get("blocked_reason") or ""), "contract_mismatch")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_runtime_run_json_response_parses_normally(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"id": "run-ok", "status": "completed"}
+        response.headers = {"content-type": "application/json"}
+        mock_request.return_value = response
+
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.get_runtime_run(run_id="run-ok")
+        self.assertTrue(result.get("ok"))
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        self.assertEqual(str(body.get("run_id") or ""), "run-ok")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_runtime_run_missing_and_forbidden_access(self, mock_request: mock.Mock) -> None:
         def _fake_request(*_args, **kwargs):
             url = str(kwargs.get("url") or "")
