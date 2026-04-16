@@ -209,7 +209,12 @@ def _ensure_remote_workspace_via_container(*, api_container_name: str, workspace
     script = (
         "import json\n"
         "from xyn_orchestrator.models import RoleBinding, Workspace, WorkspaceMembership\n"
-        "from xyn_orchestrator.xyn_api import _ensure_default_workspace_artifact_bindings, _ensure_local_identity\n"
+        "from xyn_orchestrator.xyn_api import (\n"
+        "    WORKSPACE_ROLE_DEFAULT_USER,\n"
+        "    _ensure_default_workspace_artifact_bindings,\n"
+        "    _ensure_local_identity,\n"
+        "    _ensure_workspace_role_metadata,\n"
+        ")\n"
         f"slug = {json.dumps(slug)}\n"
         f"title = {json.dumps(title)}\n"
         "workspace = Workspace.objects.filter(slug=slug).first()\n"
@@ -221,6 +226,12 @@ def _ensure_remote_workspace_via_container(*, api_container_name: str, workspace
         "    )\n"
         "    if created:\n"
         "        _ensure_default_workspace_artifact_bindings(workspace)\n"
+        "workspace = _ensure_workspace_role_metadata(\n"
+        "    workspace,\n"
+        "    role=WORKSPACE_ROLE_DEFAULT_USER,\n"
+        "    hidden_from_ui=False,\n"
+        "    bootstrap_source='provision_local_workspace',\n"
+        ")\n"
         "identity = _ensure_local_identity('admin@local')\n"
         "WorkspaceMembership.objects.get_or_create(\n"
         "    workspace=workspace,\n"
@@ -454,6 +465,7 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
 {postgres_backend_env}\
       XYN_ENV: local
       XYN_AUTH_MODE: {auth_mode}
+      XYN_ORG_NAME: ${{XYN_ORG_NAME:-}}
       DJANGO_ALLOWED_HOSTS: ${{DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,backend,{ui_host},{api_host}}}
       XYN_INTENT_ENGINE_V1: ${{XYN_INTENT_ENGINE_V1:-1}}
       XYN_PUBLIC_BASE_URL: ${{XYN_PUBLIC_BASE_URL:-{ui_scheme}://{ui_host}}}
@@ -538,6 +550,7 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
 {postgres_migrate_env}\
       XYN_ENV: local
       XYN_AUTH_MODE: {auth_mode}
+      XYN_ORG_NAME: ${{XYN_ORG_NAME:-}}
       DJANGO_ALLOWED_HOSTS: ${{DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,backend,{ui_host},{api_host}}}
       XYN_INTENT_ENGINE_V1: ${{XYN_INTENT_ENGINE_V1:-1}}
       XYN_PUBLIC_BASE_URL: ${{XYN_PUBLIC_BASE_URL:-{ui_scheme}://{ui_host}}}

@@ -14,6 +14,7 @@ from core.provisioning_local import (
     _bootstrap_remote_default_agent,
     _compose_yaml,
     _compose_down_cmd,
+    _ensure_remote_workspace_via_container,
     _ensure_remote_workspace,
     _resolve_images_for_provision,
     _write_compose_env_file,
@@ -303,6 +304,29 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         self.assertEqual(result["workspace_slug"], "epicb-lab")
         self.assertEqual(opener.open.call_count, 3)
 
+    def test_workspace_seed_container_fallback_assigns_default_user_role(self):
+        captured: dict[str, object] = {}
+
+        def _fake_run(args, cwd=None, env=None):
+            captured["args"] = args
+            return (0, '{"status":"created","workspace_id":"w-1","workspace_slug":"xyence"}\n', "")
+
+        with mock.patch("core.provisioning_local._run", side_effect=_fake_run):
+            result = _ensure_remote_workspace_via_container(
+                api_container_name="xyn-local-api",
+                workspace_slug="xyence",
+                workspace_title="Xyence",
+            )
+
+        self.assertIsInstance(result, dict)
+        self.assertEqual((result or {}).get("workspace_slug"), "xyence")
+        cmd = captured.get("args")
+        self.assertIsInstance(cmd, list)
+        script = str((cmd or [])[-1])
+        self.assertIn("_ensure_workspace_role_metadata", script)
+        self.assertIn("WORKSPACE_ROLE_DEFAULT_USER", script)
+        self.assertIn("bootstrap_source='provision_local_workspace'", script)
+
     @mock.patch("core.provisioning_local.SessionLocal")
     @mock.patch("core.provisioning_local.resolve_registry_images")
     def test_provision_prefers_artifact_registry_by_default(self, resolve_registry_images, session_local):
@@ -471,6 +495,7 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
             "XYN_BOOTSTRAP_FIRST_OIDC_ADMIN_FALLBACK: ${XYN_BOOTSTRAP_FIRST_OIDC_ADMIN_FALLBACK:-}",
             compose_text,
         )
+        self.assertIn("XYN_ORG_NAME: ${XYN_ORG_NAME:-}", compose_text)
         self.assertIn("${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn:/workspace/xyn", compose_text)
         self.assertIn(
             "${XYN_PLATFORM_HOST_SRC_PATH:-${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn-platform}:/workspace/xyn-platform",
