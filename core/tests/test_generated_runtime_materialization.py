@@ -326,6 +326,7 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         self.assertIn("_ensure_workspace_role_metadata", script)
         self.assertIn("WORKSPACE_ROLE_DEFAULT_USER", script)
         self.assertIn("bootstrap_source='provision_local_workspace'", script)
+        self.assertIn("_ensure_default_xyn_solution_for_workspace(workspace=workspace)", script)
 
     @mock.patch("core.provisioning_local.SessionLocal")
     @mock.patch("core.provisioning_local.resolve_registry_images")
