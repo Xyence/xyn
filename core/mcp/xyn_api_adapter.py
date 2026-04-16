@@ -2346,6 +2346,53 @@ class XynApiAdapter:
             result["response"] = response
             return result
 
+        # Artifact-scoped/session-scoped create operations require workspace context.
+        # Resolve it deterministically for fresh installs when the caller omitted it.
+        if not normalized_application_id and not normalized_workspace_id:
+            resolved_workspace = self._resolve_workspace_for_request(
+                explicit_workspace_id="",
+                require_workspace=True,
+            )
+            if not resolved_workspace.get("ok"):
+                candidate_workspaces = (
+                    resolved_workspace.get("candidate_workspaces")
+                    if isinstance(resolved_workspace.get("candidate_workspaces"), list)
+                    else []
+                )
+                resolution_error = str(resolved_workspace.get("error") or "workspace_required").strip() or "workspace_required"
+                blocked_reason = (
+                    "workspace_forbidden"
+                    if resolution_error == "workspace_forbidden"
+                    else "scope_resolution_failed"
+                )
+                detail = str(resolved_workspace.get("detail") or "").strip() or (
+                    "workspace_id is required when application_id is omitted."
+                )
+                return {
+                    "ok": False,
+                    "status_code": int(resolved_workspace.get("status_code") or 400),
+                    "method": "POST",
+                    "path": "/xyn/api/change-sessions",
+                    "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                    "response": {
+                        "error": resolution_error,
+                        "detail": detail,
+                        "blocked_reason": blocked_reason,
+                        "next_allowed_actions": [
+                            "list_workspaces",
+                            "list_artifacts",
+                            "create_decomposition_campaign",
+                        ],
+                        "candidate_workspaces": candidate_workspaces,
+                    },
+                    "error_classification": (
+                        "auth_expired"
+                        if resolution_error == "workspace_forbidden"
+                        else "scope_resolution_failed"
+                    ),
+                }
+            normalized_workspace_id = str(resolved_workspace.get("workspace_id") or "").strip()
+
         request_payload = dict(payload or {})
         if normalized_application_id:
             request_payload["application_id"] = normalized_application_id

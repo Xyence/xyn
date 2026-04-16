@@ -1441,6 +1441,97 @@ class XynMcpAdapterTests(TestCase):
         self.assertNotIn("artifact_slug", payload)
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_create_decomposition_campaign_resolves_workspace_when_omitted_for_artifact_scope(
+        self, mock_request: mock.Mock
+    ) -> None:
+        workspaces = mock.Mock()
+        workspaces.status_code = 200
+        workspaces.headers = {}
+        workspaces.json.return_value = {
+            "workspaces": [{"id": "ws-1", "slug": "development", "name": "Development"}]
+        }
+        create = mock.Mock()
+        create.status_code = 201
+        create.headers = {}
+        create.json.return_value = {
+            "created": True,
+            "application_id": "app-artifact-1",
+            "scope_type": "artifact",
+            "scope": {
+                "scope_type": "artifact",
+                "application_id": "app-artifact-1",
+                "artifact_id": "art-1",
+                "artifact_slug": "xyn-api",
+                "workspace_id": "ws-1",
+            },
+            "session": {"id": "sess-1", "application_id": "app-artifact-1"},
+        }
+        mock_request.side_effect = [workspaces, create]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.create_decomposition_campaign(
+            artifact_slug="xyn-api",
+            target_source_files=["backend/xyn_orchestrator/xyn_api.py"],
+        )
+        self.assertTrue(result.get("ok"))
+        self.assertEqual(mock_request.call_count, 2)
+        first_call = mock_request.call_args_list[0].kwargs
+        second_call = mock_request.call_args_list[1].kwargs
+        self.assertEqual(first_call.get("method"), "GET")
+        self.assertEqual(first_call.get("url"), "http://xyn.local:8001/xyn/api/workspaces")
+        self.assertEqual(second_call.get("method"), "POST")
+        self.assertEqual(second_call.get("url"), "http://xyn.local:8001/xyn/api/change-sessions")
+        payload = second_call.get("json") or {}
+        self.assertEqual(payload.get("workspace_id"), "ws-1")
+        self.assertEqual(payload.get("artifact_slug"), "xyn-api")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_create_decomposition_campaign_returns_structured_scope_resolution_error_when_workspace_unresolved(
+        self, mock_request: mock.Mock
+    ) -> None:
+        workspaces = mock.Mock()
+        workspaces.status_code = 200
+        workspaces.headers = {}
+        workspaces.json.return_value = {
+            "workspaces": [
+                {"id": "ws-1", "slug": "development", "name": "Development"},
+                {"id": "ws-2", "slug": "staging", "name": "Staging"},
+            ]
+        }
+        mock_request.return_value = workspaces
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.create_decomposition_campaign(
+            artifact_slug="xyn-api",
+            target_source_files=["backend/xyn_orchestrator/xyn_api.py"],
+        )
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(int(result.get("status_code") or 0), 400)
+        self.assertEqual(str(result.get("error_classification") or ""), "scope_resolution_failed")
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        self.assertEqual(str(body.get("blocked_reason") or ""), "scope_resolution_failed")
+        self.assertEqual(str(body.get("error") or ""), "workspace_required")
+        self.assertEqual(
+            [str((row or {}).get("id") or "") for row in (body.get("candidate_workspaces") or [])],
+            ["ws-1", "ws-2"],
+        )
+        self.assertEqual(mock_request.call_count, 1)
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_inspect_change_session_control_supports_session_scoped_route_when_application_unknown(
         self, mock_request: mock.Mock
     ) -> None:
