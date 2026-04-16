@@ -2328,6 +2328,23 @@ class XynApiAdapter:
         normalized_artifact_id = str(artifact_id or "").strip()
         normalized_artifact_slug = str(artifact_slug or "").strip()
         normalized_workspace_id = str(workspace_id or "").strip()
+        request_payload = dict(payload or {})
+
+        if normalized_application_id and not (normalized_artifact_id or normalized_artifact_slug):
+            # Backward-compatibility guard: some callers still pass artifact_id in application_id.
+            # For decomposition/create-session flows, detect that shape and route to artifact scope.
+            if "decomposition_campaign" in request_payload:
+                app_lookup = self.get_application(application_id=normalized_application_id)
+                if not app_lookup.get("ok"):
+                    status = int(app_lookup.get("status_code") or 0)
+                    if status in {404, 400}:
+                        artifact_row = self._resolve_artifact_record(artifact_id=normalized_application_id)
+                        if isinstance(artifact_row, dict) and (
+                            str(artifact_row.get("id") or "").strip() == normalized_application_id
+                        ):
+                            normalized_artifact_id = normalized_application_id
+                            normalized_artifact_slug = str(artifact_row.get("slug") or normalized_artifact_slug).strip()
+                            normalized_application_id = ""
 
         if normalized_application_id and not (normalized_artifact_id or normalized_artifact_slug):
             result = self.create_application_change_session(
@@ -2393,7 +2410,6 @@ class XynApiAdapter:
                 }
             normalized_workspace_id = str(resolved_workspace.get("workspace_id") or "").strip()
 
-        request_payload = dict(payload or {})
         if normalized_application_id:
             request_payload["application_id"] = normalized_application_id
         if normalized_workspace_id:

@@ -1440,6 +1440,62 @@ class XynMcpAdapterTests(TestCase):
         self.assertNotIn("artifact_id", payload)
         self.assertNotIn("artifact_slug", payload)
 
+    @mock.patch("core.mcp.xyn_api_adapter.XynApiAdapter._resolve_workspace_for_request")
+    @mock.patch("core.mcp.xyn_api_adapter.XynApiAdapter._resolve_artifact_record")
+    @mock.patch("core.mcp.xyn_api_adapter.XynApiAdapter.get_application")
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_create_decomposition_campaign_recovers_when_artifact_id_is_passed_as_application_id(
+        self,
+        mock_request: mock.Mock,
+        mock_get_application: mock.Mock,
+        mock_resolve_artifact: mock.Mock,
+        mock_resolve_workspace: mock.Mock,
+    ) -> None:
+        mock_get_application.return_value = {
+            "ok": False,
+            "status_code": 404,
+            "response": {"error": "application not found"},
+        }
+        mock_resolve_artifact.return_value = {"id": "art-1", "slug": "xyn-api", "title": "xyn-api"}
+        mock_resolve_workspace.return_value = {"ok": True, "workspace_id": "ws-1"}
+        create = mock.Mock()
+        create.status_code = 201
+        create.headers = {}
+        create.json.return_value = {
+            "created": True,
+            "application_id": "app-artifact-1",
+            "scope_type": "artifact",
+            "scope": {
+                "scope_type": "artifact",
+                "application_id": "app-artifact-1",
+                "artifact_id": "art-1",
+                "artifact_slug": "xyn-api",
+                "workspace_id": "ws-1",
+            },
+            "session": {"id": "sess-1", "application_id": "app-artifact-1"},
+        }
+        mock_request.return_value = create
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.create_decomposition_campaign(
+            application_id="art-1",
+            target_source_files=["backend/xyn_orchestrator/xyn_api.py"],
+        )
+        self.assertTrue(result.get("ok"))
+        create_call = mock_request.call_args.kwargs
+        self.assertEqual(create_call.get("url"), "http://xyn.local:8001/xyn/api/change-sessions")
+        payload = create_call.get("json") or {}
+        self.assertEqual(payload.get("artifact_id"), "art-1")
+        self.assertEqual(payload.get("artifact_slug"), "xyn-api")
+        self.assertEqual(payload.get("workspace_id"), "ws-1")
+
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_create_decomposition_campaign_resolves_workspace_when_omitted_for_artifact_scope(
         self, mock_request: mock.Mock
