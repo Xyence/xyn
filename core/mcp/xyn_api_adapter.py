@@ -2650,6 +2650,10 @@ class XynApiAdapter:
         resolved_artifact_id = str(artifact_id or "").strip()
         resolved_artifact_slug = str(artifact_slug or "").strip()
         if not resolved_artifact_id:
+            resolved_artifact_id = str(scope.get("artifact_id") or body.get("artifact_id") or "").strip()
+        if not resolved_artifact_slug:
+            resolved_artifact_slug = str(scope.get("artifact_slug") or body.get("artifact_slug") or "").strip()
+        if not resolved_artifact_id:
             selected_ids = self._extract_string_list(raw, {"selected_artifact_ids", "artifact_ids"})
             if selected_ids:
                 resolved_artifact_id = selected_ids[0]
