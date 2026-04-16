@@ -41,6 +41,7 @@ _MCP_FAILURE_CLASSES = {
     "transient_transport_failure",
     "application_not_found",
     "artifact_not_found",
+    "workspace_forbidden",
     "scope_resolution_failed",
     "unsupported_scope_mode",
     "unknown_mcp_failure",
@@ -52,6 +53,10 @@ _RUNTIME_JSON_PATH_PATTERN = re.compile(
     r"^/(?:xyn/api/|api/v1/)?(?:runs|runtime-runs)(?:/|$)",
     re.IGNORECASE,
 )
+_WORKSPACE_ROLE_SYSTEM_PLATFORM = "system_platform"
+_WORKSPACE_ROLE_DEFAULT_USER = "default_user"
+_WORKSPACE_ROLE_USER_VISIBLE = "user_visible"
+_SYSTEM_ARTIFACT_SLUGS = {"xyn-api", "xyn-ui", "core.workbench"}
 
 
 def set_request_bearer_token(token: str) -> Token:
@@ -101,8 +106,7 @@ class XynApiAdapterConfig:
             timeout_seconds=float(os.getenv("XYN_MCP_TIMEOUT_SECONDS", "30").strip() or "30"),
             upstream_host_header=str(os.getenv("XYN_MCP_UPSTREAM_HOST_HEADER", "")).strip() or derived_host,
             upstream_forwarded_proto=str(os.getenv("XYN_MCP_UPSTREAM_FORWARDED_PROTO", "")).strip() or derived_proto,
-            default_workspace_id=str(os.getenv("XYN_MCP_WORKSPACE_ID", "")).strip()
-            or str(os.getenv("XYN_WORKSPACE_ID", "")).strip(),
+            default_workspace_id=str(os.getenv("XYN_MCP_WORKSPACE_ID", "")).strip(),
         )
 
 
@@ -135,6 +139,7 @@ class XynApiAdapter:
         self._planner_binding_state = McpBindingState()
         self._session_last_success_read_at: dict[str, float] = {}
         self._session_last_failure_classification: dict[str, str] = {}
+        self._resolved_default_workspace_id: str = ""
 
     @property
     def config(self) -> XynApiAdapterConfig:
@@ -337,6 +342,8 @@ class XynApiAdapter:
             return "artifact_not_found"
         if blocked_reason in {"application_not_found"}:
             return "application_not_found"
+        if error_token == "workspace_forbidden" or blocked_reason == "workspace_forbidden":
+            return "workspace_forbidden"
         if blocked_reason in {"scope_resolution_failed", "unsupported_scope_mode"}:
             return blocked_reason
         if status_code in {401, 403} or error_token in {"unauthorized", "not authenticated", "not_authenticated"}:
@@ -2196,13 +2203,65 @@ class XynApiAdapter:
             "raw": payload,
         }
 
+    @staticmethod
+    def _workspace_role_from_row(row: dict[str, Any]) -> str:
+        role = str(row.get("workspace_role") or "").strip().lower()
+        if role:
+            return role
+        metadata = row.get("metadata")
+        if isinstance(metadata, dict):
+            value = str(metadata.get("xyn_workspace_role") or "").strip().lower()
+            if value:
+                return value
+            if metadata.get("xyn_system_workspace") is True:
+                return _WORKSPACE_ROLE_SYSTEM_PLATFORM
+        slug = str(row.get("slug") or "").strip().lower()
+        if slug in {"platform-builder", "civic-lab"}:
+            return _WORKSPACE_ROLE_SYSTEM_PLATFORM
+        return ""
+
+    @staticmethod
+    def _workspace_resolution_by_intent(
+        *,
+        intent: str,
+        candidate_workspaces: list[dict[str, Any]],
+    ) -> str:
+        normalized_intent = str(intent or "").strip().lower() or "user"
+        preferred_role = _WORKSPACE_ROLE_SYSTEM_PLATFORM if normalized_intent == "system" else _WORKSPACE_ROLE_DEFAULT_USER
+        role_match = next(
+            (
+                str(row.get("id") or "").strip()
+                for row in candidate_workspaces
+                if isinstance(row, dict)
+                and str(row.get("id") or "").strip()
+                and XynApiAdapter._workspace_role_from_row(row) == preferred_role
+            ),
+            "",
+        )
+        if role_match:
+            return role_match
+        user_visible = next(
+            (
+                str(row.get("id") or "").strip()
+                for row in candidate_workspaces
+                if isinstance(row, dict)
+                and str(row.get("id") or "").strip()
+                and XynApiAdapter._workspace_role_from_row(row)
+                in {_WORKSPACE_ROLE_DEFAULT_USER, _WORKSPACE_ROLE_USER_VISIBLE}
+            ),
+            "",
+        )
+        if user_visible:
+            return user_visible
+        return ""
+
     def _list_accessible_workspaces(self) -> Dict[str, Any]:
         result = self._request_with_fallback_paths(
             method="GET",
             paths=["/xyn/api/workspaces"],
             base_urls=[self._config.control_api_base_url],
         )
-        workspace_rows: list[dict[str, str]] = []
+        workspace_rows: list[dict[str, Any]] = []
         if not result.get("ok"):
             return {"ok": False, "result": result, "workspaces": workspace_rows}
         body = result.get("response") if isinstance(result.get("response"), dict) else {}
@@ -2218,6 +2277,8 @@ class XynApiAdapter:
                     "id": workspace_id,
                     "slug": str(row.get("slug") or "").strip(),
                     "title": str(row.get("title") or row.get("name") or "").strip(),
+                    "workspace_role": str(row.get("workspace_role") or "").strip().lower(),
+                    "metadata": row.get("metadata") if isinstance(row.get("metadata"), dict) else {},
                 }
             )
         return {"ok": True, "result": result, "workspaces": workspace_rows}
@@ -2227,7 +2288,7 @@ class XynApiAdapter:
         *,
         error: str,
         detail: str,
-        candidate_workspaces: list[dict[str, str]],
+        candidate_workspaces: list[dict[str, Any]],
     ) -> Dict[str, Any]:
         out: Dict[str, Any] = {
             "error": str(error or "workspace_required"),
@@ -2244,7 +2305,7 @@ class XynApiAdapter:
         path: str,
         error: str,
         detail: str,
-        candidate_workspaces: list[dict[str, str]],
+        candidate_workspaces: list[dict[str, Any]],
         status_code: int,
     ) -> Dict[str, Any]:
         return {
@@ -2265,21 +2326,42 @@ class XynApiAdapter:
         *,
         explicit_workspace_id: str = "",
         require_workspace: bool = True,
+        intent: str = "user",
     ) -> Dict[str, Any]:
         explicit = str(explicit_workspace_id or "").strip()
         if explicit:
             return {"ok": True, "workspace_id": explicit, "source": "explicit", "candidate_workspaces": []}
 
-        configured_default = str(self._config.default_workspace_id or "").strip()
+        accessible = self._list_accessible_workspaces()
+        candidate_workspaces = accessible.get("workspaces") if isinstance(accessible.get("workspaces"), list) else []
+        if not accessible.get("ok"):
+            if require_workspace:
+                return {
+                    "ok": False,
+                    "status_code": 400,
+                    "error": "workspace_required",
+                    "detail": "workspace_id is required and no default workspace could be resolved.",
+                    "candidate_workspaces": candidate_workspaces,
+                }
+            return {"ok": True, "workspace_id": "", "source": "none", "candidate_workspaces": candidate_workspaces}
+
+        configured_default = str(self._resolved_default_workspace_id or self._config.default_workspace_id or "").strip()
         if configured_default:
-            accessible = self._list_accessible_workspaces()
-            candidate_workspaces = accessible.get("workspaces") if isinstance(accessible.get("workspaces"), list) else []
             accessible_ids = {
                 str(row.get("id") or "").strip()
                 for row in candidate_workspaces
                 if isinstance(row, dict) and str(row.get("id") or "").strip()
             }
             if accessible.get("ok") and accessible_ids and configured_default not in accessible_ids:
+                recovered = self._workspace_resolution_by_intent(intent=intent, candidate_workspaces=candidate_workspaces)
+                if recovered:
+                    self._resolved_default_workspace_id = recovered
+                    return {
+                        "ok": True,
+                        "workspace_id": recovered,
+                        "source": "recovered_from_workspace_forbidden",
+                        "candidate_workspaces": candidate_workspaces,
+                    }
                 return {
                     "ok": False,
                     "status_code": 403,
@@ -2297,22 +2379,20 @@ class XynApiAdapter:
         if not require_workspace:
             return {"ok": True, "workspace_id": "", "source": "none", "candidate_workspaces": []}
 
-        accessible = self._list_accessible_workspaces()
-        candidate_workspaces = accessible.get("workspaces") if isinstance(accessible.get("workspaces"), list) else []
-        if not accessible.get("ok"):
-            return {
-                "ok": False,
-                "status_code": 400,
-                "error": "workspace_required",
-                "detail": "workspace_id is required and no default workspace could be resolved.",
-                "candidate_workspaces": candidate_workspaces,
-            }
-
         if len(candidate_workspaces) == 1:
             return {
                 "ok": True,
                 "workspace_id": str(candidate_workspaces[0].get("id") or "").strip(),
                 "source": "single_accessible_workspace",
+                "candidate_workspaces": candidate_workspaces,
+            }
+
+        intent_selected = self._workspace_resolution_by_intent(intent=intent, candidate_workspaces=candidate_workspaces)
+        if intent_selected:
+            return {
+                "ok": True,
+                "workspace_id": intent_selected,
+                "source": f"intent_{str(intent or 'user').strip().lower() or 'user'}",
                 "candidate_workspaces": candidate_workspaces,
             }
 
@@ -2325,7 +2405,11 @@ class XynApiAdapter:
         }
 
     def list_applications(self, *, workspace_id: str = "") -> Dict[str, Any]:
-        resolved = self._resolve_workspace_for_request(explicit_workspace_id=workspace_id, require_workspace=True)
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
         if not resolved.get("ok"):
             return self._workspace_resolution_error_result(
                 method="GET",
@@ -2355,6 +2439,24 @@ class XynApiAdapter:
             "resolved_workspace_id": resolved_workspace_id,
         }
         return result
+
+    def _workspace_intent_for_artifact_scope(
+        self,
+        *,
+        artifact_id: str = "",
+        artifact_slug: str = "",
+    ) -> str:
+        normalized_slug = str(artifact_slug or "").strip().lower()
+        if normalized_slug in _SYSTEM_ARTIFACT_SLUGS:
+            return "system"
+        normalized_artifact_id = str(artifact_id or "").strip()
+        if normalized_artifact_id and not normalized_slug:
+            row = self._resolve_artifact_record(artifact_id=normalized_artifact_id)
+            if isinstance(row, dict):
+                resolved_slug = str(row.get("slug") or "").strip().lower()
+                if resolved_slug in _SYSTEM_ARTIFACT_SLUGS:
+                    return "system"
+        return "user"
 
     def get_application(self, *, application_id: str) -> Dict[str, Any]:
         paths = [
@@ -2484,9 +2586,14 @@ class XynApiAdapter:
         # Artifact-scoped/session-scoped create operations require workspace context.
         # Resolve it deterministically for fresh installs when the caller omitted it.
         if not normalized_application_id and not normalized_workspace_id:
+            workspace_intent = self._workspace_intent_for_artifact_scope(
+                artifact_id=normalized_artifact_id,
+                artifact_slug=normalized_artifact_slug,
+            )
             resolved_workspace = self._resolve_workspace_for_request(
                 explicit_workspace_id="",
                 require_workspace=True,
+                intent=workspace_intent,
             )
             if not resolved_workspace.get("ok"):
                 candidate_workspaces = (
@@ -2521,7 +2628,7 @@ class XynApiAdapter:
                         "candidate_workspaces": candidate_workspaces,
                     },
                     "error_classification": (
-                        "auth_expired"
+                        "workspace_forbidden"
                         if resolution_error == "workspace_forbidden"
                         else "scope_resolution_failed"
                     ),
@@ -2571,7 +2678,7 @@ class XynApiAdapter:
             elif blocked in {"contract_mismatch", "unsupported_scope_mode"}:
                 normalized["error_classification"] = blocked
             elif blocked == "workspace_forbidden":
-                normalized["error_classification"] = "auth_expired"
+                normalized["error_classification"] = "workspace_forbidden"
             elif int(normalized.get("status_code") or 0) >= 500:
                 normalized["error_classification"] = "backend_server_error"
             elif int(normalized.get("status_code") or 0) in {400, 409, 422}:
@@ -3694,6 +3801,8 @@ class XynApiAdapter:
     ) -> str:
         if error_classification == "auth_expired":
             return "auth_expired"
+        if error_classification == "workspace_forbidden":
+            return "workspace_forbidden"
         if error_classification == "binding_rotated":
             return "binding_rotated"
         if error_classification == "empty_tool_surface":
@@ -4783,9 +4892,14 @@ class XynApiAdapter:
 
     def create_change_effort(self, *, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         request_payload = dict(payload or {})
+        workspace_intent = self._workspace_intent_for_artifact_scope(
+            artifact_id=str(request_payload.get("artifact_id") or "").strip(),
+            artifact_slug=str(request_payload.get("artifact_slug") or "").strip(),
+        )
         resolved = self._resolve_workspace_for_request(
             explicit_workspace_id=str(request_payload.get("workspace_id") or "").strip(),
             require_workspace=True,
+            intent=workspace_intent,
         )
         if not resolved.get("ok"):
             return self._workspace_resolution_error_result(
@@ -4841,7 +4955,11 @@ class XynApiAdapter:
         status: str = "",
         limit: int = 100,
     ) -> Dict[str, Any]:
-        resolved = self._resolve_workspace_for_request(explicit_workspace_id=workspace_id, require_workspace=True)
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
         if not resolved.get("ok"):
             return self._workspace_resolution_error_result(
                 method="GET",
@@ -5087,9 +5205,13 @@ class XynApiAdapter:
 
     def declare_release(self, *, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         request_payload = dict(payload or {})
+        workspace_intent = self._workspace_intent_for_artifact_scope(
+            artifact_slug=str(request_payload.get("artifact_slug") or "").strip(),
+        )
         resolved = self._resolve_workspace_for_request(
             explicit_workspace_id=str(request_payload.get("workspace_id") or "").strip(),
             require_workspace=True,
+            intent=workspace_intent,
         )
         if not resolved.get("ok"):
             return self._workspace_resolution_error_result(
@@ -5113,7 +5235,11 @@ class XynApiAdapter:
         return result
 
     def get_artifact_provenance(self, *, artifact_slug: str, workspace_id: str = "") -> Dict[str, Any]:
-        resolved = self._resolve_workspace_for_request(explicit_workspace_id=workspace_id, require_workspace=True)
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent=self._workspace_intent_for_artifact_scope(artifact_slug=artifact_slug),
+        )
         if not resolved.get("ok"):
             return self._workspace_resolution_error_result(
                 method="GET",

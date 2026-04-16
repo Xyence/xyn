@@ -48,6 +48,19 @@ class XynMcpAdapterTests(TestCase):
 
         self.assertEqual(sorted(server.tools.keys()), sorted(TOOL_NAMES))
 
+    @mock.patch.dict(
+        "os.environ",
+        {
+            "XYN_MCP_XYN_CONTROL_API_BASE_URL": "http://xyn.local:8001",
+            "XYN_MCP_WORKSPACE_ID": "",
+            "XYN_WORKSPACE_ID": "legacy-ws",
+        },
+        clear=False,
+    )
+    def test_adapter_config_from_env_ignores_legacy_workspace_env(self) -> None:
+        config = XynApiAdapterConfig.from_env()
+        self.assertEqual(config.default_workspace_id, "")
+
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_list_artifacts_default_call_no_parameters(self, mock_request: mock.Mock) -> None:
         response = mock.Mock()
@@ -778,11 +791,51 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(len(mock_request.call_args_list), 1)
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_list_applications_resolves_default_user_workspace_by_intent(self, mock_request: mock.Mock) -> None:
+        workspaces = mock.Mock()
+        workspaces.status_code = 200
+        workspaces.json.return_value = {
+            "workspaces": [
+                {"id": "ws-system", "slug": "platform-builder", "workspace_role": "system_platform"},
+                {"id": "ws-user", "slug": "xyence", "workspace_role": "default_user"},
+            ]
+        }
+        applications = mock.Mock()
+        applications.status_code = 200
+        applications.json.return_value = {"applications": []}
+        mock_request.side_effect = [workspaces, applications]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                code_api_base_url="",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        result = adapter.list_applications()
+        self.assertTrue(result["ok"])
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        self.assertEqual(body.get("resolved_workspace_id"), "ws-user")
+        second_kwargs = mock_request.call_args_list[1].kwargs
+        self.assertEqual(second_kwargs["params"], {"workspace_id": "ws-user"})
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_configured_workspace_rejected_when_not_accessible(self, mock_request: mock.Mock) -> None:
         workspaces = mock.Mock()
         workspaces.status_code = 200
-        workspaces.json.return_value = {"workspaces": [{"id": "ws-allowed"}]}
-        mock_request.return_value = workspaces
+        workspaces.json.return_value = {
+            "workspaces": [
+                {"id": "ws-allowed", "workspace_role": "default_user"},
+                {"id": "ws-system", "workspace_role": "system_platform"},
+            ]
+        }
+        applications = mock.Mock()
+        applications.status_code = 200
+        applications.json.return_value = {"applications": []}
+        mock_request.side_effect = [workspaces, applications]
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
                 control_api_base_url="http://xyn.local:8001",
@@ -795,11 +848,11 @@ class XynMcpAdapterTests(TestCase):
             )
         )
         result = adapter.list_applications()
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["status_code"], 403)
+        self.assertTrue(result["ok"])
         body = result.get("response") if isinstance(result.get("response"), dict) else {}
-        self.assertEqual(body.get("error"), "workspace_forbidden")
-        self.assertEqual(len(mock_request.call_args_list), 1)
+        self.assertEqual(body.get("resolved_workspace_id"), "ws-allowed")
+        self.assertEqual(adapter._resolved_default_workspace_id, "ws-allowed")
+        self.assertEqual(len(mock_request.call_args_list), 2)
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_application_change_session_workflow_create_stage_preview_validate_commit(self, mock_request: mock.Mock) -> None:
@@ -1692,6 +1745,48 @@ class XynMcpAdapterTests(TestCase):
         payload = second_call.get("json") or {}
         self.assertEqual(payload.get("workspace_id"), "ws-1")
         self.assertEqual(payload.get("artifact_slug"), "xyn-api")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_create_decomposition_campaign_uses_system_workspace_for_system_artifact_intent(
+        self, mock_request: mock.Mock
+    ) -> None:
+        workspaces = mock.Mock()
+        workspaces.status_code = 200
+        workspaces.headers = {}
+        workspaces.json.return_value = {
+            "workspaces": [
+                {"id": "ws-user", "slug": "xyence", "workspace_role": "default_user"},
+                {"id": "ws-system", "slug": "platform-builder", "workspace_role": "system_platform"},
+            ]
+        }
+        create = mock.Mock()
+        create.status_code = 201
+        create.headers = {}
+        create.json.return_value = {
+            "created": True,
+            "application_id": "app-artifact-1",
+            "scope_type": "artifact",
+            "scope": {"scope_type": "artifact", "workspace_id": "ws-system", "artifact_slug": "xyn-api"},
+            "session": {"id": "sess-1", "application_id": "app-artifact-1"},
+        }
+        mock_request.side_effect = [workspaces, create]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.create_decomposition_campaign(
+            artifact_slug="xyn-api",
+            target_source_files=["backend/xyn_orchestrator/xyn_api.py"],
+        )
+        self.assertTrue(result.get("ok"))
+        second_call = mock_request.call_args_list[1].kwargs
+        payload = second_call.get("json") or {}
+        self.assertEqual(payload.get("workspace_id"), "ws-system")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_create_decomposition_campaign_returns_structured_scope_resolution_error_when_workspace_unresolved(
