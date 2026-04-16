@@ -889,6 +889,67 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(kwargs.get("json"), {})
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_change_session_status_reconciles_stale_queued_when_runtime_completed(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "status": "queued",
+            "runtime_runs": [
+                {"id": "run-1", "status": "completed"},
+            ],
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        result = adapter.get_application_change_session_plan(application_id="app-1", session_id="sess-1")
+        self.assertTrue(result.get("ok"))
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        self.assertEqual(str(body.get("current_status") or ""), "completed")
+        historical = body.get("historical_status") if isinstance(body.get("historical_status"), dict) else {}
+        self.assertEqual(str(historical.get("control_reported_status") or ""), "queued")
+        self.assertTrue(bool(historical.get("status_reconciled")))
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_get_change_session_commits_falls_back_to_control_commit_evidence(self, mock_request: mock.Mock) -> None:
+        missing = mock.Mock()
+        missing.status_code = 404
+        missing.json.return_value = {"detail": "Not Found"}
+        missing.headers = {"content-type": "application/json"}
+
+        control = mock.Mock()
+        control.status_code = 200
+        control.json.return_value = {
+            "status": "staged",
+            "commit_sha": "abc123def456",
+            "changed_files": ["backend/xyn_orchestrator/xyn_api.py"],
+        }
+        control.headers = {"content-type": "application/json"}
+
+        mock_request.side_effect = [missing, control]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        result = adapter.get_application_change_session_commits(application_id="app-1", session_id="sess-1")
+        self.assertTrue(result.get("ok"))
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        self.assertIn("abc123def456", body.get("commit_shas") or [])
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_application_change_session_workflow_promote_evidence_rollback(self, mock_request: mock.Mock) -> None:
         promote = mock.Mock()
         promote.status_code = 200
@@ -935,6 +996,38 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(urls[0], "http://xyn.local:8001/xyn/api/change-sessions/sess-1/control/actions")
         self.assertEqual(urls[1], "http://xyn.local:8001/xyn/api/change-sessions/sess-1/promotion-evidence")
         self.assertEqual(urls[2], "http://xyn.local:8001/xyn/api/change-sessions/sess-1/control/actions")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_promotion_evidence_falls_back_to_control_when_route_unavailable(self, mock_request: mock.Mock) -> None:
+        missing = mock.Mock()
+        missing.status_code = 404
+        missing.json.return_value = {"detail": "Not Found"}
+        missing.headers = {"content-type": "application/json"}
+
+        control = mock.Mock()
+        control.status_code = 200
+        control.json.return_value = {
+            "status": "promoted",
+            "promotion_evidence_id": "pe-99",
+            "merge_commit_sha": "feedfacefeedface",
+        }
+        control.headers = {"content-type": "application/json"}
+
+        mock_request.side_effect = [missing, control]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        result = adapter.get_application_change_session_promotion_evidence(application_id="app-1", session_id="sess-1")
+        self.assertTrue(result.get("ok"))
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        self.assertIn("pe-99", body.get("promotion_evidence_ids") or [])
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_compact_preview_status_isolated_preview_success(self, mock_request: mock.Mock) -> None:
@@ -2021,6 +2114,73 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(called_urls[0], "http://xyn.local:8001/xyn/api/runtime-runs/run-77")
         self.assertEqual(called_urls[1], "http://xyn.local:8001/xyn/api/runs/run-77")
         self.assertNotIn("http://xyn.local:8001/runs/run-77", called_urls)
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_runtime_run_single_endpoint_reconciles_from_list_when_single_is_missing(self, mock_request: mock.Mock) -> None:
+        def _fake_request(*_args, **kwargs):
+            method = str(kwargs.get("method") or "").upper()
+            url = str(kwargs.get("url") or "")
+            response = mock.Mock()
+            response.headers = {"content-type": "application/json"}
+            if method == "GET" and url.endswith("/api/v1/runs/run-99"):
+                response.status_code = 404
+                response.json.return_value = {"detail": "Run not found"}
+                return response
+            if method == "GET" and url.endswith("/api/v1/runs"):
+                response.status_code = 200
+                response.json.return_value = {
+                    "items": [
+                        {"id": "run-99", "status": "completed", "summary": "completed from listing"},
+                    ]
+                }
+                return response
+            response.status_code = 404
+            response.json.return_value = {"detail": "Not Found"}
+            return response
+
+        mock_request.side_effect = _fake_request
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn-local-api:8000",
+                code_api_base_url="http://core:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        result = adapter.get_runtime_run(run_id="run-99")
+        self.assertTrue(result.get("ok"))
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        self.assertEqual(str(body.get("current_status") or ""), "completed")
+        self.assertEqual(str(body.get("source") or ""), "list_runtime_runs_fallback")
+        warnings = body.get("warnings") if isinstance(body.get("warnings"), list) else []
+        self.assertIn("run_status_resolved_from_list_runtime_runs_fallback", warnings)
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_runtime_logs_use_code_api_base_for_consistent_namespace(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"steps": [{"id": "s1", "status": "completed"}]}
+        response.headers = {"content-type": "application/json"}
+        mock_request.return_value = response
+
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn-local-api:8000",
+                code_api_base_url="http://core:8000",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        result = adapter.get_runtime_run_logs(run_id="run-1")
+        self.assertTrue(result.get("ok"))
+        called_urls = [str(call.kwargs.get("url") or "") for call in mock_request.call_args_list]
+        self.assertTrue(any(url.startswith("http://core:8000/") for url in called_urls))
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_runtime_run_html_response_is_contract_mismatch(self, mock_request: mock.Mock) -> None:

@@ -103,6 +103,10 @@ services:
       XYN_TRAEFIK_CERT_RESOLVER: ${XYN_TRAEFIK_CERT_RESOLVER:-letsencrypt}
       XYN_UI_BEARER_TOKEN: ${XYN_UI_BEARER_TOKEN:-}
       DATABASE_URL: ${DATABASE_URL:-postgresql://xyn:xyn_dev_password@postgres:5432/xyn}
+      XYN_DB_MODE: ${XYN_DB_MODE:-local}
+      XYN_DB_TENANCY_MODE: ${XYN_DB_TENANCY_MODE:-shared_rds_db_per_sibling}
+      XYN_DB_BOOTSTRAP_DATABASE_URL: ${XYN_DB_BOOTSTRAP_DATABASE_URL:-}
+      XYN_DB_ADMIN_DATABASE_URL: ${XYN_DB_ADMIN_DATABASE_URL:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       XYN_ARTIFACT_ROOT: /app/.xyn/artifacts
       ARTIFACT_STORE_PATH: /app/.xyn/artifacts

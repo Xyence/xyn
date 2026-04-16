@@ -118,9 +118,13 @@ def allocate_database(
     admin_url = (
         str(os.getenv("XYN_DB_BOOTSTRAP_DATABASE_URL", "")).strip()
         or str(os.getenv("XYN_DB_ADMIN_DATABASE_URL", "")).strip()
+        or str(os.getenv("DATABASE_URL", "")).strip()
     )
     if not admin_url:
-        raise RuntimeError("XYN_DB_BOOTSTRAP_DATABASE_URL is required for XYN_DB_MODE=external")
+        raise RuntimeError(
+            "XYN_DB_BOOTSTRAP_DATABASE_URL (or XYN_DB_ADMIN_DATABASE_URL or DATABASE_URL) "
+            "is required for XYN_DB_MODE=external"
+        )
 
     env_token = _uuid_token(environment_id, default="env")
     sib_token = _uuid_token(sibling_id, default=_safe_identifier(sibling_name or "sibling", max_length=12))

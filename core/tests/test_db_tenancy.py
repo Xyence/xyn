@@ -85,10 +85,44 @@ class DbTenancyTests(unittest.TestCase):
         self.assertNotIn("database_url", public)
         self.assertNotIn("password", str(public).lower())
 
+    @mock.patch("core.db_tenancy.psycopg2.connect")
+    def test_allocate_database_external_uses_database_url_when_bootstrap_unset(self, connect_mock: mock.Mock):
+        executed: list[tuple[object, object]] = []
+        conn = _FakeConn(executed)
+        connect_mock.return_value = conn
+        with mock.patch.dict(
+            os.environ,
+            {
+                "XYN_DB_MODE": "external",
+                "XYN_DB_TENANCY_MODE": "shared_rds_db_per_sibling",
+                "XYN_DB_BOOTSTRAP_DATABASE_URL": "",
+                "XYN_DB_ADMIN_DATABASE_URL": "",
+                "DATABASE_URL": "postgresql://fallback_admin:fallback_secret@db.example.internal:5432/postgres?sslmode=require",
+            },
+            clear=False,
+        ):
+            allocation = allocate_database(
+                environment_id=uuid.uuid4(),
+                sibling_id=uuid.uuid4(),
+                workspace_id=uuid.uuid4(),
+                sibling_name="sibling-a",
+            )
+        connect_mock.assert_called_once_with(
+            "postgresql://fallback_admin:fallback_secret@db.example.internal:5432/postgres?sslmode=require"
+        )
+        self.assertEqual(allocation.mode, "external")
+        self.assertEqual(allocation.tenancy_mode, "shared_rds_db_per_sibling")
+
     def test_allocate_database_external_requires_bootstrap_url(self):
         with mock.patch.dict(
             os.environ,
-            {"XYN_DB_MODE": "external", "XYN_DB_TENANCY_MODE": "shared_rds_db_per_sibling", "XYN_DB_BOOTSTRAP_DATABASE_URL": ""},
+            {
+                "XYN_DB_MODE": "external",
+                "XYN_DB_TENANCY_MODE": "shared_rds_db_per_sibling",
+                "XYN_DB_BOOTSTRAP_DATABASE_URL": "",
+                "XYN_DB_ADMIN_DATABASE_URL": "",
+                "DATABASE_URL": "",
+            },
             clear=False,
         ):
             with self.assertRaises(RuntimeError):

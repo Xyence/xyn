@@ -54,14 +54,25 @@ def _state_path(deploy_dir: Path) -> Path:
 
 def _write_compose_env_file(*, deploy_dir: Path, database_url: str = "") -> Path:
     env_path = deploy_dir / ".env"
-    passthrough_names = {"DATABASE_URL", "DJANGO_ALLOWED_HOSTS", "PWD"}
+    passthrough_names = {
+        "DATABASE_URL",
+        "DJANGO_ALLOWED_HOSTS",
+        "PWD",
+        "POSTGRES_DB",
+        "POSTGRES_USER",
+        "POSTGRES_PASSWORD",
+        "POSTGRES_HOST",
+        "POSTGRES_PORT",
+    }
     passthrough_prefixes = ("XYN_", "OIDC_", "AWS_")
     values: dict[str, str] = {}
     for key, raw in os.environ.items():
         if key in passthrough_names or key.startswith(passthrough_prefixes):
             values[str(key)] = str(raw)
-    if str(database_url or "").strip():
-        values["DATABASE_URL"] = str(database_url or "").strip()
+    database_url_value = str(database_url or "").strip()
+    if database_url_value:
+        values["DATABASE_URL"] = database_url_value
+        values.update(_postgres_env_from_database_url(database_url_value))
     values.setdefault("PWD", str(Path.cwd()))
     lines: list[str] = []
     for key in sorted(values):
@@ -69,6 +80,29 @@ def _write_compose_env_file(*, deploy_dir: Path, database_url: str = "") -> Path
         lines.append(f"{key}={normalized}")
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return env_path
+
+
+def _postgres_env_from_database_url(database_url: str) -> dict[str, str]:
+    value = str(database_url or "").strip()
+    if not value:
+        return {}
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme not in {"postgres", "postgresql", "postgresql+psycopg2", "postgres+psycopg2"}:
+        return {}
+    settings: dict[str, str] = {}
+    if parsed.hostname:
+        settings["POSTGRES_HOST"] = str(parsed.hostname)
+    if parsed.port:
+        settings["POSTGRES_PORT"] = str(parsed.port)
+    elif parsed.hostname:
+        settings["POSTGRES_PORT"] = "5432"
+    if parsed.path and parsed.path not in {"/", ""}:
+        settings["POSTGRES_DB"] = parsed.path.lstrip("/")
+    if parsed.username:
+        settings["POSTGRES_USER"] = urllib.parse.unquote(parsed.username)
+    if parsed.password:
+        settings["POSTGRES_PASSWORD"] = urllib.parse.unquote(parsed.password)
+    return settings
 
 
 def _sanitize_slug(value: str) -> str:
@@ -381,6 +415,13 @@ def _compose_yaml(project: str, *, ui_image: str, api_image: str, ui_host: str, 
 """
         migrate_postgres_dependency = backend_postgres_dependency
     else:
+        postgres_backend_env = """      POSTGRES_DB: ${POSTGRES_DB:-}
+      POSTGRES_USER: ${POSTGRES_USER:-}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_HOST: ${POSTGRES_HOST:-}
+      POSTGRES_PORT: ${POSTGRES_PORT:-}
+"""
+        postgres_migrate_env = postgres_backend_env
         volumes_block = ""
     ui_scheme = "https" if tls else "http"
     if ui_host == api_host:
@@ -1104,9 +1145,11 @@ def provision_local_instance(request: ProvisionLocalRequest) -> Dict[str, Any]:
         database_url=str(request.database_url or "").strip(),
     )
     compose_env = None
-    if str(request.database_url or "").strip():
+    database_url_value = str(request.database_url or "").strip()
+    if database_url_value:
         compose_env = dict(os.environ)
-        compose_env["DATABASE_URL"] = str(request.database_url or "").strip()
+        compose_env["DATABASE_URL"] = database_url_value
+        compose_env.update(_postgres_env_from_database_url(database_url_value))
     if request.force or request.reset_state:
         _run(down_cmd, cwd=deploy_dir, env=compose_env)
     pull_stdout = ""

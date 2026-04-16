@@ -491,7 +491,11 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         self.assertNotIn("image: postgres:16-alpine", compose_text)
         self.assertNotIn("postgres_data:/var/lib/postgresql/data", compose_text)
         self.assertIn("DATABASE_URL: ${DATABASE_URL:-}", compose_text)
-        self.assertNotIn("POSTGRES_HOST: postgres", compose_text)
+        self.assertIn("POSTGRES_HOST: ${POSTGRES_HOST:-}", compose_text)
+        self.assertIn("POSTGRES_DB: ${POSTGRES_DB:-}", compose_text)
+        self.assertIn("POSTGRES_USER: ${POSTGRES_USER:-}", compose_text)
+        self.assertIn("POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}", compose_text)
+        self.assertIn("POSTGRES_PORT: ${POSTGRES_PORT:-}", compose_text)
 
     def test_write_compose_env_file_includes_oidc_and_database_override(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -518,6 +522,21 @@ class GeneratedRuntimeMaterializationTests(unittest.TestCase):
         self.assertIn("OIDC_CLIENT_SECRET=secret", text)
         self.assertIn("XYN_PUBLIC_BASE_URL=https://xyn.xyence.io", text)
         self.assertIn("DATABASE_URL=postgresql://override", text)
+
+    def test_write_compose_env_file_derives_postgres_env_from_database_url(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            deploy_dir = Path(tmpdir)
+            env_path = _write_compose_env_file(
+                deploy_dir=deploy_dir,
+                database_url="postgresql://scoped_user:scoped_pass@rds.example.internal:5432/xyn_preview_123",
+            )
+            text = env_path.read_text(encoding="utf-8")
+
+        self.assertIn("POSTGRES_HOST=rds.example.internal", text)
+        self.assertIn("POSTGRES_PORT=5432", text)
+        self.assertIn("POSTGRES_DB=xyn_preview_123", text)
+        self.assertIn("POSTGRES_USER=scoped_user", text)
+        self.assertIn("POSTGRES_PASSWORD=scoped_pass", text)
 
 
 if __name__ == "__main__":

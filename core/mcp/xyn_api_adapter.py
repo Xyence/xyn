@@ -1541,6 +1541,7 @@ class XynApiAdapter:
         current_status = next((str(item) for item in status_candidates if str(item or "").strip()), "")
         if not current_status:
             current_status = "ok" if ok else ("forbidden" if status_code in {401, 403} else "error")
+        control_reported_status = str(current_status or "").strip()
 
         blocked_reason = str(body.get("blocked_reason") or "").strip()
         if not blocked_reason and not ok:
@@ -1572,6 +1573,17 @@ class XynApiAdapter:
         next_allowed_actions = body.get("next_allowed_actions") if isinstance(body.get("next_allowed_actions"), list) else []
         if not next_allowed_actions:
             next_allowed_actions = list(default_next_allowed_actions or [])
+        runtime_summary = XynApiAdapter._summarize_runtime_status_from_payload(
+            body.get("raw") if isinstance(body.get("raw"), dict) else body
+        )
+        runtime_latest_status = str(runtime_summary.get("latest_status") or "").strip().lower()
+        control_status_token = str(current_status or "").strip().lower()
+        terminal_runtime_statuses = {"completed", "failed", "blocked", "canceled", "cancelled"}
+        stale_control_statuses = {"queued", "running", "stage_apply_requested"}
+        status_reconciled = False
+        if runtime_latest_status in terminal_runtime_statuses and control_status_token in stale_control_statuses:
+            current_status = runtime_latest_status
+            status_reconciled = True
 
         scope = body.get("scope") if isinstance(body.get("scope"), dict) else {}
         hint = scope_hint if isinstance(scope_hint, dict) else {}
@@ -1644,6 +1656,11 @@ class XynApiAdapter:
                 ),
             },
             "current_status": current_status,
+            "historical_status": {
+                "control_reported_status": control_reported_status,
+                "status_reconciled": status_reconciled,
+            },
+            "runtime_summary": runtime_summary,
             "next_allowed_actions": next_allowed_actions,
             "blocked_reason": blocked_reason,
             "preview_urls": XynApiAdapter._extract_preview_urls(body),
@@ -1664,6 +1681,55 @@ class XynApiAdapter:
         }
         result["response"] = normalized
         return result
+
+    @staticmethod
+    def _normalize_runtime_status_token(value: Any) -> str:
+        token = str(value or "").strip().lower()
+        if token in {"done", "succeeded", "success"}:
+            return "completed"
+        if token in {"error"}:
+            return "failed"
+        if token in {"cancelled"}:
+            return "canceled"
+        return token
+
+    @staticmethod
+    def _extract_runtime_runs_from_payload(payload: Any) -> list[Dict[str, Any]]:
+        out: list[Dict[str, Any]] = []
+
+        def walk(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, inner in value.items():
+                    normalized_key = str(key or "").strip().lower()
+                    if normalized_key in {"runtime_runs", "runs"} and isinstance(inner, list):
+                        for row in inner:
+                            if isinstance(row, dict):
+                                out.append(row)
+                    walk(inner)
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item)
+
+        walk(payload)
+        return out
+
+    @staticmethod
+    def _summarize_runtime_status_from_payload(payload: Any) -> Dict[str, Any]:
+        rows = XynApiAdapter._extract_runtime_runs_from_payload(payload)
+        normalized_rows = [XynApiAdapter._normalize_runtime_run_row(row) for row in rows if isinstance(row, dict)]
+        statuses = [
+            XynApiAdapter._normalize_runtime_status_token(row.get("status"))
+            for row in normalized_rows
+            if str(row.get("status") or "").strip()
+        ]
+        latest = statuses[0] if statuses else ""
+        terminal = [status for status in statuses if status in {"completed", "failed", "blocked", "canceled"}]
+        return {
+            "latest_status": latest,
+            "latest_run_id": str((normalized_rows[0] if normalized_rows else {}).get("run_id") or ""),
+            "run_count": len(normalized_rows),
+            "terminal_statuses": terminal,
+        }
 
     @staticmethod
     def _application_discovery_row(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -2871,6 +2937,15 @@ class XynApiAdapter:
             paths=self._change_session_control_paths(handle, suffix="/commits"),
             base_urls=self._planner_base_urls(),
         )
+        if not result.get("ok") and int(result.get("status_code") or 0) in {404, 405}:
+            control = self.inspect_change_session_control(handle=handle)
+            fallback = self._commit_evidence_result_from_control(
+                control,
+                application_id=application_id,
+                session_id=session_id,
+            )
+            if fallback is not None:
+                result = fallback
         return self._normalize_change_session_result(
             result,
             application_id=application_id,
@@ -2888,6 +2963,16 @@ class XynApiAdapter:
 
     def get_application_change_session_promotion_evidence(self, *, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         result = self.get_change_session_promotion_evidence(application_id=application_id, session_id=session_id)
+        if not result.get("ok") and int(result.get("status_code") or 0) in {404, 405}:
+            handle = self._build_change_session_handle(application_id=application_id, session_id=session_id)
+            control = self.inspect_change_session_control(handle=handle)
+            fallback = self._promotion_evidence_result_from_control(
+                control,
+                application_id=application_id,
+                session_id=session_id,
+            )
+            if fallback is not None:
+                result = fallback
         return self._normalize_change_session_result(
             result,
             application_id=application_id,
@@ -3004,8 +3089,8 @@ class XynApiAdapter:
                 f"/api/v1/runs/{normalized_run_id}",
             ]
         )
-        result = self._request_with_fallback_paths(method="GET", paths=paths)
-        return self._normalize_runtime_run_result(
+        result = self._request_with_fallback_paths(method="GET", paths=paths, base_urls=self._code_api_base_urls())
+        normalized = self._normalize_runtime_run_result(
             result,
             default_next_allowed_actions=[
                 "get_runtime_run_logs",
@@ -3015,6 +3100,23 @@ class XynApiAdapter:
                 "rerun_runtime_run",
             ],
         )
+        if bool(normalized.get("ok")):
+            return normalized
+        if int(normalized.get("status_code") or 0) not in {404, 405}:
+            return normalized
+        fallback = self._runtime_run_single_from_list_fallback(
+            run_id=normalized_run_id,
+            application_id=normalized_application_id,
+            session_id=normalized_session_id,
+            default_next_allowed_actions=[
+                "get_runtime_run_logs",
+                "get_runtime_run_artifacts",
+                "get_runtime_run_commands",
+                "cancel_runtime_run",
+                "rerun_runtime_run",
+            ],
+        )
+        return fallback or normalized
 
     def get_runtime_run_logs(self, *, run_id: str, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         normalized_application_id = str(application_id or "").strip()
@@ -3035,7 +3137,7 @@ class XynApiAdapter:
                 f"/api/v1/runs/{normalized_run_id}/steps",
             ]
         )
-        result = self._request_with_fallback_paths(method="GET", paths=paths)
+        result = self._request_with_fallback_paths(method="GET", paths=paths, base_urls=self._code_api_base_urls())
         if not result.get("ok"):
             return result
         logs = self._normalize_runtime_logs(result.get("response"))
@@ -3065,7 +3167,7 @@ class XynApiAdapter:
                 f"/api/v1/runs/{normalized_run_id}/artifacts",
             ]
         )
-        result = self._request_with_fallback_paths(method="GET", paths=paths)
+        result = self._request_with_fallback_paths(method="GET", paths=paths, base_urls=self._code_api_base_urls())
         if not result.get("ok"):
             return result
         artifacts = self._normalize_runtime_artifacts(result.get("response"))
@@ -3096,7 +3198,7 @@ class XynApiAdapter:
                 f"/api/v1/runs/{normalized_run_id}/steps",
             ]
         )
-        result = self._request_with_fallback_paths(method="GET", paths=paths)
+        result = self._request_with_fallback_paths(method="GET", paths=paths, base_urls=self._code_api_base_urls())
         if not result.get("ok"):
             return result
         commands = self._normalize_runtime_commands(result.get("response"))
@@ -3126,7 +3228,12 @@ class XynApiAdapter:
                 f"/api/v1/runs/{normalized_run_id}/cancel",
             ]
         )
-        result = self._request_with_fallback_paths(method="POST", paths=paths, json_payload={})
+        result = self._request_with_fallback_paths(
+            method="POST",
+            paths=paths,
+            json_payload={},
+            base_urls=self._code_api_base_urls(),
+        )
         return self._normalize_runtime_run_result(
             result,
             default_next_allowed_actions=[
@@ -3160,7 +3267,12 @@ class XynApiAdapter:
                 f"/api/v1/runs/{normalized_run_id}/retry",
             ]
         )
-        result = self._request_with_fallback_paths(method="POST", paths=paths, json_payload={})
+        result = self._request_with_fallback_paths(
+            method="POST",
+            paths=paths,
+            json_payload={},
+            base_urls=self._code_api_base_urls(),
+        )
         if not result.get("ok") and int(result.get("status_code") or 0) in {404, 405}:
             result["response"] = {
                 "error": "not_supported",
@@ -3177,6 +3289,51 @@ class XynApiAdapter:
                 "get_runtime_run_commands",
             ],
         )
+
+    def _runtime_run_single_from_list_fallback(
+        self,
+        *,
+        run_id: str,
+        application_id: str,
+        session_id: str,
+        default_next_allowed_actions: Optional[list[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        listing = self.list_runtime_runs(
+            application_id=application_id,
+            session_id=session_id,
+            limit=200,
+        )
+        if not bool(listing.get("ok")):
+            return None
+        body = listing.get("response") if isinstance(listing.get("response"), dict) else {}
+        rows = body.get("runtime_runs") if isinstance(body.get("runtime_runs"), list) else []
+        target_run_id = str(run_id or "").strip()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_run_id = str(row.get("run_id") or row.get("id") or "").strip()
+            if row_run_id != target_run_id:
+                continue
+            payload = row.get("raw") if isinstance(row.get("raw"), dict) else row
+            fallback = self._normalize_runtime_run_result(
+                {
+                    "ok": True,
+                    "status_code": 200,
+                    "method": "GET",
+                    "path": "/api/v1/runs",
+                    "base_url": str(listing.get("base_url") or ""),
+                    "response": payload,
+                },
+                default_next_allowed_actions=default_next_allowed_actions,
+            )
+            response_body = fallback.get("response") if isinstance(fallback.get("response"), dict) else {}
+            warnings = response_body.get("warnings") if isinstance(response_body.get("warnings"), list) else []
+            warnings.append("run_status_resolved_from_list_runtime_runs_fallback")
+            response_body["warnings"] = warnings
+            response_body["source"] = "list_runtime_runs_fallback"
+            fallback["response"] = response_body
+            return fallback
+        return None
 
     def get_dev_task_by_id(self, *, task_id: str, application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         normalized_application_id = str(application_id or "").strip()
@@ -3905,6 +4062,65 @@ class XynApiAdapter:
             paths=self._change_session_control_paths(handle, suffix="/promotion-evidence"),
             base_urls=self._planner_base_urls(),
         )
+
+    def _commit_evidence_result_from_control(
+        self,
+        control_result: Dict[str, Any],
+        *,
+        application_id: str,
+        session_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        if not bool(control_result.get("ok")):
+            return None
+        body = control_result.get("response") if isinstance(control_result.get("response"), dict) else {}
+        commit_shas = self._extract_commit_shas(body)
+        if not commit_shas:
+            return None
+        commits = [{"commit_sha": sha} for sha in commit_shas]
+        return {
+            "ok": True,
+            "status_code": 200,
+            "method": "GET",
+            "path": f"/xyn/api/change-sessions/{session_id}/commits",
+            "base_url": str(control_result.get("base_url") or self._config.control_api_base_url).rstrip("/"),
+            "response": {
+                "application_id": str(application_id or ""),
+                "session_id": str(session_id or ""),
+                "status": "committed",
+                "commits": commits,
+                "commit_shas": commit_shas,
+                "changed_files": self._extract_changed_files(body),
+                "raw": body,
+            },
+        }
+
+    def _promotion_evidence_result_from_control(
+        self,
+        control_result: Dict[str, Any],
+        *,
+        application_id: str,
+        session_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        if not bool(control_result.get("ok")):
+            return None
+        body = control_result.get("response") if isinstance(control_result.get("response"), dict) else {}
+        evidence_ids = self._extract_promotion_evidence_ids(body)
+        if not evidence_ids:
+            return None
+        return {
+            "ok": True,
+            "status_code": 200,
+            "method": "GET",
+            "path": f"/xyn/api/change-sessions/{session_id}/promotion-evidence",
+            "base_url": str(control_result.get("base_url") or self._config.control_api_base_url).rstrip("/"),
+            "response": {
+                "application_id": str(application_id or ""),
+                "session_id": str(session_id or ""),
+                "status": "promoted",
+                "promotion_evidence_ids": evidence_ids,
+                "raw": body,
+            },
+        }
 
     def get_release_target_deployment_plan(self, *, target_id: str) -> Dict[str, Any]:
         result = self._request(
