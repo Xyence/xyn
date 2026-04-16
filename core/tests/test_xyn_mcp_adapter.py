@@ -1369,6 +1369,38 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(body.get("scope_type"), "artifact")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_create_decomposition_campaign_prefers_artifact_not_found_over_binding_rotated_classification(
+        self, mock_request: mock.Mock
+    ) -> None:
+        response = mock.Mock()
+        response.status_code = 404
+        response.headers = {}
+        response.json.return_value = {
+            "error": "artifact not found",
+            "blocked_reason": "artifact_not_found",
+            "detail": "Artifact not found in workspace",
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.create_decomposition_campaign(
+            artifact_id="art-404",
+            workspace_id="ws-1",
+            target_source_files=["backend/xyn_orchestrator/xyn_api.py"],
+        )
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(str(result.get("error_classification") or ""), "artifact_not_found")
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        self.assertEqual(str(body.get("blocked_reason") or ""), "artifact_not_found")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_create_decomposition_campaign_application_and_artifact_uses_unified_scope_endpoint(self, mock_request: mock.Mock) -> None:
         response = mock.Mock()
         response.status_code = 409

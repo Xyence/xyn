@@ -316,6 +316,12 @@ class XynApiAdapter:
             return "transient_transport_failure"
         if error_token in {"empty_surface", "empty_tool_surface"} or blocked_reason in {"empty_surface", "empty_tool_surface"}:
             return "empty_tool_surface"
+        if blocked_reason in {"artifact_not_found"}:
+            return "artifact_not_found"
+        if blocked_reason in {"application_not_found"}:
+            return "application_not_found"
+        if blocked_reason in {"scope_resolution_failed", "unsupported_scope_mode"}:
+            return blocked_reason
         if status_code in {401, 403} or error_token in {"unauthorized", "not authenticated", "not_authenticated"}:
             return "auth_expired"
         if blocked_reason in {"planner_route_unavailable", "route_unavailable", "schema_mismatch"}:
@@ -383,7 +389,14 @@ class XynApiAdapter:
         if not str(result.get("error_classification") or "").strip():
             body = result.get("response") if isinstance(result.get("response"), dict) else {}
             status_code = int(result.get("status_code") or 0)
-            if status_code in {401, 403}:
+            blocked_reason = str(body.get("blocked_reason") or "").strip().lower()
+            if blocked_reason == "artifact_not_found":
+                result["error_classification"] = "artifact_not_found"
+            elif blocked_reason == "application_not_found":
+                result["error_classification"] = "application_not_found"
+            elif blocked_reason in {"scope_resolution_failed", "unsupported_scope_mode"}:
+                result["error_classification"] = blocked_reason
+            elif status_code in {401, 403}:
                 result["error_classification"] = "auth_expired"
             elif status_code in {404, 405}:
                 result["error_classification"] = "binding_rotated"
@@ -2435,9 +2448,13 @@ class XynApiAdapter:
             ],
         )
         body = normalized.get("response") if isinstance(normalized.get("response"), dict) else {}
-        scope_type = str(body.get("scope_type") or "artifact").strip().lower() or "artifact"
-        if scope_type not in {"application", "artifact"}:
+        requested_artifact_scope = bool(normalized_artifact_id or normalized_artifact_slug)
+        fallback_scope_type = "artifact" if requested_artifact_scope else "application"
+        scope_type = str(body.get("scope_type") or fallback_scope_type).strip().lower() or fallback_scope_type
+        if requested_artifact_scope and scope_type == "application" and not str(body.get("application_id") or "").strip():
             scope_type = "artifact"
+        if scope_type not in {"application", "artifact"}:
+            scope_type = fallback_scope_type
         if not normalized.get("ok"):
             blocked = str(body.get("blocked_reason") or "").strip().lower()
             if blocked == "artifact_not_found":
