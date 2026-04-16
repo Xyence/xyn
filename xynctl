@@ -70,7 +70,19 @@ def _as_bool(value: str) -> bool:
 
 
 def _default_workspace_slug(env: dict[str, str]) -> str:
-    return str(env.get("XYN_WORKSPACE_SLUG", DEFAULT_USER_WORKSPACE_SLUG)).strip() or DEFAULT_USER_WORKSPACE_SLUG
+    explicit = str(env.get("XYN_WORKSPACE_SLUG", "")).strip()
+    if explicit:
+        return explicit
+    auth_mode = (
+        str(env.get("XYN_PROVISION_AUTH_MODE", "")).strip().lower()
+        or str(env.get("XYN_AUTH_MODE", "")).strip().lower()
+        or "dev"
+    )
+    if auth_mode == "dev":
+        return DEFAULT_USER_WORKSPACE_SLUG
+    org_name = str(env.get("XYN_ORG_NAME", "")).strip() or "xyn"
+    slug = re.sub(r"[^a-z0-9]+", "-", org_name.lower()).strip("-")
+    return slug or "xyn"
 
 
 def _build_default_seed_url(runtime: dict[str, str]) -> str:
