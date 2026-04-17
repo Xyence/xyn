@@ -54,6 +54,7 @@ TOOL_NAMES = [
     "get_release_target",
     "create_release_target",
     "list_artifacts",
+    "list_remote_artifact_candidates",
     "get_artifact",
     "get_artifact_source_tree",
     "read_artifact_source_file",
@@ -162,14 +163,23 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     def get_application_change_session(application_id: str = "", session_id: str = "") -> Dict[str, Any]:
         return adapter.get_application_change_session(application_id=application_id, session_id=session_id)
 
-    def create_application_change_session(application_id: str, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
-        return adapter.create_application_change_session(application_id=application_id, payload=payload)
+    def create_application_change_session(
+        application_id: str,
+        artifact_source: Dict[str, Any] | None = None,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.create_application_change_session(
+            application_id=application_id,
+            artifact_source=artifact_source,
+            payload=payload,
+        )
 
     def create_decomposition_campaign(
         application_id: str = "",
         artifact_id: str = "",
         artifact_slug: str = "",
         workspace_id: str = "",
+        artifact_source: Dict[str, Any] | None = None,
         target_source_files: list[str] | None = None,
         extraction_seams: list[str] | None = None,
         moved_handlers_modules: list[str] | None = None,
@@ -181,6 +191,7 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
             artifact_id=artifact_id,
             artifact_slug=artifact_slug,
             workspace_id=workspace_id,
+            artifact_source=artifact_source,
             target_source_files=target_source_files,
             extraction_seams=extraction_seams,
             moved_handlers_modules=moved_handlers_modules,
@@ -356,6 +367,19 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
 
     def list_artifacts(limit: int | None = None, offset: int | None = None) -> Dict[str, Any]:
         return adapter.list_artifacts(limit=limit, offset=offset)
+
+    def list_remote_artifact_candidates(
+        manifest_source: str = "",
+        package_source: str = "",
+        artifact_slug: str = "",
+        artifact_type: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.list_remote_artifact_candidates(
+            manifest_source=manifest_source,
+            package_source=package_source,
+            artifact_slug=artifact_slug,
+            artifact_type=artifact_type,
+        )
 
     def get_artifact(artifact_id: str) -> Dict[str, Any]:
         return adapter.get_artifact(artifact_id=artifact_id)
@@ -646,13 +670,13 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     _register_tool(
         mcp_server,
         name="create_application_change_session",
-        description="Create a solution change session for an application.",
+        description="Create a solution change session for an application. Supports explicit artifact_source metadata when targeting a remote catalog artifact.",
         fn=create_application_change_session,
     )
     _register_tool(
         mcp_server,
         name="create_decomposition_campaign",
-        description="Create a decomposition-focused change session campaign with target files/seams/tests metadata.",
+        description="Create a decomposition-focused change session campaign. For remote non-installed artifacts, first call list_remote_artifact_candidates and pass artifact_source.",
         fn=create_decomposition_campaign,
     )
     _register_tool(
@@ -827,8 +851,14 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     _register_tool(
         mcp_server,
         name="list_artifacts",
-        description="List discoverable artifacts using existing artifact registry models.",
+        description="List discoverable local/installed artifacts from the current registry model. Remote catalog candidates are returned by list_remote_artifact_candidates.",
         fn=list_artifacts,
+    )
+    _register_tool(
+        mcp_server,
+        name="list_remote_artifact_candidates",
+        description="List remote (not-yet-installed) artifact candidates from manifest/package sources. Use before creating change sessions for S3-backed artifacts like Deal Finder.",
+        fn=list_remote_artifact_candidates,
     )
     _register_tool(
         mcp_server,

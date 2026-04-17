@@ -2519,15 +2519,26 @@ class XynApiAdapter:
         }
         return result
 
-    def create_application_change_session(self, *, application_id: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def create_application_change_session(
+        self,
+        *,
+        application_id: str,
+        artifact_source: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         paths = [
             f"/xyn/api/applications/{application_id}/change-sessions",
             f"/api/v1/applications/{application_id}/change-sessions",
         ]
+        request_payload = dict(payload or {})
+        if isinstance(artifact_source, dict):
+            cleaned_source = {str(key): value for key, value in artifact_source.items() if str(key).strip()}
+            if cleaned_source:
+                request_payload["artifact_source"] = cleaned_source
         result = self._request_with_fallback_paths(
             method="POST",
             paths=paths,
-            json_payload=dict(payload or {}),
+            json_payload=request_payload,
             base_urls=self._planner_base_urls(),
             allow_reissue_on_transport_error=False,
         )
@@ -2548,6 +2559,7 @@ class XynApiAdapter:
         artifact_id: str = "",
         artifact_slug: str = "",
         workspace_id: str = "",
+        artifact_source: Optional[Dict[str, Any]] = None,
         payload: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         normalized_application_id = str(application_id or "").strip()
@@ -2575,6 +2587,7 @@ class XynApiAdapter:
         if normalized_application_id and not (normalized_artifact_id or normalized_artifact_slug):
             result = self.create_application_change_session(
                 application_id=normalized_application_id,
+                artifact_source=artifact_source,
                 payload=payload,
             )
             response = result.get("response") if isinstance(result.get("response"), dict) else {}
@@ -2649,6 +2662,10 @@ class XynApiAdapter:
             request_payload["artifact_id"] = normalized_artifact_id
         if normalized_artifact_slug:
             request_payload["artifact_slug"] = normalized_artifact_slug
+        if isinstance(artifact_source, dict):
+            cleaned_source = {str(key): value for key, value in artifact_source.items() if str(key).strip()}
+            if cleaned_source:
+                request_payload["artifact_source"] = cleaned_source
         paths = ["/xyn/api/change-sessions"]
         result = self._request_with_fallback_paths(
             method="POST",
@@ -2707,6 +2724,7 @@ class XynApiAdapter:
         artifact_id: str = "",
         artifact_slug: str = "",
         workspace_id: str = "",
+        artifact_source: Optional[Dict[str, Any]] = None,
         target_source_files: Optional[list[str]] = None,
         extraction_seams: Optional[list[str]] = None,
         moved_handlers_modules: Optional[list[str]] = None,
@@ -2727,6 +2745,7 @@ class XynApiAdapter:
             artifact_id=artifact_id,
             artifact_slug=artifact_slug,
             workspace_id=workspace_id,
+            artifact_source=artifact_source,
             payload=request_payload,
         )
         if isinstance(result.get("response"), dict):
@@ -4427,6 +4446,61 @@ class XynApiAdapter:
         result = last_result
         if not result.get("ok"):
             return result
+        return result
+
+    def list_remote_artifact_candidates(
+        self,
+        *,
+        manifest_source: str = "",
+        package_source: str = "",
+        artifact_slug: str = "",
+        artifact_type: str = "",
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+        if str(manifest_source or "").strip():
+            params["manifest_source"] = str(manifest_source).strip()
+        if str(package_source or "").strip():
+            params["package_source"] = str(package_source).strip()
+        if str(artifact_slug or "").strip():
+            params["artifact_slug"] = str(artifact_slug).strip()
+        if str(artifact_type or "").strip():
+            params["artifact_type"] = str(artifact_type).strip()
+
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=["/xyn/api/artifacts/remote-candidates"],
+            params=params,
+            base_urls=[self._config.control_api_base_url],
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        rows = body.get("candidates") if isinstance(body.get("candidates"), list) else []
+        normalized: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            remote_source = row.get("remote_source") if isinstance(row.get("remote_source"), dict) else {}
+            normalized.append(
+                {
+                    "artifact_slug": str(row.get("artifact_slug") or ""),
+                    "title": str(row.get("title") or ""),
+                    "artifact_type": str(row.get("artifact_type") or ""),
+                    "summary": str(row.get("summary") or ""),
+                    "installed": bool(row.get("installed")),
+                    "artifact_origin": str(row.get("artifact_origin") or ""),
+                    "source_ref_type": str(row.get("source_ref_type") or ""),
+                    "source_ref_id": str(row.get("source_ref_id") or ""),
+                    "manifest_source": str(remote_source.get("manifest_source") or ""),
+                    "package_source": str(remote_source.get("package_source") or ""),
+                    "remote_source": remote_source,
+                }
+            )
+        result["response"] = {
+            "candidates": normalized,
+            "count": len(normalized),
+            "selection_hint": "Remote candidates are separate from list_artifacts; pass artifact_source into change-session creation.",
+        }
         return result
 
     def get_artifact(self, *, artifact_id: str) -> Dict[str, Any]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import io
 import zipfile
 from typing import Any, Dict
@@ -85,6 +86,72 @@ class XynMcpAdapterTests(TestCase):
         response_body = result.get("response") if isinstance(result.get("response"), dict) else {}
         self.assertEqual(response_body.get("artifacts"), [])
         self.assertEqual(response_body.get("count"), 0)
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_list_artifacts_remains_local_registry_only(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"artifacts": [{"id": "a1", "title": "local"}]}
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.list_artifacts(limit=10, offset=0)
+        self.assertTrue(result["ok"])
+        urls = [call.kwargs.get("url") for call in mock_request.call_args_list]
+        self.assertIn("http://xyn.local:8001/xyn/api/artifacts", urls)
+        self.assertNotIn("http://xyn.local:8001/xyn/api/artifacts/remote-candidates", urls)
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_list_remote_artifact_candidates_path(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "candidates": [
+                {
+                    "artifact_slug": "deal-finder",
+                    "artifact_type": "application",
+                    "title": "Deal Finder",
+                    "installed": False,
+                    "artifact_origin": "remote_catalog",
+                    "source_ref_type": "RemoteArtifactSource",
+                    "source_ref_id": "bundle:abc:deal-finder:application",
+                    "remote_source": {
+                        "manifest_source": "s3://bundle/manifest.json",
+                        "package_source": "s3://bundle/package.zip",
+                    },
+                }
+            ]
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.list_remote_artifact_candidates(
+            manifest_source="s3://bundle/manifest.json",
+            artifact_slug="deal-finder",
+        )
+        self.assertTrue(result["ok"])
+        kwargs = mock_request.call_args.kwargs
+        self.assertEqual(kwargs["method"], "GET")
+        self.assertEqual(kwargs["url"], "http://xyn.local:8001/xyn/api/artifacts/remote-candidates")
+        self.assertEqual(kwargs["params"]["manifest_source"], "s3://bundle/manifest.json")
+        self.assertEqual(kwargs["params"]["artifact_slug"], "deal-finder")
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        self.assertEqual(body.get("count"), 1)
+        self.assertEqual((body.get("candidates") or [])[0].get("manifest_source"), "s3://bundle/manifest.json")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_get_artifact_source_tree_path(self, mock_request: mock.Mock) -> None:
@@ -1532,6 +1599,70 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(payload.get("workspace_id"), "ws-1")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_create_application_change_session_forwards_artifact_source(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 201
+        response.json.return_value = {"session": {"id": "sess-1"}, "application_id": "app-1"}
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        artifact_source = {"manifest_source": "s3://bundle/manifest.json", "artifact_slug": "deal-finder"}
+        result = adapter.create_application_change_session(
+            application_id="app-1",
+            artifact_source=artifact_source,
+            payload={"title": "Session 1"},
+        )
+        self.assertTrue(result.get("ok"))
+        called = mock_request.call_args.kwargs
+        self.assertEqual(called.get("url"), "http://xyn.local:8001/xyn/api/applications/app-1/change-sessions")
+        request_payload = called.get("json") or {}
+        self.assertEqual(request_payload.get("artifact_source"), artifact_source)
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_create_decomposition_campaign_forwards_artifact_source(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 201
+        response.json.return_value = {
+            "created": True,
+            "application_id": "app-artifact-1",
+            "scope_type": "artifact",
+            "scope": {"scope_type": "artifact", "workspace_id": "ws-1", "artifact_slug": "deal-finder"},
+            "session": {"id": "sess-1", "application_id": "app-artifact-1"},
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        artifact_source = {
+            "manifest_source": "s3://bundle/manifest.json",
+            "artifact_slug": "deal-finder",
+            "artifact_type": "application",
+        }
+        result = adapter.create_decomposition_campaign(
+            artifact_slug="deal-finder",
+            workspace_id="ws-1",
+            artifact_source=artifact_source,
+            target_source_files=["services/deal_finder/main.py"],
+        )
+        self.assertTrue(result.get("ok"))
+        called = mock_request.call_args.kwargs
+        payload = called.get("json") or {}
+        self.assertEqual(payload.get("artifact_source"), artifact_source)
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_create_decomposition_campaign_artifact_scope_classifies_missing_artifact(self, mock_request: mock.Mock) -> None:
         response = mock.Mock()
         response.status_code = 404
@@ -2065,6 +2196,7 @@ class XynMcpAdapterTests(TestCase):
             artifact_id="",
             artifact_slug="xyn-api",
             workspace_id="ws-1",
+            artifact_source=None,
             target_source_files=["backend/xyn_orchestrator/xyn_api.py"],
             extraction_seams=None,
             moved_handlers_modules=None,
@@ -2077,6 +2209,61 @@ class XynMcpAdapterTests(TestCase):
             application_id="",
             session_id="sess-1",
             payload={"dispatch_runtime": True},
+        )
+
+    def test_tool_contract_includes_remote_artifact_candidates_and_artifact_source_schema(self) -> None:
+        adapter = mock.Mock()
+        server = FakeMcpServer()
+        register_xyn_tools(server, adapter)
+
+        self.assertIn("list_remote_artifact_candidates", server.tools)
+        app_create_signature = inspect.signature(server.tools["create_application_change_session"]["fn"])
+        self.assertIn("artifact_source", app_create_signature.parameters)
+        create_signature = inspect.signature(server.tools["create_decomposition_campaign"]["fn"])
+        self.assertIn("artifact_source", create_signature.parameters)
+        list_signature = inspect.signature(server.tools["list_remote_artifact_candidates"]["fn"])
+        self.assertIn("manifest_source", list_signature.parameters)
+        self.assertIn("package_source", list_signature.parameters)
+
+    def test_tool_contract_remote_candidate_to_create_campaign_forwards_artifact_source(self) -> None:
+        adapter = mock.Mock()
+        server = FakeMcpServer()
+        register_xyn_tools(server, adapter)
+
+        server.tools["list_remote_artifact_candidates"]["fn"](
+            manifest_source="s3://bundle/manifest.json",
+            artifact_slug="deal-finder",
+            artifact_type="application",
+        )
+        adapter.list_remote_artifact_candidates.assert_called_with(
+            manifest_source="s3://bundle/manifest.json",
+            package_source="",
+            artifact_slug="deal-finder",
+            artifact_type="application",
+        )
+
+        source = {
+            "manifest_source": "s3://bundle/manifest.json",
+            "artifact_slug": "deal-finder",
+            "artifact_type": "application",
+        }
+        server.tools["create_decomposition_campaign"]["fn"](
+            artifact_slug="deal-finder",
+            workspace_id="ws-1",
+            artifact_source=source,
+            target_source_files=["services/deal_finder/main.py"],
+        )
+        adapter.create_decomposition_campaign.assert_called_with(
+            application_id="",
+            artifact_id="",
+            artifact_slug="deal-finder",
+            workspace_id="ws-1",
+            artifact_source=source,
+            target_source_files=["services/deal_finder/main.py"],
+            extraction_seams=None,
+            moved_handlers_modules=None,
+            required_test_suites=None,
+            payload=None,
         )
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
