@@ -54,6 +54,8 @@ TOOL_NAMES = [
     "get_release_target",
     "create_release_target",
     "list_artifacts",
+    "list_remote_artifact_sources",
+    "search_remote_artifact_catalog",
     "list_remote_artifact_candidates",
     "get_artifact",
     "get_artifact_source_tree",
@@ -367,6 +369,26 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
 
     def list_artifacts(limit: int | None = None, offset: int | None = None) -> Dict[str, Any]:
         return adapter.list_artifacts(limit=limit, offset=offset)
+
+    def list_remote_artifact_sources() -> Dict[str, Any]:
+        return adapter.list_remote_artifact_sources()
+
+    def search_remote_artifact_catalog(
+        query: str = "",
+        artifact_slug: str = "",
+        artifact_type: str = "",
+        source_root: str = "",
+        limit: int = 50,
+        cursor: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.search_remote_artifact_catalog(
+            query=query,
+            artifact_slug=artifact_slug,
+            artifact_type=artifact_type,
+            source_root=source_root,
+            limit=limit,
+            cursor=cursor,
+        )
 
     def list_remote_artifact_candidates(
         manifest_source: str = "",
@@ -853,6 +875,18 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
         name="list_artifacts",
         description="List discoverable local/installed artifacts from the current registry model. Remote catalog candidates are returned by list_remote_artifact_candidates.",
         fn=list_artifacts,
+    )
+    _register_tool(
+        mcp_server,
+        name="list_remote_artifact_sources",
+        description="List configured remote artifact catalog roots (bucket/prefix/source type) used for MCP remote discovery.",
+        fn=list_remote_artifact_sources,
+    )
+    _register_tool(
+        mcp_server,
+        name="search_remote_artifact_catalog",
+        description="Search remote artifact catalog by name/slug/type without pre-known manifest source. Use before change-session creation for non-installed artifacts.",
+        fn=search_remote_artifact_catalog,
     )
     _register_tool(
         mcp_server,

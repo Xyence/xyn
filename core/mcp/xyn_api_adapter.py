@@ -4503,6 +4503,100 @@ class XynApiAdapter:
         }
         return result
 
+    def list_remote_artifact_sources(self) -> Dict[str, Any]:
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=["/xyn/api/artifacts/remote-sources"],
+            base_urls=[self._config.control_api_base_url],
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        rows = body.get("sources") if isinstance(body.get("sources"), list) else []
+        normalized: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            normalized.append(
+                {
+                    "source": str(row.get("source") or ""),
+                    "source_type": str(row.get("source_type") or ""),
+                    "bucket": str(row.get("bucket") or ""),
+                    "prefix": str(row.get("prefix") or ""),
+                    "region": str(row.get("region") or ""),
+                }
+            )
+        result["response"] = {
+            "sources": normalized,
+            "count": len(normalized),
+            "source_mode": str(body.get("source_mode") or ""),
+            "configured_region": str(body.get("configured_region") or ""),
+        }
+        return result
+
+    def search_remote_artifact_catalog(
+        self,
+        *,
+        query: str = "",
+        artifact_slug: str = "",
+        artifact_type: str = "",
+        source_root: str = "",
+        limit: int = 50,
+        cursor: str = "",
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+        if str(query or "").strip():
+            params["q"] = str(query).strip()
+        if str(artifact_slug or "").strip():
+            params["artifact_slug"] = str(artifact_slug).strip()
+        if str(artifact_type or "").strip():
+            params["artifact_type"] = str(artifact_type).strip()
+        if str(source_root or "").strip():
+            params["source_root"] = str(source_root).strip()
+        if int(limit or 0) > 0:
+            params["limit"] = int(limit)
+        if str(cursor or "").strip():
+            params["cursor"] = str(cursor).strip()
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=["/xyn/api/artifacts/remote-catalog"],
+            params=params,
+            base_urls=[self._config.control_api_base_url],
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        rows = body.get("candidates") if isinstance(body.get("candidates"), list) else []
+        normalized: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            remote_source = row.get("remote_source") if isinstance(row.get("remote_source"), dict) else {}
+            normalized.append(
+                {
+                    "artifact_slug": str(row.get("artifact_slug") or ""),
+                    "title": str(row.get("title") or ""),
+                    "artifact_type": str(row.get("artifact_type") or ""),
+                    "summary": str(row.get("summary") or ""),
+                    "installed": bool(row.get("installed")),
+                    "artifact_origin": str(row.get("artifact_origin") or ""),
+                    "source_ref_type": str(row.get("source_ref_type") or ""),
+                    "source_ref_id": str(row.get("source_ref_id") or ""),
+                    "manifest_source": str(remote_source.get("manifest_source") or ""),
+                    "package_source": str(remote_source.get("package_source") or ""),
+                    "remote_source": remote_source,
+                }
+            )
+        result["response"] = {
+            "candidates": normalized,
+            "count": int(body.get("count") or len(normalized)),
+            "total": int(body.get("total") or len(normalized)),
+            "next_cursor": str(body.get("next_cursor") or ""),
+            "source_roots": body.get("source_roots") if isinstance(body.get("source_roots"), list) else [],
+            "errors": body.get("errors") if isinstance(body.get("errors"), list) else [],
+        }
+        return result
+
     def get_artifact(self, *, artifact_id: str) -> Dict[str, Any]:
         result = self._request_with_fallback_paths(
             method="GET",
