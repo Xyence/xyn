@@ -57,6 +57,12 @@ _WORKSPACE_ROLE_SYSTEM_PLATFORM = "system_platform"
 _WORKSPACE_ROLE_DEFAULT_USER = "default_user"
 _WORKSPACE_ROLE_USER_VISIBLE = "user_visible"
 _SYSTEM_ARTIFACT_SLUGS = {"xyn-api", "xyn-ui", "core.workbench"}
+_ARTIFACT_SOURCE_TREE_PATHS = ["/xyn/api/artifacts/source-tree", "/api/v1/artifacts/source-tree"]
+_ARTIFACT_SOURCE_FILE_PATHS = ["/xyn/api/artifacts/source-file", "/api/v1/artifacts/source-file"]
+_ARTIFACT_SOURCE_SEARCH_PATHS = ["/xyn/api/artifacts/source-search", "/api/v1/artifacts/source-search"]
+_ARTIFACT_ANALYZE_CODEBASE_PATHS = ["/xyn/api/artifacts/analyze-codebase", "/api/v1/artifacts/analyze-codebase"]
+_ARTIFACT_ANALYZE_PYTHON_API_PATHS = ["/xyn/api/artifacts/analyze-python-api", "/api/v1/artifacts/analyze-python-api"]
+_ARTIFACT_MODULE_METRICS_PATHS = ["/xyn/api/artifacts/module-metrics", "/api/v1/artifacts/module-metrics"]
 
 
 def set_request_bearer_token(token: str) -> Token:
@@ -4456,9 +4462,7 @@ class XynApiAdapter:
         params["include_files"] = bool(include_files)
         result = self._request_with_fallback_paths(
             method="GET",
-            paths=[
-                "/api/v1/artifacts/source-tree",
-            ],
+            paths=_ARTIFACT_SOURCE_TREE_PATHS,
             params=params,
             base_urls=self._code_api_base_urls(),
         )
@@ -4533,9 +4537,7 @@ class XynApiAdapter:
             params["end_line"] = int(end_line)
         result = self._request_with_fallback_paths(
             method="GET",
-            paths=[
-                "/api/v1/artifacts/source-file",
-            ],
+            paths=_ARTIFACT_SOURCE_FILE_PATHS,
             params=params,
             base_urls=self._code_api_base_urls(),
         )
@@ -4631,9 +4633,7 @@ class XynApiAdapter:
             params["file_extensions"] = str(file_extensions).strip()
         result = self._request_with_fallback_paths(
             method="GET",
-            paths=[
-                "/api/v1/artifacts/source-search",
-            ],
+            paths=_ARTIFACT_SOURCE_SEARCH_PATHS,
             params=params,
             base_urls=self._code_api_base_urls(),
         )
@@ -4707,9 +4707,7 @@ class XynApiAdapter:
             params["artifact_id"] = str(artifact_id).strip()
         result = self._request_with_fallback_paths(
             method="GET",
-            paths=[
-                "/api/v1/artifacts/analyze-codebase",
-            ],
+            paths=_ARTIFACT_ANALYZE_CODEBASE_PATHS,
             params=params,
             base_urls=self._code_api_base_urls(),
         )
@@ -4763,9 +4761,7 @@ class XynApiAdapter:
             params["artifact_id"] = str(artifact_id).strip()
         result = self._request_with_fallback_paths(
             method="GET",
-            paths=[
-                "/api/v1/artifacts/analyze-python-api",
-            ],
+            paths=_ARTIFACT_ANALYZE_PYTHON_API_PATHS,
             params=params,
             base_urls=self._code_api_base_urls(),
         )
@@ -4820,9 +4816,7 @@ class XynApiAdapter:
             params["artifact_id"] = str(artifact_id).strip()
         result = self._request_with_fallback_paths(
             method="GET",
-            paths=[
-                "/api/v1/artifacts/module-metrics",
-            ],
+            paths=_ARTIFACT_MODULE_METRICS_PATHS,
             params=params,
             base_urls=self._code_api_base_urls(),
         )

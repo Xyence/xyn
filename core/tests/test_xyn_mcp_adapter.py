@@ -105,7 +105,7 @@ class XynMcpAdapterTests(TestCase):
         self.assertTrue(result["ok"])
         kwargs = mock_request.call_args.kwargs
         self.assertEqual(kwargs["method"], "GET")
-        self.assertEqual(kwargs["url"], "http://xyn.local:8001/api/v1/artifacts/source-tree")
+        self.assertEqual(kwargs["url"], "http://xyn.local:8001/xyn/api/artifacts/source-tree")
         self.assertEqual(kwargs["params"]["artifact_slug"], "app.demo")
         self.assertTrue(kwargs["params"]["include_files"])
 
@@ -128,7 +128,7 @@ class XynMcpAdapterTests(TestCase):
         result = adapter.get_artifact_source_tree(artifact_slug="app.demo")
         self.assertTrue(result["ok"])
         kwargs = mock_request.call_args.kwargs
-        self.assertEqual(kwargs["url"], "http://xyn-core:8000/api/v1/artifacts/source-tree")
+        self.assertEqual(kwargs["url"], "http://xyn-core:8000/xyn/api/artifacts/source-tree")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_get_artifact_source_tree_falls_back_from_code_api_base_url(self, mock_request: mock.Mock) -> None:
@@ -158,9 +158,9 @@ class XynMcpAdapterTests(TestCase):
         first_kwargs = mock_request.call_args_list[0].kwargs
         second_kwargs = mock_request.call_args_list[1].kwargs
         third_kwargs = mock_request.call_args_list[2].kwargs
-        self.assertEqual(first_kwargs["url"], "http://xyn-core:8000/api/v1/artifacts/source-tree")
-        self.assertEqual(second_kwargs["url"], "http://core:8000/api/v1/artifacts/source-tree")
-        self.assertEqual(third_kwargs["url"], "http://xyn-local-api:8000/api/v1/artifacts/source-tree")
+        self.assertEqual(first_kwargs["url"], "http://xyn-core:8000/xyn/api/artifacts/source-tree")
+        self.assertEqual(second_kwargs["url"], "http://xyn-core:8000/api/v1/artifacts/source-tree")
+        self.assertEqual(third_kwargs["url"], "http://core:8000/xyn/api/artifacts/source-tree")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_get_artifact_source_tree_falls_back_when_code_api_upstream_unreachable(self, mock_request: mock.Mock) -> None:
@@ -183,8 +183,8 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(mock_request.call_count, 2)
         first_kwargs = mock_request.call_args_list[0].kwargs
         second_kwargs = mock_request.call_args_list[1].kwargs
-        self.assertEqual(first_kwargs["url"], "http://xyn-core:8000/api/v1/artifacts/source-tree")
-        self.assertEqual(second_kwargs["url"], "http://core:8000/api/v1/artifacts/source-tree")
+        self.assertEqual(first_kwargs["url"], "http://xyn-core:8000/xyn/api/artifacts/source-tree")
+        self.assertEqual(second_kwargs["url"], "http://xyn-core:8000/api/v1/artifacts/source-tree")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_read_artifact_source_file_path(self, mock_request: mock.Mock) -> None:
@@ -205,7 +205,7 @@ class XynMcpAdapterTests(TestCase):
         self.assertTrue(result["ok"])
         kwargs = mock_request.call_args.kwargs
         self.assertEqual(kwargs["method"], "GET")
-        self.assertEqual(kwargs["url"], "http://xyn.local:8001/api/v1/artifacts/source-file")
+        self.assertEqual(kwargs["url"], "http://xyn.local:8001/xyn/api/artifacts/source-file")
         self.assertEqual(kwargs["params"]["path"], "README.md")
         self.assertEqual(kwargs["params"]["artifact_id"], "a1")
 
@@ -228,7 +228,7 @@ class XynMcpAdapterTests(TestCase):
         result = adapter.get_artifact_source_tree(artifact_slug="app.demo")
         self.assertTrue(result["ok"])
         kwargs = mock_request.call_args.kwargs
-        self.assertEqual(kwargs["url"], "http://xyn-core:8000/api/v1/artifacts/source-tree")
+        self.assertEqual(kwargs["url"], "http://xyn-core:8000/xyn/api/artifacts/source-tree")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_get_artifact_source_tree_passes_bounds(self, mock_request: mock.Mock) -> None:
@@ -276,9 +276,35 @@ class XynMcpAdapterTests(TestCase):
         self.assertTrue(result["ok"])
         kwargs = mock_request.call_args.kwargs
         self.assertEqual(kwargs["method"], "GET")
-        self.assertEqual(kwargs["url"], "http://xyn.local:8001/api/v1/artifacts/analyze-codebase")
+        self.assertEqual(kwargs["url"], "http://xyn.local:8001/xyn/api/artifacts/analyze-codebase")
         self.assertEqual(kwargs["params"]["artifact_slug"], "app.demo")
         self.assertEqual(kwargs["params"]["mode"], "python_api")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_get_artifact_source_tree_falls_back_from_xyn_api_route_to_api_v1(self, mock_request: mock.Mock) -> None:
+        first = mock.Mock()
+        first.status_code = 404
+        first.json.return_value = {"detail": "Not Found"}
+        second = mock.Mock()
+        second.status_code = 200
+        second.json.return_value = {"artifact": {"id": "a1", "slug": "app.demo"}, "files": []}
+        mock_request.side_effect = [first, second]
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        result = adapter.get_artifact_source_tree(artifact_slug="app.demo")
+        self.assertTrue(result["ok"])
+        self.assertEqual(mock_request.call_count, 2)
+        first_kwargs = mock_request.call_args_list[0].kwargs
+        second_kwargs = mock_request.call_args_list[1].kwargs
+        self.assertEqual(first_kwargs["url"], "http://xyn.local:8001/xyn/api/artifacts/source-tree")
+        self.assertEqual(second_kwargs["url"], "http://xyn.local:8001/api/v1/artifacts/source-tree")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_create_change_effort_routes_to_api_v1(self, mock_request: mock.Mock) -> None:
