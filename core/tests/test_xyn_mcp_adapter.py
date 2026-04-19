@@ -3723,6 +3723,52 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(mock_request.call_args_list[1].kwargs.get("url"), "https://seed.xyence.io/api/v1/applications")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_list_applications_does_not_treat_non_surface_payload_as_empty_tool_surface(
+        self, mock_request: mock.Mock
+    ) -> None:
+        def _fake_request(*_args, **kwargs):
+            method = str(kwargs.get("method") or "").upper()
+            url = str(kwargs.get("url") or "")
+            response = mock.Mock()
+            response.headers = {}
+            response.text = ""
+            if method == "GET" and url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control"):
+                response.status_code = 200
+                response.json.return_value = {
+                    "control": {"session": {"planning": {}}},
+                    "next_allowed_actions": ["run_change_session_control_action"],
+                }
+                return response
+            if method == "GET" and url.endswith("/xyn/api/applications"):
+                response.status_code = 200
+                response.json.return_value = {"applications": [{"application_id": "app-1", "name": "Xyn API"}]}
+                return response
+            response.status_code = 404
+            response.json.return_value = {"detail": "Not Found"}
+            return response
+
+        mock_request.side_effect = _fake_request
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="https://xyn.xyence.io",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        prime = adapter.inspect_change_session_control(application_id="app-1", session_id="sess-1")
+        self.assertTrue(prime.get("ok"))
+
+        result = adapter.list_applications(workspace_id="ws-1")
+        self.assertTrue(result.get("ok"))
+        self.assertEqual(int(result.get("status_code") or 0), 200)
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        self.assertEqual(int(body.get("count") or 0), 1)
+        self.assertNotEqual(str(result.get("error_classification") or ""), "empty_tool_surface")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_list_applications_normalizes_plain_404_to_planner_route_unavailable(self, mock_request: mock.Mock) -> None:
         response = mock.Mock()
         response.status_code = 404

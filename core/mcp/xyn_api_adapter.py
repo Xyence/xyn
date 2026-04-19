@@ -279,6 +279,12 @@ class XynApiAdapter:
     def _planner_surface_is_empty(self, response: Any) -> bool:
         if not isinstance(response, dict):
             return False
+        # Only planner-control envelopes are expected to advertise tool surfaces.
+        # Discovery/list endpoints (e.g., list_applications) intentionally omit
+        # action surfaces and should not be treated as stale bindings.
+        has_surface_envelope = "next_allowed_actions" in response or "control" in response
+        if not has_surface_envelope:
+            return False
         control = response.get("control") if isinstance(response.get("control"), dict) else {}
         session = control.get("session") if isinstance(control.get("session"), dict) else {}
         planning = session.get("planning") if isinstance(session.get("planning"), dict) else {}
