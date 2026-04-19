@@ -40,6 +40,11 @@ def handle_smoke_test(
     app_spec = payload.get("app_spec") if isinstance(payload.get("app_spec"), dict) else {}
     policy_bundle = payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {}
     generated_artifact = payload.get("generated_artifact") if isinstance(payload.get("generated_artifact"), dict) else {}
+    generated_artifacts = (
+        [item for item in (payload.get("generated_artifacts") or []) if isinstance(item, dict)]
+        if isinstance(payload.get("generated_artifacts"), list)
+        else ([generated_artifact] if generated_artifact else [])
+    )
     environment_id = str(payload.get("environment_id") or "").strip()
     sibling_id = str(payload.get("sibling_id") or "").strip()
     activation_id = str(payload.get("activation_id") or "").strip()
@@ -73,15 +78,21 @@ def handle_smoke_test(
         policy_bundle=policy_bundle,
     )
 
-    generated_artifact_slug = str(generated_artifact.get("artifact_slug") or "").strip()
-    generated_artifact_version = str(generated_artifact.get("artifact_version") or "").strip()
-    generated_artifact_revision_id = str(
-        generated_artifact.get("revision_id")
-        or generated_artifact.get("artifact_revision_id")
-        or ""
-    ).strip()
+    expected_generated_artifacts: list[dict[str, str]] = []
+    for item in generated_artifacts:
+        slug = str(item.get("artifact_slug") or "").strip()
+        if not slug:
+            continue
+        expected_generated_artifacts.append(
+            {
+                "artifact_slug": slug,
+                "artifact_version": str(item.get("artifact_version") or "").strip(),
+                "artifact_revision_id": str(item.get("revision_id") or item.get("artifact_revision_id") or "").strip(),
+            }
+        )
     registry_catalog: dict[str, Any] = {}
-    if generated_artifact_slug:
+    registry_catalog_artifacts: list[dict[str, Any]] = []
+    if expected_generated_artifacts:
         registry_status, registry_body, registry_text = container_http_session_json_fn(
             root_platform_api_container,
             port=8000,
@@ -100,56 +111,77 @@ def handle_smoke_test(
         if registry_status != 200:
             raise RuntimeError(f"Registry catalog check failed ({registry_status}): {registry_text}")
         registry_rows = registry_body.get("artifacts") if isinstance(registry_body.get("artifacts"), list) else []
-        registry_match = next(
-            (
-                row
-                for row in registry_rows
-                if isinstance(row, dict)
-                and str(row.get("slug") or "").strip() == generated_artifact_slug
-                and str(row.get("package_version") or "").strip() == generated_artifact_version
-            ),
-            None,
+        sibling_installed_artifacts = (
+            [item for item in (sibling.get("installed_artifacts") or []) if isinstance(item, dict)]
+            if isinstance(sibling.get("installed_artifacts"), list)
+            else []
         )
-        if isinstance(registry_match, dict):
-            if generated_artifact_revision_id:
-                catalog_revision_id = str(
-                    registry_match.get("artifact_revision_id")
-                    or (registry_match.get("metadata") or {}).get("artifact_revision_id")
-                    or (registry_match.get("metadata") or {}).get("revision_id")
-                    or ""
-                ).strip()
-                if catalog_revision_id and catalog_revision_id != generated_artifact_revision_id:
-                    raise RuntimeError(
-                        "Registry generated artifact revision mismatch: "
-                        f"expected={generated_artifact_revision_id} actual={catalog_revision_id}"
-                    )
-            registry_catalog = registry_match
-        else:
-            installed_artifact = sibling.get("installed_artifact") if isinstance(sibling.get("installed_artifact"), dict) else {}
-            installed_slug = str(installed_artifact.get("artifact_slug") or "").strip()
-            installed_id = str(installed_artifact.get("artifact_id") or "").strip()
-            if installed_slug == generated_artifact_slug and installed_id:
-                installed_revision_id = str(installed_artifact.get("artifact_revision_id") or "").strip()
+        if not sibling_installed_artifacts and isinstance(sibling.get("installed_artifact"), dict):
+            sibling_installed_artifacts = [sibling.get("installed_artifact")]
+        for expected in expected_generated_artifacts:
+            generated_artifact_slug = str(expected.get("artifact_slug") or "").strip()
+            generated_artifact_version = str(expected.get("artifact_version") or "").strip()
+            generated_artifact_revision_id = str(expected.get("artifact_revision_id") or "").strip()
+            registry_match = next(
+                (
+                    row
+                    for row in registry_rows
+                    if isinstance(row, dict)
+                    and str(row.get("slug") or "").strip() == generated_artifact_slug
+                    and str(row.get("package_version") or "").strip() == generated_artifact_version
+                ),
+                None,
+            )
+            if isinstance(registry_match, dict):
+                if generated_artifact_revision_id:
+                    catalog_revision_id = str(
+                        registry_match.get("artifact_revision_id")
+                        or (registry_match.get("metadata") or {}).get("artifact_revision_id")
+                        or (registry_match.get("metadata") or {}).get("revision_id")
+                        or ""
+                    ).strip()
+                    if catalog_revision_id and catalog_revision_id != generated_artifact_revision_id:
+                        raise RuntimeError(
+                            "Registry generated artifact revision mismatch: "
+                            f"artifact={generated_artifact_slug} expected={generated_artifact_revision_id} actual={catalog_revision_id}"
+                        )
+                registry_catalog_artifacts.append(registry_match)
+                continue
+            installed_match = next(
+                (
+                    row
+                    for row in sibling_installed_artifacts
+                    if isinstance(row, dict)
+                    and str(row.get("artifact_slug") or "").strip() == generated_artifact_slug
+                    and str(row.get("artifact_id") or "").strip()
+                ),
+                None,
+            )
+            if isinstance(installed_match, dict):
+                installed_revision_id = str(installed_match.get("artifact_revision_id") or "").strip()
                 if generated_artifact_revision_id and installed_revision_id and installed_revision_id != generated_artifact_revision_id:
                     raise RuntimeError(
                         "Generated artifact revision mismatch during registry fallback: "
-                        f"expected={generated_artifact_revision_id} actual={installed_revision_id}"
+                        f"artifact={generated_artifact_slug} expected={generated_artifact_revision_id} actual={installed_revision_id}"
                     )
-                registry_catalog = {
-                    "source": "installed_artifact_fallback",
-                    "artifact_slug": installed_slug,
-                    "artifact_id": installed_id,
-                    "artifact_version": generated_artifact_version,
-                    "artifact_revision_id": installed_revision_id or generated_artifact_revision_id,
-                }
+                registry_catalog_artifacts.append(
+                    {
+                        "source": "installed_artifact_fallback",
+                        "artifact_slug": generated_artifact_slug,
+                        "artifact_id": str(installed_match.get("artifact_id") or "").strip(),
+                        "artifact_version": generated_artifact_version,
+                        "artifact_revision_id": installed_revision_id or generated_artifact_revision_id,
+                    }
+                )
                 append_job_log_fn(
                     logs,
-                    "Generated artifact not present in catalog; using installed artifact evidence from provisioning output.",
+                    f"Generated artifact {generated_artifact_slug} not in catalog; using installed artifact fallback.",
                 )
-            else:
-                raise RuntimeError(
-                    f"Generated artifact {generated_artifact_slug}@{generated_artifact_version} not found in registry catalog"
-                )
+                continue
+            raise RuntimeError(
+                f"Generated artifact {generated_artifact_slug}@{generated_artifact_version} not found in registry catalog"
+            )
+        registry_catalog = registry_catalog_artifacts[0] if registry_catalog_artifacts else {}
 
     sibling_project = str(sibling.get("compose_project") or "").strip()
     sibling_api_container = f"{sibling_project}-api" if sibling_project else ""
@@ -177,8 +209,16 @@ def handle_smoke_test(
     sibling_runtime_public_url = str(
         sibling_runtime.get("public_app_url") or sibling_runtime.get("app_url") or sibling.get("ui_url") or ""
     ).strip()
-    sibling_workspace_id = str((sibling.get("installed_artifact") or {}).get("workspace_id") or "").strip()
-    sibling_workspace_slug = str((sibling.get("installed_artifact") or {}).get("workspace_slug") or workspace_slug).strip() or workspace_slug
+    sibling_installed_artifacts = (
+        [item for item in (sibling.get("installed_artifacts") or []) if isinstance(item, dict)]
+        if isinstance(sibling.get("installed_artifacts"), list)
+        else []
+    )
+    if not sibling_installed_artifacts and isinstance(sibling.get("installed_artifact"), dict):
+        sibling_installed_artifacts = [sibling.get("installed_artifact")]
+    primary_installed = sibling_installed_artifacts[0] if sibling_installed_artifacts else {}
+    sibling_workspace_id = str(primary_installed.get("workspace_id") or "").strip()
+    sibling_workspace_slug = str(primary_installed.get("workspace_slug") or workspace_slug).strip() or workspace_slug
     if not sibling_runtime_container or not docker_container_running_fn(sibling_runtime_container):
         raise RuntimeError("Sibling runtime container is not running")
     if not sibling_workspace_id:
@@ -216,7 +256,11 @@ def handle_smoke_test(
     if sibling_artifacts_status != 200:
         raise RuntimeError(f"Sibling artifact listing failed ({sibling_artifacts_status}): {sibling_artifacts_text}")
     sibling_artifacts = sibling_artifacts_body.get("artifacts") if isinstance(sibling_artifacts_body.get("artifacts"), list) else []
-    if generated_artifact_slug:
+    sibling_artifact_readiness: list[dict[str, Any]] = []
+    for expected in expected_generated_artifacts:
+        generated_artifact_slug = str(expected.get("artifact_slug") or "").strip()
+        generated_artifact_version = str(expected.get("artifact_version") or "").strip()
+        generated_artifact_revision_id = str(expected.get("artifact_revision_id") or "").strip()
         sibling_match = next(
             (
                 row
@@ -231,20 +275,37 @@ def handle_smoke_test(
             raise RuntimeError(
                 f"Sibling workspace is missing generated artifact {generated_artifact_slug}@{generated_artifact_version}"
             )
-        if generated_artifact_revision_id:
-            sibling_revision_id = str(
-                sibling_match.get("artifact_revision_id")
-                or (sibling_match.get("metadata") or {}).get("artifact_revision_id")
-                or (sibling_match.get("metadata") or {}).get("revision_id")
-                or ""
-            ).strip()
-            installed_revision_id = str((sibling.get("installed_artifact") or {}).get("artifact_revision_id") or "").strip()
-            candidate_revision_id = sibling_revision_id or installed_revision_id
-            if candidate_revision_id and candidate_revision_id != generated_artifact_revision_id:
-                raise RuntimeError(
-                    "Sibling installed artifact revision mismatch: "
-                    f"expected={generated_artifact_revision_id} actual={candidate_revision_id}"
-                )
+        sibling_revision_id = str(
+            sibling_match.get("artifact_revision_id")
+            or (sibling_match.get("metadata") or {}).get("artifact_revision_id")
+            or (sibling_match.get("metadata") or {}).get("revision_id")
+            or ""
+        ).strip()
+        installed_revision_id = str(
+            next(
+                (
+                    str((row or {}).get("artifact_revision_id") or "").strip()
+                    for row in sibling_installed_artifacts
+                    if isinstance(row, dict) and str((row or {}).get("artifact_slug") or "").strip() == generated_artifact_slug
+                ),
+                "",
+            )
+        ).strip()
+        candidate_revision_id = sibling_revision_id or installed_revision_id
+        if generated_artifact_revision_id and candidate_revision_id and candidate_revision_id != generated_artifact_revision_id:
+            raise RuntimeError(
+                "Sibling installed artifact revision mismatch: "
+                f"artifact={generated_artifact_slug} expected={generated_artifact_revision_id} actual={candidate_revision_id}"
+            )
+        sibling_artifact_readiness.append(
+            {
+                "artifact_slug": generated_artifact_slug,
+                "artifact_version": generated_artifact_version,
+                "expected_revision_id": generated_artifact_revision_id,
+                "resolved_revision_id": candidate_revision_id,
+                "status": "ready",
+            }
+        )
     sibling_contract_checks = exercise_runtime_contracts_fn(
         container_name=sibling_runtime_container,
         port=8080,
@@ -359,6 +420,7 @@ def handle_smoke_test(
             )
         except Exception:
             sibling_state = None
+    primary_generated = expected_generated_artifacts[0] if expected_generated_artifacts else {}
     if activation_id and environment_id:
         try:
             create_or_update_activation_fn(
@@ -367,17 +429,16 @@ def handle_smoke_test(
                 workspace_id=job.workspace_id,
                 activation_id=uuid.UUID(activation_id),
                 sibling_id=(sibling_state.id if sibling_state else (uuid.UUID(sibling_id) if sibling_id else None)),
-                artifact_slug=str(generated_artifact.get("artifact_slug") or (sibling.get("installed_artifact") or {}).get("artifact_slug") or "unknown"),
+                artifact_slug=str(primary_generated.get("artifact_slug") or primary_installed.get("artifact_slug") or "unknown"),
                 artifact_revision_id=str(
-                    generated_artifact.get("revision_id")
-                    or generated_artifact.get("artifact_revision_id")
-                    or (sibling.get("installed_artifact") or {}).get("artifact_revision_id")
+                    primary_generated.get("artifact_revision_id")
+                    or primary_installed.get("artifact_revision_id")
                     or ""
                 ).strip(),
-                artifact_version=str(generated_artifact.get("artifact_version") or "").strip(),
+                artifact_version=str(primary_generated.get("artifact_version") or "").strip(),
                 workspace_app_instance_id=str(
                     ((sibling.get("runtime_registration") or {}).get("instance") or {}).get("id")
-                    or (sibling.get("installed_artifact") or {}).get("workspace_app_instance_id")
+                    or primary_installed.get("workspace_app_instance_id")
                     or ""
                 ).strip(),
                 status="smoke_passed",
@@ -399,10 +460,16 @@ def handle_smoke_test(
                 },
                 "generated_artifact": {
                     "registry_catalog": registry_catalog,
-                    "installed_in_sibling": generated_artifact_slug,
-                    "installed_version": generated_artifact_version,
-                    "installed_revision_id": generated_artifact_revision_id
-                    or str((sibling.get("installed_artifact") or {}).get("artifact_revision_id") or "").strip(),
+                    "installed_in_sibling": str(primary_generated.get("artifact_slug") or ""),
+                    "installed_version": str(primary_generated.get("artifact_version") or ""),
+                    "installed_revision_id": str(primary_generated.get("artifact_revision_id") or "")
+                    or str(primary_installed.get("artifact_revision_id") or "").strip(),
+                },
+                "generated_artifacts": {
+                    "registry_catalog_items": registry_catalog_artifacts,
+                    "sibling_readiness": sibling_artifact_readiness,
+                    "expected_count": len(expected_generated_artifacts),
+                    "ready_count": len(sibling_artifact_readiness),
                 },
                 "capability_entry": sibling.get("capability_entry") if isinstance(sibling.get("capability_entry"), dict) else {},
             },

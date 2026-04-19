@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from core.runtime import adapters as runtime_adapters
 
@@ -100,7 +100,18 @@ def stop_project(project: str, *, remove_volumes: bool = False) -> tuple[bool, s
     return True, "; ".join(notes)
 
 
-def build_compact_sibling_payload(row: object) -> dict[str, Optional[str]]:
+def build_compact_sibling_payload(row: object) -> dict[str, Any]:
+    installed_artifacts_payload: list[dict[str, str]] = []
+    installed_rows = getattr(row, "installed_artifacts", None)
+    if isinstance(installed_rows, list):
+        for item in installed_rows:
+            installed_artifacts_payload.append(
+                {
+                    "artifact_slug": str(getattr(item, "artifact_slug", "") or ""),
+                    "artifact_version": str(getattr(item, "artifact_version", "") or ""),
+                    "artifact_revision_id": str(getattr(item, "artifact_revision_id", "") or ""),
+                }
+            )
     return {
         "id": str(getattr(row, "id", "") or ""),
         "environment_id": str(getattr(row, "environment_id", "") or ""),
@@ -110,4 +121,6 @@ def build_compact_sibling_payload(row: object) -> dict[str, Optional[str]]:
         "api_url": str(getattr(row, "api_url", "") or ""),
         "runtime_base_url": str(getattr(row, "runtime_base_url", "") or ""),
         "workspace_app_instance_id": str(getattr(row, "workspace_app_instance_id", "") or ""),
+        "installed_artifact_slug": str(getattr(row, "installed_artifact_slug", "") or ""),
+        "installed_artifacts": installed_artifacts_payload,
     }

@@ -217,6 +217,11 @@ def handle_deploy_app_local(
     payload = parse_stage_input_fn(job.input_json).to_dict()
     execution_note_artifact_id = str(payload.get("execution_note_artifact_id") or "").strip()
     generated_artifact = payload.get("generated_artifact") if isinstance(payload.get("generated_artifact"), dict) else {}
+    generated_artifacts = (
+        [item for item in (payload.get("generated_artifacts") or []) if isinstance(item, dict)]
+        if isinstance(payload.get("generated_artifacts"), list)
+        else ([generated_artifact] if generated_artifact else [])
+    )
     app_spec = payload.get("app_spec") if isinstance(payload.get("app_spec"), dict) else {}
     policy_bundle = payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {}
     policy_source = str(payload.get("policy_source") or "reconstructed").strip() or "reconstructed"
@@ -279,6 +284,7 @@ def handle_deploy_app_local(
                     "policy_compatibility": policy_compatibility,
                     "policy_compatibility_reason": policy_compatibility_reason,
                     "generated_artifact": generated_artifact,
+                    "generated_artifacts": generated_artifacts,
                     "execution_note_artifact_id": execution_note_artifact_id,
                     "source_job_id": str(job.id),
                     "environment_id": environment_id,

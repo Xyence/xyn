@@ -8,7 +8,7 @@ from core.environment_state import (
     ensure_default_environment,
     upsert_sibling_from_provision_output,
 )
-from core.models import Activation, Environment, Sibling
+from core.models import Activation, Environment, Sibling, SiblingInstalledArtifact
 
 
 class _FakeQuery:
@@ -26,6 +26,9 @@ class _FakeQuery:
         rows = self._db._rows.get(self._model, [])
         return rows[0] if rows else None
 
+    def all(self):
+        return list(self._db._rows.get(self._model, []))
+
 
 class _FakeDb:
     def __init__(self):
@@ -38,6 +41,11 @@ class _FakeDb:
         rows = self._rows.setdefault(type(obj), [])
         if obj not in rows:
             rows.append(obj)
+
+    def delete(self, obj):
+        rows = self._rows.setdefault(type(obj), [])
+        if obj in rows:
+            rows.remove(obj)
 
     def flush(self):
         return None
@@ -94,6 +102,9 @@ class EnvironmentStateTests(unittest.TestCase):
         self.assertEqual(created.workspace_app_instance_id, instance_id)
         self.assertEqual(created.installed_artifact_slug, "app.net-inventory")
         self.assertEqual(created.runtime_base_url, "http://runtime.sibling:8080")
+        installed_rows = db._rows.get(SiblingInstalledArtifact, [])
+        self.assertEqual(len(installed_rows), 1)
+        self.assertEqual(str(installed_rows[0].artifact_slug or ""), "app.net-inventory")
 
         updated_output = dict(output)
         updated_output["ui_url"] = "http://sib2.localhost"
@@ -109,6 +120,44 @@ class EnvironmentStateTests(unittest.TestCase):
         self.assertEqual(updated.status, "active")
         self.assertEqual(updated.ui_url, "http://sib2.localhost")
         self.assertEqual(len(db._rows.get(Sibling, [])), 1)
+
+    def test_upsert_sibling_persists_multi_artifact_rows(self):
+        db = _FakeDb()
+        env_id = uuid.uuid4()
+        workspace_id = uuid.uuid4()
+        output = {
+            "compose_project": "xyn-sibling-a",
+            "installed_artifacts": [
+                {
+                    "artifact_slug": "app.deal-finder",
+                    "artifact_revision_id": "rev-remote-1",
+                    "artifact_version": "1.0.0",
+                },
+                {
+                    "artifact_slug": "xyn-ui",
+                    "artifact_revision_id": "rev-ui-2",
+                    "artifact_version": "2.0.0",
+                },
+                {
+                    "artifact_slug": "xyn-api",
+                    "artifact_revision_id": "rev-api-3",
+                    "artifact_version": "3.0.0",
+                },
+            ],
+        }
+        created = upsert_sibling_from_provision_output(
+            db,
+            environment_id=env_id,
+            workspace_id=workspace_id,
+            sibling_name="sibling-a",
+            provision_output=output,
+            status="ready",
+        )
+        self.assertEqual(created.installed_artifact_slug, "app.deal-finder")
+        rows = db._rows.get(SiblingInstalledArtifact, [])
+        self.assertEqual(len(rows), 3)
+        slugs = {str(item.artifact_slug or "") for item in rows}
+        self.assertEqual(slugs, {"app.deal-finder", "xyn-ui", "xyn-api"})
 
     def test_activation_happy_path_transitions(self):
         db = _FakeDb()

@@ -1725,6 +1725,318 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(payload.get("artifact_source"), artifact_source)
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_create_application_change_session_explicit_remote_target_auto_resolves_initial_prompt(
+        self, mock_request: mock.Mock
+    ) -> None:
+        create_response = {
+            "session": {"id": "sess-1"},
+            "application_id": "app-1",
+            "scope_type": "artifact",
+            "scope": {
+                "scope_type": "artifact",
+                "application_id": "app-1",
+                "artifact_slug": "deal-finder",
+                "workspace_id": "ws-1",
+            },
+            "control": {
+                "session": {
+                    "planning": {
+                        "pending_prompt": {
+                            "id": "prompt-1",
+                            "expected_response_kind": "option_set",
+                            "response_schema": {
+                                "type": "object",
+                                "required": ["selected_option_id"],
+                                "properties": {"selected_option_id": {"type": "string"}},
+                            },
+                            "option_set": {
+                                "options": [
+                                    {"id": "opt-deal-finder", "label": "Deal Finder", "artifact_slug": "deal-finder"},
+                                    {"id": "opt-xyn-api", "label": "xyn-api", "artifact_slug": "xyn-api"},
+                                ]
+                            },
+                        }
+                    }
+                }
+            },
+        }
+        pending_control = {
+            "application_id": "app-1",
+            "session_id": "sess-1",
+            "scope_type": "artifact",
+            "scope": {
+                "scope_type": "artifact",
+                "application_id": "app-1",
+                "artifact_slug": "deal-finder",
+                "workspace_id": "ws-1",
+            },
+            "control": create_response["control"],
+        }
+        resolved_control = {
+            "application_id": "app-1",
+            "session_id": "sess-1",
+            "scope_type": "artifact",
+            "scope": {
+                "scope_type": "artifact",
+                "application_id": "app-1",
+                "artifact_slug": "deal-finder",
+                "workspace_id": "ws-1",
+            },
+            "control": {"session": {"planning": {}}},
+        }
+        action_payloads: list[dict[str, Any]] = []
+        control_reads = {"count": 0}
+
+        def _fake_request(*_args, **kwargs):
+            method = str(kwargs.get("method") or "").upper()
+            url = str(kwargs.get("url") or "")
+            response = mock.Mock()
+            response.headers = {}
+            response.text = ""
+            if method == "POST" and url.endswith("/xyn/api/applications/app-1/change-sessions"):
+                response.status_code = 201
+                response.json.return_value = create_response
+                return response
+            if method == "GET" and url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control"):
+                control_reads["count"] += 1
+                response.status_code = 200
+                response.json.return_value = pending_control if control_reads["count"] <= 2 else resolved_control
+                return response
+            if method == "POST" and url.endswith("/xyn/api/applications/app-1/change-sessions/sess-1/control/actions"):
+                action_payloads.append(dict(kwargs.get("json") or {}))
+                response.status_code = 200
+                response.json.return_value = {"ok": True}
+                return response
+            raise AssertionError(f"Unexpected request: {method} {url}")
+
+        mock_request.side_effect = _fake_request
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        result = adapter.create_application_change_session(
+            application_id="app-1",
+            artifact_source={"artifact_slug": "deal-finder", "manifest_source": "s3://bundle/manifest.json"},
+            payload={"title": "Deal Finder session"},
+        )
+
+        self.assertTrue(result.get("ok"))
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        planner_prompt = body.get("planner_prompt") if isinstance(body.get("planner_prompt"), dict) else {}
+        self.assertFalse(bool(planner_prompt.get("pending")))
+        auto_resolution = body.get("auto_prompt_resolution") if isinstance(body.get("auto_prompt_resolution"), dict) else {}
+        self.assertTrue(auto_resolution.get("applied"))
+        self.assertEqual(str(auto_resolution.get("selected_option_id") or ""), "opt-deal-finder")
+        self.assertEqual(len(action_payloads), 1)
+        submitted = action_payloads[0]
+        self.assertEqual(submitted.get("operation"), "respond_to_planner_prompt")
+        self.assertEqual(((submitted.get("response") or {}).get("selected_option_id")), "opt-deal-finder")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_create_change_session_with_scope_explicit_local_target_auto_resolves_initial_prompt(
+        self, mock_request: mock.Mock
+    ) -> None:
+        create_response = {
+            "session": {"id": "sess-local-1"},
+            "application_id": "app-local",
+            "scope_type": "artifact",
+            "scope": {
+                "scope_type": "artifact",
+                "application_id": "app-local",
+                "artifact_slug": "xyn-api",
+                "workspace_id": "ws-1",
+            },
+            "control": {
+                "session": {
+                    "planning": {
+                        "pending_prompt": {
+                            "id": "prompt-local-1",
+                            "expected_response_kind": "option_set",
+                            "response_schema": {
+                                "type": "object",
+                                "required": ["selected_option_id"],
+                                "properties": {"selected_option_id": {"type": "string"}},
+                            },
+                            "option_set": {
+                                "options": [
+                                    {"id": "opt-xyn-api", "label": "xyn-api", "artifact_slug": "xyn-api"},
+                                    {"id": "opt-xyn-ui", "label": "xyn-ui", "artifact_slug": "xyn-ui"},
+                                ]
+                            },
+                        }
+                    }
+                }
+            },
+        }
+        pending_control = {
+            "application_id": "app-local",
+            "session_id": "sess-local-1",
+            "scope_type": "artifact",
+            "scope": create_response["scope"],
+            "control": create_response["control"],
+        }
+        resolved_control = {
+            "application_id": "app-local",
+            "session_id": "sess-local-1",
+            "scope_type": "artifact",
+            "scope": create_response["scope"],
+            "control": {"session": {"planning": {}}},
+        }
+        action_payloads: list[dict[str, Any]] = []
+        control_reads = {"count": 0}
+
+        def _fake_request(*_args, **kwargs):
+            method = str(kwargs.get("method") or "").upper()
+            url = str(kwargs.get("url") or "")
+            response = mock.Mock()
+            response.headers = {}
+            response.text = ""
+            if method == "POST" and url.endswith("/xyn/api/change-sessions"):
+                response.status_code = 201
+                response.json.return_value = create_response
+                return response
+            if method == "GET" and url.endswith("/xyn/api/applications/app-local/change-sessions/sess-local-1/control"):
+                control_reads["count"] += 1
+                response.status_code = 200
+                response.json.return_value = pending_control if control_reads["count"] <= 2 else resolved_control
+                return response
+            if method == "POST" and url.endswith("/xyn/api/applications/app-local/change-sessions/sess-local-1/control/actions"):
+                action_payloads.append(dict(kwargs.get("json") or {}))
+                response.status_code = 200
+                response.json.return_value = {"ok": True}
+                return response
+            raise AssertionError(f"Unexpected request: {method} {url}")
+
+        mock_request.side_effect = _fake_request
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        result = adapter.create_change_session_with_scope(
+            artifact_slug="xyn-api",
+            workspace_id="ws-1",
+            payload={"title": "Core API update"},
+        )
+
+        self.assertTrue(result.get("ok"))
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        planner_prompt = body.get("planner_prompt") if isinstance(body.get("planner_prompt"), dict) else {}
+        self.assertFalse(bool(planner_prompt.get("pending")))
+        self.assertEqual(len(action_payloads), 1)
+        submitted = action_payloads[0]
+        self.assertEqual(((submitted.get("response") or {}).get("selected_option_id")), "opt-xyn-api")
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_create_application_change_session_without_explicit_target_keeps_pending_prompt(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 201
+        response.headers = {}
+        response.text = ""
+        response.json.return_value = {
+            "session": {"id": "sess-amb-1"},
+            "application_id": "app-1",
+            "control": {
+                "session": {
+                    "planning": {
+                        "pending_prompt": {
+                            "id": "prompt-amb-1",
+                            "expected_response_kind": "option_set",
+                            "option_set": {"options": [{"id": "opt-a", "label": "Artifact A"}]},
+                        }
+                    }
+                }
+            },
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        result = adapter.create_application_change_session(application_id="app-1", payload={"title": "General planning"})
+
+        self.assertTrue(result.get("ok"))
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        planner_prompt = body.get("planner_prompt") if isinstance(body.get("planner_prompt"), dict) else {}
+        self.assertTrue(bool(planner_prompt.get("pending")))
+        self.assertEqual(mock_request.call_count, 1)
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_create_change_session_with_explicit_target_and_exploration_request_keeps_prompt(
+        self, mock_request: mock.Mock
+    ) -> None:
+        response = mock.Mock()
+        response.status_code = 201
+        response.headers = {}
+        response.text = ""
+        response.json.return_value = {
+            "session": {"id": "sess-exp-1"},
+            "application_id": "app-1",
+            "scope_type": "artifact",
+            "scope": {
+                "scope_type": "artifact",
+                "application_id": "app-1",
+                "artifact_slug": "deal-finder",
+                "workspace_id": "ws-1",
+            },
+            "control": {
+                "session": {
+                    "planning": {
+                        "pending_prompt": {
+                            "id": "prompt-exp-1",
+                            "expected_response_kind": "option_set",
+                            "option_set": {
+                                "options": [
+                                    {"id": "opt-deal-finder", "label": "Deal Finder", "artifact_slug": "deal-finder"},
+                                    {"id": "opt-xyn-ui", "label": "xyn-ui", "artifact_slug": "xyn-ui"},
+                                ]
+                            },
+                        }
+                    }
+                }
+            },
+        }
+        mock_request.return_value = response
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn.local:8001",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+
+        result = adapter.create_change_session_with_scope(
+            artifact_slug="deal-finder",
+            workspace_id="ws-1",
+            payload={"explore_artifacts": True},
+        )
+
+        self.assertTrue(result.get("ok"))
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        planner_prompt = body.get("planner_prompt") if isinstance(body.get("planner_prompt"), dict) else {}
+        self.assertTrue(bool(planner_prompt.get("pending")))
+        self.assertEqual(mock_request.call_count, 1)
+
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_create_decomposition_campaign_artifact_scope_classifies_missing_artifact(self, mock_request: mock.Mock) -> None:
         response = mock.Mock()
         response.status_code = 404

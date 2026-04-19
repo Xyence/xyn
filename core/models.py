@@ -175,6 +175,36 @@ class Sibling(Base):
     workspace = relationship("Workspace", back_populates="siblings")
     source_job = relationship("Job", foreign_keys=[source_job_id])
     activations = relationship("Activation", back_populates="sibling")
+    installed_artifacts = relationship(
+        "SiblingInstalledArtifact",
+        back_populates="sibling",
+        cascade="all, delete-orphan",
+    )
+
+
+class SiblingInstalledArtifact(Base):
+    """Normalized installed-artifact rows for multi-artifact sibling runtime state."""
+    __tablename__ = "sibling_installed_artifacts"
+    __table_args__ = (
+        UniqueConstraint("sibling_id", "artifact_slug", name="uq_sibling_installed_artifacts_sibling_slug"),
+        Index("ix_sibling_installed_artifacts_sibling", "sibling_id"),
+        Index("ix_sibling_installed_artifacts_slug_revision", "artifact_slug", "artifact_revision_id"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    sibling_id = Column(UUID(as_uuid=True), ForeignKey("siblings.id", ondelete="CASCADE"), nullable=False)
+    artifact_slug = Column(String(255), nullable=False)
+    artifact_id = Column(String(255), nullable=True)
+    artifact_version = Column(String(64), nullable=True)
+    artifact_revision_id = Column(String(255), nullable=True)
+    workspace_id = Column(String(255), nullable=True)
+    workspace_slug = Column(String(255), nullable=True)
+    source = Column(String(64), nullable=False, default="generated")
+    metadata_json = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    sibling = relationship("Sibling", back_populates="installed_artifacts")
 
 
 class Activation(Base):

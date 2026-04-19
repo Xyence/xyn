@@ -903,6 +903,11 @@ def _find_revision_sibling_target(
     for candidate in candidates:
         output = candidate.output_json if isinstance(candidate.output_json, dict) else {}
         installed_artifact = output.get("installed_artifact") if isinstance(output.get("installed_artifact"), dict) else {}
+        installed_artifacts = (
+            [item for item in (output.get("installed_artifacts") or []) if isinstance(item, dict)]
+            if isinstance(output.get("installed_artifacts"), list)
+            else []
+        )
         runtime_registration = output.get("runtime_registration") if isinstance(output.get("runtime_registration"), dict) else {}
         runtime_instance = runtime_registration.get("instance") if isinstance(runtime_registration.get("instance"), dict) else {}
         runtime_target = output.get("runtime_target") if isinstance(output.get("runtime_target"), dict) else {}
@@ -911,11 +916,21 @@ def _find_revision_sibling_target(
         sibling_api_url = str(output.get("api_url") or "").strip()
         installed_workspace_id = str(installed_artifact.get("workspace_id") or "").strip()
         installed_artifact_slug = str(installed_artifact.get("artifact_slug") or "").strip()
+        if installed_artifacts:
+            first_row = installed_artifacts[0]
+            installed_workspace_id = installed_workspace_id or str(first_row.get("workspace_id") or "").strip()
+            installed_slugs = {
+                str(item.get("artifact_slug") or "").strip()
+                for item in installed_artifacts
+                if str(item.get("artifact_slug") or "").strip()
+            }
+        else:
+            installed_slugs = {installed_artifact_slug} if installed_artifact_slug else set()
         runtime_app_slug = str(runtime_target.get("app_slug") or "").strip()
         runtime_instance_id = str(runtime_instance.get("id") or "").strip()
         if installed_workspace_id != anchor_workspace_id:
             continue
-        if installed_artifact_slug != anchor_artifact_slug:
+        if anchor_artifact_slug not in installed_slugs:
             continue
         if runtime_app_slug and runtime_app_slug != app_slug:
             continue

@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
-from core.models import Activation, Environment, Sibling
+from core.models import Activation, Environment, Sibling, SiblingInstalledArtifact
 
 
 def _utc_now() -> datetime:
@@ -24,6 +24,73 @@ def _merge_metadata(existing: Any, extra: Optional[dict[str, Any]]) -> dict[str,
         return base
     base.update({k: v for k, v in extra.items()})
     return base
+
+
+def _normalize_artifact_rows(*, output: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    multi_rows = output.get("installed_artifacts") if isinstance(output.get("installed_artifacts"), list) else []
+    if multi_rows:
+        source_rows = [item for item in multi_rows if isinstance(item, dict)]
+    else:
+        single = output.get("installed_artifact") if isinstance(output.get("installed_artifact"), dict) else {}
+        source_rows = [single] if single else []
+    seen_slugs: set[str] = set()
+    for row in source_rows:
+        slug = str(row.get("artifact_slug") or "").strip()
+        if not slug or slug in seen_slugs:
+            continue
+        seen_slugs.add(slug)
+        rows.append(
+            {
+                "artifact_slug": slug,
+                "artifact_id": str(row.get("artifact_id") or "").strip(),
+                "artifact_version": str(
+                    row.get("artifact_version") or row.get("artifact_version_label") or ""
+                ).strip(),
+                "artifact_revision_id": str(row.get("artifact_revision_id") or "").strip(),
+                "workspace_id": str(row.get("workspace_id") or "").strip(),
+                "workspace_slug": str(row.get("workspace_slug") or "").strip(),
+                "source": str(row.get("source") or output.get("installed_artifact_source") or "generated").strip() or "generated",
+            }
+        )
+    return rows
+
+
+def _sync_sibling_installed_artifacts(db: Session, *, sibling_id: uuid.UUID, artifact_rows: list[dict[str, Any]]) -> None:
+    existing_rows = (
+        db.query(SiblingInstalledArtifact)
+        .filter(SiblingInstalledArtifact.sibling_id == sibling_id)
+        .all()
+    )
+    by_slug = {str(item.artifact_slug): item for item in existing_rows if str(item.artifact_slug or "").strip()}
+    incoming_slugs = {str(item.get("artifact_slug") or "").strip() for item in artifact_rows if str(item.get("artifact_slug") or "").strip()}
+
+    for row in existing_rows:
+        slug = str(row.artifact_slug or "").strip()
+        if slug and slug not in incoming_slugs:
+            db.delete(row)
+
+    for item in artifact_rows:
+        slug = str(item.get("artifact_slug") or "").strip()
+        if not slug:
+            continue
+        db_row = by_slug.get(slug)
+        if db_row is None:
+            db_row = SiblingInstalledArtifact(
+                id=uuid.uuid4(),
+                sibling_id=sibling_id,
+                artifact_slug=slug,
+                created_at=_utc_now(),
+            )
+            db.add(db_row)
+        db_row.artifact_id = str(item.get("artifact_id") or db_row.artifact_id or "").strip() or db_row.artifact_id
+        db_row.artifact_version = str(item.get("artifact_version") or db_row.artifact_version or "").strip() or db_row.artifact_version
+        db_row.artifact_revision_id = str(item.get("artifact_revision_id") or db_row.artifact_revision_id or "").strip() or db_row.artifact_revision_id
+        db_row.workspace_id = str(item.get("workspace_id") or db_row.workspace_id or "").strip() or db_row.workspace_id
+        db_row.workspace_slug = str(item.get("workspace_slug") or db_row.workspace_slug or "").strip() or db_row.workspace_slug
+        db_row.source = str(item.get("source") or db_row.source or "generated").strip() or "generated"
+        db_row.metadata_json = _merge_metadata(db_row.metadata_json, {})
+        db_row.updated_at = _utc_now()
 
 
 def ensure_default_environment(
@@ -74,9 +141,13 @@ def upsert_sibling_from_provision_output(
     runtime_registration = output.get("runtime_registration") if isinstance(output.get("runtime_registration"), dict) else {}
     runtime_instance = runtime_registration.get("instance") if isinstance(runtime_registration.get("instance"), dict) else {}
     installed_artifact = output.get("installed_artifact") if isinstance(output.get("installed_artifact"), dict) else {}
+    installed_artifact_rows = _normalize_artifact_rows(output=output)
 
     workspace_app_instance_id = str(runtime_instance.get("id") or "").strip()
-    installed_artifact_slug = str(installed_artifact.get("artifact_slug") or "").strip()
+    installed_artifact_slug = str(
+        installed_artifact.get("artifact_slug")
+        or ((installed_artifact_rows[0] if installed_artifact_rows else {}).get("artifact_slug") or "")
+    ).strip()
     compose_project = str(output.get("compose_project") or "").strip()
     deployment_id = str(output.get("deployment_id") or "").strip()
 
@@ -144,11 +215,13 @@ def upsert_sibling_from_provision_output(
     sibling.installed_artifact_version = str(
         installed_artifact.get("artifact_version")
         or installed_artifact.get("artifact_version_label")
+        or ((installed_artifact_rows[0] if installed_artifact_rows else {}).get("artifact_version") or "")
         or sibling.installed_artifact_version
         or ""
     ).strip() or sibling.installed_artifact_version
     sibling.installed_artifact_revision_id = str(
         installed_artifact.get("artifact_revision_id")
+        or ((installed_artifact_rows[0] if installed_artifact_rows else {}).get("artifact_revision_id") or "")
         or sibling.installed_artifact_revision_id
         or ""
     ).strip() or sibling.installed_artifact_revision_id
@@ -163,6 +236,12 @@ def upsert_sibling_from_provision_output(
         },
     )
     sibling.updated_at = _utc_now()
+    db.flush()
+    _sync_sibling_installed_artifacts(
+        db,
+        sibling_id=sibling.id,
+        artifact_rows=installed_artifact_rows,
+    )
     db.flush()
     return sibling
 

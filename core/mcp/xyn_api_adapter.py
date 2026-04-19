@@ -2548,7 +2548,7 @@ class XynApiAdapter:
             base_urls=self._planner_base_urls(),
             allow_reissue_on_transport_error=False,
         )
-        return self._normalize_change_session_result(
+        normalized = self._normalize_change_session_result(
             result,
             application_id=application_id,
             default_next_allowed_actions=[
@@ -2556,6 +2556,13 @@ class XynApiAdapter:
                 "get_application_change_session_plan",
                 "stage_apply_application_change_session",
             ],
+        )
+        return self._auto_resolve_initial_artifact_prompt(
+            result=normalized,
+            requested_artifact_id=str(request_payload.get("artifact_id") or ""),
+            requested_artifact_slug=str(request_payload.get("artifact_slug") or ""),
+            artifact_source=artifact_source,
+            request_payload=request_payload,
         )
 
     def create_change_session_with_scope(
@@ -2721,6 +2728,244 @@ class XynApiAdapter:
             "workspace_id": str((body.get("scope") or {}).get("workspace_id") or normalized_workspace_id),
         }
         normalized["response"] = body
+        return self._auto_resolve_initial_artifact_prompt(
+            result=normalized,
+            requested_artifact_id=normalized_artifact_id,
+            requested_artifact_slug=normalized_artifact_slug,
+            artifact_source=artifact_source,
+            request_payload=request_payload,
+        )
+
+    @staticmethod
+    def _extract_explicit_target_values(
+        *,
+        requested_artifact_id: str,
+        requested_artifact_slug: str,
+        artifact_source: Optional[Dict[str, Any]],
+        request_payload: Optional[Dict[str, Any]],
+    ) -> Dict[str, set[str]]:
+        ids: set[str] = set()
+        slugs: set[str] = set()
+
+        def add_id(value: Any) -> None:
+            token = str(value or "").strip()
+            if token:
+                ids.add(token.lower())
+
+        def add_slug(value: Any) -> None:
+            token = str(value or "").strip()
+            if token:
+                slugs.add(token.lower())
+
+        add_id(requested_artifact_id)
+        add_slug(requested_artifact_slug)
+        source = artifact_source if isinstance(artifact_source, dict) else {}
+        payload = request_payload if isinstance(request_payload, dict) else {}
+        for container in (source, payload):
+            if not isinstance(container, dict):
+                continue
+            for key in ("artifact_id", "id", "target_artifact_id", "primary_artifact_id"):
+                add_id(container.get(key))
+            for key in ("artifact_slug", "slug", "target_artifact_slug", "primary_artifact_slug"):
+                add_slug(container.get(key))
+        return {"ids": ids, "slugs": slugs}
+
+    @staticmethod
+    def _exploration_requested(payload: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        true_values = {"1", "true", "yes", "on"}
+        exploration_keys = {
+            "explore_artifacts",
+            "artifact_exploration",
+            "broad_artifact_exploration",
+            "multi_artifact_exploration",
+            "require_artifact_selection_prompt",
+            "defer_artifact_selection",
+            "prompt_for_artifact_selection",
+        }
+
+        def to_bool(value: Any) -> bool:
+            if isinstance(value, bool):
+                return value
+            token = str(value or "").strip().lower()
+            return token in true_values
+
+        stack: list[Any] = [payload]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    key_token = str(key or "").strip().lower()
+                    if key_token in exploration_keys and to_bool(value):
+                        return True
+                    if isinstance(value, (dict, list)):
+                        stack.append(value)
+            elif isinstance(node, list):
+                for value in node:
+                    if isinstance(value, (dict, list)):
+                        stack.append(value)
+        return False
+
+    @staticmethod
+    def _candidate_tokens(value: Any) -> set[str]:
+        tokens: set[str] = set()
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return tokens
+        tokens.add(raw)
+        for separator in (" ", ":", "/", ".", "_", "-"):
+            next_tokens: set[str] = set()
+            for token in tokens:
+                next_tokens.add(token)
+                for part in token.split(separator):
+                    part_token = str(part or "").strip().lower()
+                    if part_token:
+                        next_tokens.add(part_token)
+            tokens = next_tokens
+        return {token for token in tokens if token}
+
+    @staticmethod
+    def _match_prompt_option_for_target(
+        *,
+        options: list[Dict[str, Any]],
+        target_ids: set[str],
+        target_slugs: set[str],
+    ) -> str:
+        if not options:
+            return ""
+        for option in options:
+            option_id = str(option.get("id") or "").strip()
+            if not option_id:
+                continue
+            candidate_values = [
+                option_id,
+                option.get("label"),
+                option.get("description"),
+                option.get("artifact_id"),
+                option.get("artifact_slug"),
+            ]
+            option_tokens: set[str] = set()
+            for value in candidate_values:
+                option_tokens.update(XynApiAdapter._candidate_tokens(value))
+            if target_ids and option_tokens.intersection(target_ids):
+                return option_id
+            if target_slugs and option_tokens.intersection(target_slugs):
+                return option_id
+        return ""
+
+    def _auto_resolve_initial_artifact_prompt(
+        self,
+        *,
+        result: Dict[str, Any],
+        requested_artifact_id: str = "",
+        requested_artifact_slug: str = "",
+        artifact_source: Optional[Dict[str, Any]] = None,
+        request_payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if not bool(result.get("ok")):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        if not isinstance(body, dict):
+            return result
+        explicit_targets = self._extract_explicit_target_values(
+            requested_artifact_id=requested_artifact_id,
+            requested_artifact_slug=requested_artifact_slug,
+            artifact_source=artifact_source,
+            request_payload=request_payload,
+        )
+        if not explicit_targets["ids"] and not explicit_targets["slugs"]:
+            return result
+        if self._exploration_requested(request_payload):
+            return result
+        prompt_in_result = body.get("planner_prompt") if isinstance(body.get("planner_prompt"), dict) else {}
+        if not bool(prompt_in_result.get("pending")):
+            return result
+        scope = body.get("scope") if isinstance(body.get("scope"), dict) else {}
+        resolved_artifact_id = str(scope.get("artifact_id") or body.get("artifact_id") or "").strip()
+        resolved_artifact_slug = str(scope.get("artifact_slug") or body.get("artifact_slug") or "").strip()
+        if not resolved_artifact_id and not resolved_artifact_slug:
+            return result
+        if resolved_artifact_id and explicit_targets["ids"] and resolved_artifact_id.lower() not in explicit_targets["ids"]:
+            return result
+        if resolved_artifact_slug and explicit_targets["slugs"] and resolved_artifact_slug.lower() not in explicit_targets["slugs"]:
+            return result
+
+        handle = self._build_change_session_handle(
+            application_id=str(body.get("application_id") or ""),
+            session_id=str(body.get("session_id") or ""),
+            workspace_id=str(scope.get("workspace_id") or ""),
+        )
+        if not handle.session_id:
+            return result
+        control = self.inspect_change_session_control(handle=handle)
+        if not bool(control.get("ok")):
+            return result
+        control_body = control.get("response") if isinstance(control.get("response"), dict) else {}
+        prompt_contract = self._extract_planner_prompt_contract(control_body)
+        if not bool(prompt_contract.get("pending")):
+            return result
+        if str(prompt_contract.get("kind") or "").strip().lower() != "option_set":
+            return result
+        option_id = self._match_prompt_option_for_target(
+            options=prompt_contract.get("options") if isinstance(prompt_contract.get("options"), list) else [],
+            target_ids=explicit_targets["ids"],
+            target_slugs=explicit_targets["slugs"],
+        )
+        if not option_id:
+            return result
+        answer = self.run_change_session_control_action(
+            operation="respond_to_planner_prompt",
+            handle=handle,
+            action_payload={
+                "prompt_id": str(prompt_contract.get("prompt_id") or ""),
+                "response": {"selected_option_id": option_id},
+                "metadata": {
+                    "reason": "explicit_artifact_target",
+                    "target_artifact_id": resolved_artifact_id,
+                    "target_artifact_slug": resolved_artifact_slug,
+                },
+            },
+        )
+        if not bool(answer.get("ok")):
+            return result
+        refreshed_control = self.inspect_change_session_control(handle=handle)
+        if not bool(refreshed_control.get("ok")):
+            return result
+        normalized = self._normalize_change_session_result(
+            refreshed_control,
+            application_id=handle.application_id,
+            session_id=handle.session_id,
+            scope_hint={
+                "scope_type": "artifact",
+                "application_id": handle.application_id,
+                "session_id": handle.session_id,
+                "scope": {
+                    "scope_type": "artifact",
+                    "artifact_id": resolved_artifact_id,
+                    "artifact_slug": resolved_artifact_slug,
+                    "workspace_id": handle.workspace_id,
+                },
+            },
+            default_next_allowed_actions=(
+                body.get("next_allowed_actions")
+                if isinstance(body.get("next_allowed_actions"), list)
+                else [
+                    "get_application_change_session",
+                    "get_application_change_session_plan",
+                    "stage_apply_application_change_session",
+                ]
+            ),
+        )
+        response = normalized.get("response") if isinstance(normalized.get("response"), dict) else {}
+        response["auto_prompt_resolution"] = {
+            "applied": True,
+            "reason": "explicit_artifact_target",
+            "selected_option_id": option_id,
+            "target_artifact_id": resolved_artifact_id,
+            "target_artifact_slug": resolved_artifact_slug,
+        }
+        normalized["response"] = response
         return normalized
 
     def create_decomposition_campaign(
@@ -3646,11 +3891,14 @@ class XynApiAdapter:
             option_id = str(item.get("id") or item.get("option_id") or "").strip()
             if not option_id:
                 continue
+            artifact = item.get("artifact") if isinstance(item.get("artifact"), dict) else {}
             canonical_options.append(
                 {
                     "id": option_id,
                     "label": str(item.get("label") or item.get("title") or option_id),
                     "description": str(item.get("description") or item.get("summary") or ""),
+                    "artifact_id": str(item.get("artifact_id") or artifact.get("id") or ""),
+                    "artifact_slug": str(item.get("artifact_slug") or item.get("slug") or artifact.get("slug") or ""),
                 }
             )
 

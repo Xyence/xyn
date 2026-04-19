@@ -314,6 +314,151 @@ class StageContractCharacterizationTests(unittest.TestCase):
         self.assertIn("generated_app_contract_smoke", output_json)
         self.assertEqual(follow_up, [])
 
+    def test_smoke_test_fails_when_one_expected_generated_artifact_missing(self):
+        db = self._fake_db("development")
+        job = SimpleNamespace(
+            id=uuid.uuid4(),
+            type="smoke_test",
+            workspace_id=uuid.uuid4(),
+            input_json={
+                "deployment": {
+                    "app_container_name": "root-app-api",
+                    "compose_project": "",
+                    "compose_path": "",
+                },
+                "sibling": {
+                    "compose_project": "sibproj",
+                    "installed_artifacts": [
+                        {"workspace_id": "ws-1", "workspace_slug": "development", "artifact_slug": "app.deal-finder"},
+                        {"workspace_id": "ws-1", "workspace_slug": "development", "artifact_slug": "xyn-ui"},
+                    ],
+                    "runtime_target": {
+                        "app_container_name": "sib-runtime-api",
+                        "runtime_base_url": "http://runtime.local",
+                        "public_app_url": "http://runtime.local",
+                    },
+                },
+                "app_spec": {"app_slug": "deal-finder"},
+                "policy_bundle": {"contracts": []},
+                "generated_artifacts": [
+                    {"artifact_slug": "app.deal-finder", "artifact_version": "1.0.0"},
+                    {"artifact_slug": "xyn-ui", "artifact_version": "1.0.0"},
+                    {"artifact_slug": "xyn-api", "artifact_version": "1.0.0"},
+                ],
+                "execution_note_artifact_id": str(uuid.uuid4()),
+            },
+        )
+        logs = []
+
+        manifest = {
+            "entities": [{"key": "ticket", "fields": [{"name": "workspace_id"}]}],
+            "commands": [{"operation_kind": "list", "prompt": "list tickets"}],
+        }
+
+        def _container_http_json_stub(_container, _method, path, port=0):
+            if path == "/health":
+                return 200, {"status": "ok", "port": port}, "ok"
+            if path in {"/api/v1/health", "/xyn/api/health", "/xyn/api/v1/health", "/", "/xyn/api/auth/mode", "/xyn/api/me"}:
+                return 200, {"status": "ok", "path": path}, "ok"
+            return 200, {"status": "ok"}, "ok"
+
+        with mock.patch("core.app_jobs._wait_for_container_http_ok", return_value=True):
+            with mock.patch("core.app_jobs._container_http_json", side_effect=_container_http_json_stub):
+                with mock.patch("core.app_jobs.build_resolved_capability_manifest", return_value=manifest):
+                    with mock.patch("core.app_jobs._exercise_runtime_contracts", return_value=[{"entity": "ticket", "status": "ok"}]):
+                        with mock.patch(
+                            "core.app_jobs._container_http_session_json",
+                            side_effect=[
+                                (200, {"artifacts": [{"slug": "app.deal-finder", "package_version": "1.0.0"}, {"slug": "xyn-ui", "package_version": "1.0.0"}]}, "ok"),
+                                (200, {"artifacts": [{"slug": "app.deal-finder", "package_version": "1.0.0"}, {"slug": "xyn-ui", "package_version": "1.0.0"}]}, "ok"),
+                            ],
+                        ):
+                            with mock.patch("core.app_jobs._docker_container_running", return_value=True):
+                                with mock.patch(
+                                    "core.app_jobs._execute_sibling_palette_prompt",
+                                    return_value=(200, {"kind": "table", "rows": [{"id": 1}], "meta": {"base_url": "http://runtime.local"}}, "ok"),
+                                ):
+                                    with mock.patch("core.app_jobs.update_execution_note", return_value=None):
+                                        with self.assertRaisesRegex(RuntimeError, "missing generated artifact xyn-api@1.0.0"):
+                                            _handle_smoke_test(db, job, logs)
+
+    def test_smoke_test_supports_coordinated_three_artifact_readiness(self):
+        db = self._fake_db("development")
+        job = SimpleNamespace(
+            id=uuid.uuid4(),
+            type="smoke_test",
+            workspace_id=uuid.uuid4(),
+            input_json={
+                "deployment": {
+                    "app_container_name": "root-app-api",
+                    "compose_project": "",
+                    "compose_path": "",
+                },
+                "sibling": {
+                    "compose_project": "sibproj",
+                    "installed_artifacts": [
+                        {"workspace_id": "ws-1", "workspace_slug": "development", "artifact_slug": "app.deal-finder"},
+                        {"workspace_id": "ws-1", "workspace_slug": "development", "artifact_slug": "xyn-ui"},
+                        {"workspace_id": "ws-1", "workspace_slug": "development", "artifact_slug": "xyn-api"},
+                    ],
+                    "runtime_target": {
+                        "app_container_name": "sib-runtime-api",
+                        "runtime_base_url": "http://runtime.local",
+                        "public_app_url": "http://runtime.local",
+                    },
+                },
+                "app_spec": {"app_slug": "deal-finder"},
+                "policy_bundle": {"contracts": []},
+                "generated_artifacts": [
+                    {"artifact_slug": "app.deal-finder", "artifact_version": "1.0.0"},
+                    {"artifact_slug": "xyn-ui", "artifact_version": "1.0.0"},
+                    {"artifact_slug": "xyn-api", "artifact_version": "1.0.0"},
+                ],
+                "execution_note_artifact_id": str(uuid.uuid4()),
+            },
+        )
+        logs = []
+
+        manifest = {
+            "entities": [{"key": "ticket", "fields": [{"name": "workspace_id"}]}],
+            "commands": [{"operation_kind": "list", "prompt": "list tickets"}],
+        }
+
+        def _container_http_json_stub(_container, _method, path, port=0):
+            if path == "/health":
+                return 200, {"status": "ok", "port": port}, "ok"
+            if path in {"/api/v1/health", "/xyn/api/health", "/xyn/api/v1/health", "/", "/xyn/api/auth/mode", "/xyn/api/me"}:
+                return 200, {"status": "ok", "path": path}, "ok"
+            return 200, {"status": "ok"}, "ok"
+
+        artifact_rows = [
+            {"slug": "app.deal-finder", "package_version": "1.0.0"},
+            {"slug": "xyn-ui", "package_version": "1.0.0"},
+            {"slug": "xyn-api", "package_version": "1.0.0"},
+        ]
+        with mock.patch("core.app_jobs._wait_for_container_http_ok", return_value=True):
+            with mock.patch("core.app_jobs._container_http_json", side_effect=_container_http_json_stub):
+                with mock.patch("core.app_jobs.build_resolved_capability_manifest", return_value=manifest):
+                    with mock.patch("core.app_jobs._exercise_runtime_contracts", return_value=[{"entity": "ticket", "status": "ok"}]):
+                        with mock.patch(
+                            "core.app_jobs._container_http_session_json",
+                            side_effect=[
+                                (200, {"artifacts": artifact_rows}, "ok"),
+                                (200, {"artifacts": artifact_rows}, "ok"),
+                            ],
+                        ):
+                            with mock.patch("core.app_jobs._docker_container_running", return_value=True):
+                                with mock.patch(
+                                    "core.app_jobs._execute_sibling_palette_prompt",
+                                    return_value=(200, {"kind": "table", "rows": [{"id": 1}], "meta": {"base_url": "http://runtime.local"}}, "ok"),
+                                ):
+                                    with mock.patch("core.app_jobs.update_execution_note", return_value=None):
+                                        output_json, _follow_up = _handle_smoke_test(db, job, logs)
+
+        self.assertEqual(str(output_json.get("status") or ""), "passed")
+        readiness = (((output_json.get("platform_plumbing") or {}).get("generated_artifacts") or {}).get("sibling_readiness") or [])
+        self.assertEqual(len(readiness), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

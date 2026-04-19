@@ -164,3 +164,79 @@ class ProvisionSiblingExtractionCharacterizationTests(unittest.TestCase):
             str(getattr(provision_request, "database_url", "") or ""),
             "postgresql://tenant:pw@db.example.internal:5432/xyn_sibling_1",
         )
+
+    def test_provision_sibling_installs_all_generated_artifacts(self):
+        db = mock.Mock()
+        workspace = SimpleNamespace(slug="development")
+        db.query.return_value.filter.return_value.first.return_value = workspace
+        note_id = str(uuid.uuid4())
+        job = SimpleNamespace(
+            id=uuid.uuid4(),
+            type="provision_sibling_xyn",
+            workspace_id=uuid.uuid4(),
+            input_json={
+                "execution_note_artifact_id": note_id,
+                "deployment": {"app_slug": "deal-finder", "compose_project": "rootproj", "compose_path": "/tmp/root-compose.yml"},
+                "app_spec": {"app_slug": "deal-finder", "title": "Deal Finder"},
+                "policy_bundle": {"contracts": []},
+                "generated_artifacts": [
+                    {"artifact_slug": "app.deal-finder", "artifact_version": "1.0.0"},
+                    {"artifact_slug": "xyn-ui", "artifact_version": "1.0.0"},
+                    {"artifact_slug": "xyn-api", "artifact_version": "1.0.0"},
+                ],
+            },
+        )
+        logs: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for slug in ("app.deal-finder", "xyn-ui", "xyn-api"):
+                package_path = Path(tmpdir) / f"{slug}.zip"
+                package_path.write_text("zip")
+                for row in job.input_json["generated_artifacts"]:
+                    if row.get("artifact_slug") == slug:
+                        row["artifact_package_path"] = str(package_path)
+
+            reused_sibling = {
+                "deployment_id": "dep-1",
+                "compose_project": "sibproj",
+                "ui_url": "http://sib.localhost",
+                "api_url": "http://api.sib.localhost",
+                "runtime_target": {
+                    "compose_project": "sib-runtime",
+                    "external_network": "sibproj_default",
+                    "network_alias": "sib-runtime-api",
+                },
+            }
+            install_slugs: list[str] = []
+
+            def _install_stub(**kwargs):
+                install_slugs.append(str(kwargs.get("artifact_slug") or ""))
+                artifact_slug = str(kwargs.get("artifact_slug") or "")
+                return {
+                    "workspace_id": str(job.workspace_id),
+                    "workspace_slug": "development",
+                    "artifact_slug": artifact_slug,
+                    "artifact_id": f"art-{artifact_slug}",
+                    "artifact_revision_id": f"rev-{artifact_slug}",
+                }
+
+            sibling_runtime = {
+                "app_container_name": "sib-runtime-api",
+                "runtime_base_url": "http://sib-runtime-api:8080",
+                "app_url": "http://localhost:9090",
+            }
+            with mock.patch("core.app_jobs._find_revision_sibling_target", return_value=reused_sibling):
+                with mock.patch("core.app_jobs._docker_container_running", return_value=True):
+                    with mock.patch("core.app_jobs._import_generated_artifact_package_into_registry", return_value={"ok": True}):
+                        with mock.patch("core.app_jobs._install_generated_artifact_in_sibling", side_effect=_install_stub):
+                            with mock.patch("core.app_jobs._docker_network_exists", return_value=True):
+                                with mock.patch("core.app_jobs._deployments_root", return_value=Path(tmpdir)):
+                                    with mock.patch("core.app_jobs._deploy_generated_runtime", return_value=sibling_runtime):
+                                        with mock.patch("core.app_jobs._register_sibling_runtime_target", return_value={"registered": True}):
+                                            with mock.patch("core.app_jobs.update_execution_note", return_value=None):
+                                                output_json, _follow_up = _handle_provision_sibling_xyn(db, job, logs)
+
+        self.assertEqual(install_slugs, ["app.deal-finder", "xyn-ui", "xyn-api"])
+        installed_rows = output_json.get("installed_artifacts") if isinstance(output_json.get("installed_artifacts"), list) else []
+        self.assertEqual(len(installed_rows), 3)
+        self.assertEqual(str((output_json.get("installed_artifact") or {}).get("artifact_slug") or ""), "app.deal-finder")
