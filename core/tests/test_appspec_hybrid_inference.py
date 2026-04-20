@@ -106,6 +106,19 @@ class AppSpecHybridInferenceTests(unittest.TestCase):
                                             ),
                                         ):
                                             output, _ = _handle_generate_app_spec(fake_db, job, [])
+                                    elif case["expected_route"] in {"B", "C"}:
+                                        with mock.patch(
+                                            "core.appspec.semantic_extractor.extract_semantic_inference_with_diagnostics",
+                                            return_value=(
+                                                {
+                                                    "entities": ["notes", "documents"],
+                                                    "entity_contracts": [],
+                                                    "requested_visuals": [],
+                                                },
+                                                {"llm_used": True, "fallback_used": False, "repair_used": False},
+                                            ),
+                                        ):
+                                            output, _ = _handle_generate_app_spec(fake_db, job, [])
                                     else:
                                         output, _ = _handle_generate_app_spec(fake_db, job, [])
 
@@ -142,7 +155,7 @@ class AppSpecHybridInferenceTests(unittest.TestCase):
                 self.assertIsNone(policy_metadata.get("inference_diagnostics"))
 
                 warnings = diagnostics.get("consistency_warnings") if isinstance(diagnostics.get("consistency_warnings"), list) else []
-                has_non_limited_warnings = any("limited heuristic mode" not in str(row).lower() for row in warnings)
+                has_non_limited_warnings = any("semantic planning agent was unavailable" not in str(row).lower() for row in warnings)
                 self.assertEqual(has_non_limited_warnings, case["expect_warning"])
 
     def test_golden_corpus_routes_and_no_diagnostics_leak(self):
@@ -177,11 +190,29 @@ class AppSpecHybridInferenceTests(unittest.TestCase):
         ]
         for case in corpus:
             with self.subTest(case["name"]):
-                spec, diagnostics = _build_app_spec_with_diagnostics(
-                    workspace_id=uuid.uuid4(),
-                    title="Golden",
-                    raw_prompt=case["prompt"],
-                )
+                if case["route"] in {"B", "C"}:
+                    with mock.patch(
+                        "core.appspec.semantic_extractor.extract_semantic_inference_with_diagnostics",
+                        return_value=(
+                            {
+                                "entities": ["tickets", "notes"],
+                                "entity_contracts": [],
+                                "requested_visuals": [],
+                            },
+                            {"llm_used": True, "fallback_used": False, "repair_used": False},
+                        ),
+                    ):
+                        spec, diagnostics = _build_app_spec_with_diagnostics(
+                            workspace_id=uuid.uuid4(),
+                            title="Golden",
+                            raw_prompt=case["prompt"],
+                        )
+                else:
+                    spec, diagnostics = _build_app_spec_with_diagnostics(
+                        workspace_id=uuid.uuid4(),
+                        title="Golden",
+                        raw_prompt=case["prompt"],
+                    )
                 self.assertEqual(diagnostics.get("route"), case["route"])
                 self.assertIn("structure_score", diagnostics)
                 self.assertIn("llm_used", diagnostics)
@@ -349,64 +380,29 @@ class AppSpecHybridInferenceTests(unittest.TestCase):
         self.assertNotIn("broken_field", poll_fields)
         self.assertIn("notes", set(spec.get("entities") or []))
 
-    def test_route_c_uses_heuristic_semantic_when_llm_disabled(self):
+    def test_route_c_blocks_when_semantic_agent_disabled(self):
         prompt = "Create a personal notes and documents tracker for myself."
         with mock.patch.dict("os.environ", {"XYN_APPSPEC_ENABLE_LLM_FALLBACK": "0"}, clear=False):
-            with mock.patch(
-                "core.appspec.semantic_extractor._extract_via_codex",
-                side_effect=AssertionError("LLM extractor should not run when disabled"),
-            ):
-                with mock.patch(
-                    "core.appspec.semantic_extractor._heuristic_semantic_extract",
-                    return_value={
-                        "entities": ["Notes", "documents", "notes"],
-                        "entity_contracts": [],
-                        "requested_visuals": [],
-                    },
-                ) as heuristic:
-                    spec = _build_app_spec(workspace_id=uuid.uuid4(), title="KB", raw_prompt=prompt)
-        heuristic.assert_called_once()
-        self.assertIn("notes", set(spec.get("entities") or []))
-        self.assertIn("documents", set(spec.get("entities") or []))
+            with self.assertRaisesRegex(RuntimeError, "Semantic planning blocked"):
+                _build_app_spec(workspace_id=uuid.uuid4(), title="KB", raw_prompt=prompt)
 
-    def test_route_c_llm_disabled_marks_limited_mode_explicitly(self):
-        prompt = "Create a personal notes and documents tracker for myself."
-        with mock.patch.dict("os.environ", {"XYN_APPSPEC_ENABLE_LLM_FALLBACK": "0"}, clear=False):
-            spec, diagnostics = _build_app_spec_with_diagnostics(
-                workspace_id=uuid.uuid4(),
-                title="KB",
-                raw_prompt=prompt,
-            )
-        self.assertEqual(diagnostics.get("route"), "C")
-        self.assertEqual(diagnostics.get("appspec_semantic_capability_state"), "limited_no_llm")
-        self.assertTrue(diagnostics.get("semantic_limited_mode"))
-        self.assertEqual(diagnostics.get("semantic_limited_mode_reason"), "llm_fallback_disabled")
-        warnings = diagnostics.get("consistency_warnings") if isinstance(diagnostics.get("consistency_warnings"), list) else []
-        self.assertTrue(any("limited heuristic mode" in str(row).lower() for row in warnings))
-        self.assertNotIn("inference_diagnostics", spec)
-
-    def test_route_c_codex_unavailable_marks_limited_mode_explicitly(self):
+    def test_route_c_blocks_when_codex_unavailable(self):
         prompt = "Create a personal notes and documents tracker for myself."
         with mock.patch.dict("os.environ", {"XYN_APPSPEC_ENABLE_LLM_FALLBACK": "1"}, clear=False):
             with mock.patch("core.appspec.semantic_extractor._semantic_codex_available", return_value=False):
-                spec, diagnostics = _build_app_spec_with_diagnostics(
-                    workspace_id=uuid.uuid4(),
-                    title="KB",
-                    raw_prompt=prompt,
-                )
-        self.assertEqual(diagnostics.get("route"), "C")
-        self.assertEqual(diagnostics.get("appspec_semantic_capability_state"), "limited_no_llm")
-        self.assertTrue(diagnostics.get("semantic_limited_mode"))
-        self.assertEqual(diagnostics.get("semantic_limited_mode_reason"), "codex_unavailable")
-        self.assertFalse(diagnostics.get("llm_used"))
-        self.assertNotIn("inference_diagnostics", spec)
+                with self.assertRaisesRegex(RuntimeError, "Semantic planning blocked"):
+                    _build_app_spec_with_diagnostics(
+                        workspace_id=uuid.uuid4(),
+                        title="KB",
+                        raw_prompt=prompt,
+                    )
 
     def test_route_c_semantic_path_available_uses_hybrid_llm_available_state(self):
         prompt = "Create a personal notes and documents tracker for myself."
         with mock.patch.dict("os.environ", {"XYN_APPSPEC_ENABLE_LLM_FALLBACK": "1"}, clear=False):
             with mock.patch("core.appspec.semantic_extractor._semantic_codex_available", return_value=True):
                 with mock.patch(
-                    "core.appspec.semantic_extractor._extract_via_codex",
+                    "core.appspec.semantic_extractor._invoke_semantic_planning_agent",
                     return_value={
                         "entities": ["notes", "documents"],
                         "entity_contracts": [],
@@ -433,20 +429,17 @@ class AppSpecHybridInferenceTests(unittest.TestCase):
                     force_llm=True,
                 )
 
-    def test_invalid_semantic_payload_falls_back_to_constrained_output(self):
+    def test_invalid_semantic_payload_raises_validation_error(self):
         with mock.patch.dict("os.environ", {"XYN_APPSPEC_ENABLE_LLM_FALLBACK": "1"}, clear=False):
             with mock.patch(
-                "core.appspec.semantic_extractor._extract_via_codex",
+                "core.appspec.semantic_extractor._invoke_semantic_planning_agent",
                 return_value={"entities": "not-a-list", "entity_contracts": "bad", "requested_visuals": 12},
             ):
-                result = semantic_extractor.extract_semantic_inference(
-                    "Track customer tickets with notes",
-                    prefer_llm=True,
-                )
-        self.assertTrue(isinstance(result.get("entities"), list))
-        self.assertTrue(isinstance(result.get("entity_contracts"), list))
-        self.assertTrue(isinstance(result.get("requested_visuals"), list))
-        self.assertIn("customers", set(result.get("entities") or []))
+                with self.assertRaises(semantic_extractor.SemanticPlanningResponseValidationError):
+                    semantic_extractor.extract_semantic_inference(
+                        "Track customer tickets with notes",
+                        prefer_llm=True,
+                    )
 
     def test_semantic_entities_do_not_mutate_deterministic_contract_rows(self):
         prompt = (
@@ -698,7 +691,20 @@ class AppSpecHybridInferencePersistenceIntegrationTests(unittest.TestCase):
                         },
                     ):
                         with mock.patch("core.app_jobs._import_generated_artifact_package", return_value={}):
-                            output, _ = _handle_generate_app_spec(db, job, [])
+                            with mock.patch(
+                                "core.appspec.semantic_extractor.extract_semantic_inference_with_diagnostics",
+                                return_value=(
+                                    {
+                                        "entities": ["tickets", "notes"],
+                                        "entity_contracts": [],
+                                        "requested_visuals": ["interfaces_by_status_chart"]
+                                        if case["name"] == "consistency_warning"
+                                        else [],
+                                    },
+                                    {"llm_used": True, "fallback_used": False, "repair_used": False},
+                                ),
+                            ):
+                                output, _ = _handle_generate_app_spec(db, job, [])
                     db.commit()
 
                     app_spec_artifact_id = uuid.UUID(str(output["app_spec_artifact_id"]))
@@ -730,10 +736,10 @@ class AppSpecHybridInferencePersistenceIntegrationTests(unittest.TestCase):
                             else []
                         )
                         limited_mode_warnings = [
-                            row for row in warnings if "limited heuristic mode" in str(row).lower()
+                            row for row in warnings if "semantic planning agent was unavailable" in str(row).lower()
                         ]
                         has_non_limited_warnings = any(
-                            "limited heuristic mode" not in str(row).lower() for row in warnings
+                            "semantic planning agent was unavailable" not in str(row).lower() for row in warnings
                         )
                         self.assertEqual(has_non_limited_warnings, case["expect_warning"])
                         self.assertEqual(bool(limited_mode_warnings), case["expect_limited_mode_warning"])

@@ -1565,28 +1565,39 @@ def _build_app_spec_with_diagnostics(
     structure_score = _score_prompt_structure(raw_prompt)
     route = "A" if structure_score >= 0.8 else "B" if structure_score >= 0.4 else "C"
     semantic_used = route in {"B", "C"}
-    semantic_payload: dict[str, Any] = {"entities": [], "entity_contracts": [], "requested_visuals": []}
-    semantic_diagnostics: dict[str, Any] = {
+    planning_agent_response: dict[str, Any] = {"entities": [], "entity_contracts": [], "requested_visuals": []}
+    planning_agent_diagnostics: dict[str, Any] = {
         "llm_used": False,
         "fallback_used": False,
         "repair_used": False,
     }
     if semantic_used:
-        semantic_payload, semantic_diagnostics = appspec_semantic_extractor.extract_semantic_inference_with_diagnostics(
-            raw_prompt,
-            prefer_llm=(route in {"B", "C"}),
-        )
+        try:
+            planning_agent_response, planning_agent_diagnostics = appspec_semantic_extractor.extract_semantic_inference_with_diagnostics(
+                raw_prompt,
+                prefer_llm=(route in {"B", "C"}),
+            )
+        except appspec_semantic_extractor.SemanticPlanningError as exc:
+            raise RuntimeError(
+                f"Semantic planning blocked: {exc}"
+            ) from exc
     inferred_entities = appspec_entity_inference._infer_entities_from_prompt(raw_prompt)
     inferred_visuals = appspec_entity_inference._infer_requested_visuals_from_prompt(raw_prompt)
     semantic_entities = appspec_normalization._normalize_unique_strings(
-        semantic_payload.get("entities") if isinstance(semantic_payload.get("entities"), list) else []
+        planning_agent_response.get("entities") if isinstance(planning_agent_response.get("entities"), list) else []
     )
     semantic_visuals = appspec_normalization._normalize_unique_strings(
-        semantic_payload.get("requested_visuals") if isinstance(semantic_payload.get("requested_visuals"), list) else []
+        planning_agent_response.get("requested_visuals")
+        if isinstance(planning_agent_response.get("requested_visuals"), list)
+        else []
     )
     semantic_contracts = [
         row
-        for row in (semantic_payload.get("entity_contracts") if isinstance(semantic_payload.get("entity_contracts"), list) else [])
+        for row in (
+            planning_agent_response.get("entity_contracts")
+            if isinstance(planning_agent_response.get("entity_contracts"), list)
+            else []
+        )
         if isinstance(row, dict)
     ]
     existing_entities = appspec_entity_inference._infer_entities_from_app_spec(base_spec)
@@ -1741,29 +1752,29 @@ def _build_app_spec_with_diagnostics(
     if revision_anchor:
         spec["revision_anchor"] = copy.deepcopy(revision_anchor)
     consistency_warnings = list(consistency_result.warnings) + list(contract_validation.warnings)
-    if semantic_used and bool(semantic_diagnostics.get("limited_mode")):
-        reason = str(semantic_diagnostics.get("limited_mode_reason") or "limited mode").strip()
+    if semantic_used and bool(planning_agent_diagnostics.get("limited_mode")):
+        reason = str(planning_agent_diagnostics.get("limited_mode_reason") or "agent unavailable").strip()
         consistency_warnings.append(
-            f"Semantic extraction ran in limited heuristic mode ({reason}); deterministic inference remains authoritative."
+            f"Semantic planning agent was unavailable ({reason})."
         )
 
     diagnostics = {
         "structure_score": round(structure_score, 3),
         "route": route,
-        "llm_used": bool(semantic_diagnostics.get("llm_used")),
+        "llm_used": bool(planning_agent_diagnostics.get("llm_used")),
         "appspec_semantic_capability_state": (
-            str(semantic_diagnostics.get("capability_state") or "limited_no_llm")
+            str(planning_agent_diagnostics.get("capability_state") or "limited_no_llm")
             if semantic_used
             else "deterministic_only"
         ),
-        "semantic_limited_mode": bool(semantic_diagnostics.get("limited_mode")) if semantic_used else False,
+        "semantic_limited_mode": bool(planning_agent_diagnostics.get("limited_mode")) if semantic_used else False,
         "semantic_limited_mode_reason": (
-            str(semantic_diagnostics.get("limited_mode_reason") or "").strip() if semantic_used else ""
+            str(planning_agent_diagnostics.get("limited_mode_reason") or "").strip() if semantic_used else ""
         ),
         "consistency_warnings": consistency_warnings,
         "consistency_errors": list(consistency_result.errors) + list(contract_validation.errors),
         "fallback_or_repair_used": bool(
-            semantic_diagnostics.get("fallback_used") or semantic_diagnostics.get("repair_used")
+            planning_agent_diagnostics.get("fallback_used") or planning_agent_diagnostics.get("repair_used")
         ),
     }
     return spec, diagnostics

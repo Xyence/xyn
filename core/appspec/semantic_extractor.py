@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -23,24 +22,16 @@ _SEMANTIC_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-_ENTITY_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "notes": ("note", "notes", "knowledgebase", "knowledge base"),
-    "tasks": ("task", "tasks", "todo", "to-do"),
-    "projects": ("project", "projects"),
-    "documents": ("document", "documents", "doc", "docs"),
-    "campaigns": ("campaign", "campaigns"),
-    "properties": ("property", "properties", "parcel", "parcels"),
-    "signals": ("signal", "signals", "event", "events"),
-    "sources": ("source", "sources", "connector", "connectors"),
-    "watches": ("watch", "watches", "subscription", "subscriptions"),
-    "customers": ("customer", "customers", "client", "clients"),
-    "tickets": ("ticket", "tickets", "issue", "issues"),
-}
+class SemanticPlanningError(RuntimeError):
+    """Base class for semantic planning failures."""
 
-_VISUAL_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "devices_by_status_chart": ("devices by status",),
-    "interfaces_by_status_chart": ("interfaces by status",),
-}
+
+class SemanticPlanningAgentUnavailableError(SemanticPlanningError):
+    """Raised when semantic planning cannot invoke the planning agent."""
+
+
+class SemanticPlanningResponseValidationError(SemanticPlanningError):
+    """Raised when planning-agent output does not satisfy the semantic schema."""
 
 
 def _semantic_codex_binary() -> str:
@@ -69,67 +60,7 @@ def _limited_mode_reason(*, llm_enabled: bool, codex_available: bool) -> str:
     return "heuristic_only"
 
 
-def _simple_entity_contract(entity_key: str) -> dict[str, Any]:
-    key = _safe_slug(str(entity_key or "").strip(), default="records").replace("-", "_")
-    singular = key[:-1] if key.endswith("s") and len(key) > 1 else key
-    return {
-        "key": key,
-        "singular_label": singular.replace("_", " "),
-        "plural_label": key.replace("_", " "),
-        "collection_path": f"/{key}",
-        "item_path_template": f"/{key}" + "/{id}",
-        "operations": {
-            "list": {"declared": True, "method": "GET", "path": f"/{key}"},
-            "get": {"declared": True, "method": "GET", "path": f"/{key}" + "/{id}"},
-            "create": {"declared": True, "method": "POST", "path": f"/{key}"},
-            "update": {"declared": True, "method": "PATCH", "path": f"/{key}" + "/{id}"},
-            "delete": {"declared": True, "method": "DELETE", "path": f"/{key}" + "/{id}"},
-        },
-        "fields": [
-            {"name": "id", "type": "uuid", "required": True, "readable": True, "writable": False, "identity": True},
-            {"name": "workspace_id", "type": "uuid", "required": True, "readable": True, "writable": True, "identity": False},
-            {"name": "name", "type": "string", "required": True, "readable": True, "writable": True, "identity": True},
-            {"name": "status", "type": "string", "required": False, "readable": True, "writable": True, "identity": False},
-            {"name": "created_at", "type": "datetime", "required": True, "readable": True, "writable": False, "identity": False},
-            {"name": "updated_at", "type": "datetime", "required": True, "readable": True, "writable": False, "identity": False},
-        ],
-        "presentation": {
-            "default_list_fields": ["name", "status"],
-            "default_detail_fields": ["id", "name", "status", "workspace_id", "created_at", "updated_at"],
-            "title_field": "name",
-        },
-        "validation": {
-            "required_on_create": ["workspace_id", "name"],
-            "allowed_on_update": ["name", "status"],
-        },
-        "relationships": [],
-    }
-
-
-def _heuristic_semantic_extract(raw_prompt: str) -> dict[str, Any]:
-    prompt = str(raw_prompt or "").strip().lower()
-    entities: list[str] = []
-    for key, tokens in _ENTITY_KEYWORDS.items():
-        if any(token in prompt for token in tokens):
-            entities.append(key)
-    entity_contracts = [_simple_entity_contract(entity) for entity in _normalize_unique_strings(entities)]
-    visuals: list[str] = []
-    for key, tokens in _VISUAL_KEYWORDS.items():
-        if any(token in prompt for token in tokens):
-            visuals.append(key)
-    if "chart" in prompt and "status" in prompt:
-        if "device" in prompt:
-            visuals.append("devices_by_status_chart")
-        if "interface" in prompt:
-            visuals.append("interfaces_by_status_chart")
-    return {
-        "entities": _normalize_unique_strings(entities),
-        "entity_contracts": entity_contracts,
-        "requested_visuals": _normalize_unique_strings(visuals),
-    }
-
-
-def _normalize_semantic_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def _normalize_planning_agent_payload(payload: dict[str, Any]) -> dict[str, Any]:
     entities = _normalize_unique_strings(payload.get("entities") if isinstance(payload.get("entities"), list) else [])
     entities = [_safe_slug(item, default="records").replace("-", "_") for item in entities if str(item).strip()]
     visuals = _normalize_unique_strings(
@@ -146,8 +77,6 @@ def _normalize_semantic_payload(payload: dict[str, Any]) -> dict[str, Any]:
         normalized_row = json.loads(json.dumps(row))
         normalized_row["key"] = key
         contracts.append(normalized_row)
-    if not contracts and entities:
-        contracts = [_simple_entity_contract(entity) for entity in entities]
     return {
         "entities": _normalize_unique_strings(entities),
         "entity_contracts": contracts,
@@ -155,7 +84,7 @@ def _normalize_semantic_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _payload_types_valid(payload: dict[str, Any]) -> bool:
+def _planning_agent_payload_types_valid(payload: dict[str, Any]) -> bool:
     if "entities" in payload and not isinstance(payload.get("entities"), list):
         return False
     if "entity_contracts" in payload and not isinstance(payload.get("entity_contracts"), list):
@@ -165,7 +94,7 @@ def _payload_types_valid(payload: dict[str, Any]) -> bool:
     return True
 
 
-def _extract_via_codex(raw_prompt: str) -> dict[str, Any]:
+def _invoke_semantic_planning_agent(raw_prompt: str) -> dict[str, Any]:
     codex_bin = _semantic_codex_binary()
     if not _semantic_codex_available(codex_bin):
         raise RuntimeError("codex executable unavailable")
@@ -232,10 +161,6 @@ def extract_semantic_inference_with_diagnostics(
     codex_bin = _semantic_codex_binary()
     codex_available = _semantic_codex_available(codex_bin)
     use_llm = force_llm or (prefer_llm and llm_enabled and codex_available)
-    payload: dict[str, Any]
-    payload_from_llm = False
-    fallback_used = False
-    repair_used = False
     capability_state = _semantic_capability_state(
         prefer_llm=prefer_llm,
         force_llm=force_llm,
@@ -244,36 +169,30 @@ def extract_semantic_inference_with_diagnostics(
     )
     limited_mode = capability_state == "limited_no_llm"
     limited_reason = _limited_mode_reason(llm_enabled=llm_enabled, codex_available=codex_available)
-    if force_llm and not llm_enabled:
-        raise RuntimeError("LLM semantic extraction forced but XYN_APPSPEC_ENABLE_LLM_FALLBACK is disabled")
-    if force_llm and not codex_available:
-        raise RuntimeError("LLM semantic extraction forced but codex executable unavailable")
-    if use_llm:
-        try:
-            payload = _extract_via_codex(raw_prompt)
-            payload_from_llm = True
-        except Exception:
-            if force_llm:
-                raise
-            payload = _heuristic_semantic_extract(raw_prompt)
-            fallback_used = True
-    else:
-        payload = _heuristic_semantic_extract(raw_prompt)
-    if payload_from_llm and not _payload_types_valid(payload):
-        payload = _heuristic_semantic_extract(raw_prompt)
-        fallback_used = True
-        repair_used = True
-    normalized = _normalize_semantic_payload(payload)
+    if not use_llm:
+        raise SemanticPlanningAgentUnavailableError(
+            f"Semantic planning agent unavailable ({limited_reason}). "
+            "No deterministic fallback planning is permitted."
+        )
+    try:
+        payload = _invoke_semantic_planning_agent(raw_prompt)
+    except Exception as exc:
+        raise SemanticPlanningError(f"Semantic planning agent invocation failed: {exc}") from exc
+    if not _planning_agent_payload_types_valid(payload):
+        raise SemanticPlanningResponseValidationError(
+            "Semantic planning output has invalid top-level field types."
+        )
+    normalized = _normalize_planning_agent_payload(payload)
     try:
         validate(instance=normalized, schema=_SEMANTIC_SCHEMA)
-    except ValidationError:
-        normalized = _normalize_semantic_payload(_heuristic_semantic_extract(raw_prompt))
-        fallback_used = True
-        repair_used = True
+    except ValidationError as exc:
+        raise SemanticPlanningResponseValidationError(
+            f"Semantic planning output failed schema validation: {exc.message}"
+        ) from exc
     diagnostics = {
-        "llm_used": bool(payload_from_llm),
-        "fallback_used": bool(fallback_used),
-        "repair_used": bool(repair_used),
+        "llm_used": True,
+        "fallback_used": False,
+        "repair_used": False,
         "capability_state": capability_state,
         "limited_mode": bool(limited_mode),
         "limited_mode_reason": limited_reason if limited_mode else "",
