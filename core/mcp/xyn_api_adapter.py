@@ -303,6 +303,10 @@ class XynApiAdapter:
         # Prefer per-request bearer propagated by MCP auth middleware so OAuth sessions
         # can flow through ChatGPT -> MCP -> Xyn backend. Fall back to static config token.
         request_bearer = get_request_bearer_token() if prefer_request_bearer else ""
+        # Local control-plane containers do not consistently accept forwarded OAuth
+        # principals; pin to configured upstream bearer for local API hosts.
+        if "xyn-local-api" in str(self._config.control_api_base_url or "").strip().lower() and self._config.bearer_token:
+            request_bearer = ""
         bearer = request_bearer or self._config.bearer_token
         if bearer:
             headers["Authorization"] = f"Bearer {bearer}"
@@ -381,21 +385,7 @@ class XynApiAdapter:
         control_api = str(self._config.control_api_base_url or "").strip()
         if control_api:
             out.append(control_api)
-            parsed = urlparse(control_api)
-            host = str(parsed.hostname or "").strip().lower()
-            port = f":{parsed.port}" if parsed.port else ""
-            scheme = str(parsed.scheme or "http").strip() or "http"
-            derived_hosts: list[str] = []
-            if host == "xyn-local-api":
-                derived_hosts.extend(["xyn-api", "local-api"])
-            elif host == "local-api":
-                derived_hosts.extend(["xyn-local-api", "xyn-api"])
-            elif host == "xyn-api":
-                derived_hosts.extend(["xyn-local-api", "local-api"])
-            for candidate_host in derived_hosts:
-                candidate = f"{scheme}://{candidate_host}{port}"
-                if candidate not in out:
-                    out.append(candidate)
+            return out
         seed_base = str(os.getenv("XYN_SEED_URL", "")).strip().rstrip("/")
         if seed_base and seed_base not in out:
             out.append(seed_base)
@@ -684,8 +674,6 @@ class XynApiAdapter:
         should_retry_auth = (
             bool(request_bearer and static_bearer and request_bearer != static_bearer)
             and int(result.get("status_code") or 0) in {401, 403}
-            and isinstance(result.get("response"), dict)
-            and str((result.get("response") or {}).get("error") or "").strip().lower() in {"unauthorized", "not authenticated", "not_authenticated"}
         )
         if should_retry_auth:
             try:
@@ -1546,6 +1534,10 @@ class XynApiAdapter:
     ) -> Dict[str, Any]:
         response = result.get("response")
         body = response if isinstance(response, dict) else {}
+        raw_body = body.get("raw") if isinstance(body.get("raw"), dict) else body
+        raw_control = raw_body.get("control") if isinstance(raw_body.get("control"), dict) else {}
+        raw_session = raw_body.get("session") if isinstance(raw_body.get("session"), dict) else {}
+        raw_control_session = raw_control.get("session") if isinstance(raw_control.get("session"), dict) else {}
         status_code = int(result.get("status_code") or 0)
         ok = bool(result.get("ok"))
 
@@ -1607,11 +1599,15 @@ class XynApiAdapter:
         scope = body.get("scope") if isinstance(body.get("scope"), dict) else {}
         hint = scope_hint if isinstance(scope_hint, dict) else {}
         hint_scope = hint.get("scope") if isinstance(hint.get("scope"), dict) else {}
+        raw_scope = raw_session.get("scope") if isinstance(raw_session.get("scope"), dict) else {}
+        raw_control_scope = raw_control_session.get("scope") if isinstance(raw_control_session.get("scope"), dict) else {}
         scope_type = str(
             body.get("scope_type")
             or scope.get("scope_type")
             or hint.get("scope_type")
             or hint_scope.get("scope_type")
+            or raw_scope.get("scope_type")
+            or raw_control_scope.get("scope_type")
             or "application"
         ).strip().lower() or "application"
         if scope_type not in {"application", "artifact"}:
@@ -1622,14 +1618,28 @@ class XynApiAdapter:
             or scope.get("application_id")
             or hint.get("application_id")
             or hint_scope.get("application_id")
+            or raw_session.get("application_id")
+            or raw_control_session.get("application_id")
+            or raw_control.get("application_id")
             or ""
         )
-        resolved_session_id = str(session_id or body.get("session_id") or hint.get("session_id") or "")
+        resolved_session_id = str(
+            session_id
+            or body.get("session_id")
+            or hint.get("session_id")
+            or raw_session.get("id")
+            or raw_control_session.get("id")
+            or raw_body.get("change_session_id")
+            or raw_control.get("change_session_id")
+            or ""
+        )
         resolved_artifact_id = str(
             scope.get("artifact_id")
             or body.get("artifact_id")
             or hint.get("artifact_id")
             or hint_scope.get("artifact_id")
+            or raw_scope.get("artifact_id")
+            or raw_control_scope.get("artifact_id")
             or ""
         )
         resolved_artifact_slug = str(
@@ -1637,6 +1647,8 @@ class XynApiAdapter:
             or body.get("artifact_slug")
             or hint.get("artifact_slug")
             or hint_scope.get("artifact_slug")
+            or raw_scope.get("artifact_slug")
+            or raw_control_scope.get("artifact_slug")
             or ""
         )
         resolved_workspace_id = str(
@@ -1644,11 +1656,32 @@ class XynApiAdapter:
             or body.get("workspace_id")
             or hint.get("workspace_id")
             or hint_scope.get("workspace_id")
+            or raw_session.get("workspace_id")
+            or raw_control_session.get("workspace_id")
+            or raw_scope.get("workspace_id")
+            or raw_control_scope.get("workspace_id")
             or ""
         )
+        branch_name = str(
+            body.get("branch_name")
+            or body.get("branch")
+            or raw_body.get("branch_name")
+            or raw_body.get("branch")
+            or (raw_control.get("root_target_identity") or {}).get("branch_name")
+            or (raw_control.get("root_target_identity") or {}).get("branch")
+            or raw_control_session.get("branch_name")
+            or raw_control_session.get("branch")
+            or ((raw_control_session.get("metadata") or {}).get("branch_name") if isinstance(raw_control_session.get("metadata"), dict) else "")
+            or ((raw_control_session.get("metadata") or {}).get("branch") if isinstance(raw_control_session.get("metadata"), dict) else "")
+            or ""
+        ).strip()
+        if not branch_name and resolved_session_id:
+            branch_name = f"change-session/{resolved_session_id}"
         normalized = {
             "application_id": resolved_application_id,
             "session_id": resolved_session_id,
+            "branch_name": branch_name,
+            "branch": branch_name,
             "scope_type": scope_type,
             "scope": {
                 "scope_type": scope_type,
@@ -2342,11 +2375,21 @@ class XynApiAdapter:
     ) -> Dict[str, Any]:
         explicit = str(explicit_workspace_id or "").strip()
         if explicit:
+            self._resolved_default_workspace_id = explicit
             return {"ok": True, "workspace_id": explicit, "source": "explicit", "candidate_workspaces": []}
 
+        configured_default = str(self._resolved_default_workspace_id or self._config.default_workspace_id or "").strip()
         accessible = self._list_accessible_workspaces()
         candidate_workspaces = accessible.get("workspaces") if isinstance(accessible.get("workspaces"), list) else []
         if not accessible.get("ok"):
+            if configured_default:
+                self._resolved_default_workspace_id = configured_default
+                return {
+                    "ok": True,
+                    "workspace_id": configured_default,
+                    "source": "configured_default_unverified",
+                    "candidate_workspaces": candidate_workspaces,
+                }
             if require_workspace:
                 return {
                     "ok": False,
@@ -2357,7 +2400,6 @@ class XynApiAdapter:
                 }
             return {"ok": True, "workspace_id": "", "source": "none", "candidate_workspaces": candidate_workspaces}
 
-        configured_default = str(self._resolved_default_workspace_id or self._config.default_workspace_id or "").strip()
         if configured_default:
             accessible_ids = {
                 str(row.get("id") or "").strip()
@@ -2392,15 +2434,19 @@ class XynApiAdapter:
             return {"ok": True, "workspace_id": "", "source": "none", "candidate_workspaces": []}
 
         if len(candidate_workspaces) == 1:
+            selected = str(candidate_workspaces[0].get("id") or "").strip()
+            if selected:
+                self._resolved_default_workspace_id = selected
             return {
                 "ok": True,
-                "workspace_id": str(candidate_workspaces[0].get("id") or "").strip(),
+                "workspace_id": selected,
                 "source": "single_accessible_workspace",
                 "candidate_workspaces": candidate_workspaces,
             }
 
         intent_selected = self._workspace_resolution_by_intent(intent=intent, candidate_workspaces=candidate_workspaces)
         if intent_selected:
+            self._resolved_default_workspace_id = intent_selected
             return {
                 "ok": True,
                 "workspace_id": intent_selected,
@@ -3392,6 +3438,8 @@ class XynApiAdapter:
         normalized["response"] = {
             "application_id": str(application_id),
             "session_id": str(session_id),
+            "branch_name": str(response.get("branch_name") or ""),
+            "branch": str(response.get("branch") or response.get("branch_name") or ""),
             "current_status": str(response.get("current_status") or ""),
             "next_allowed_actions": response.get("next_allowed_actions") if isinstance(response.get("next_allowed_actions"), list) else [],
             "blocked_reason": str(response.get("blocked_reason") or ""),
