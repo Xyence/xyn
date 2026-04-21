@@ -19,6 +19,8 @@ from core.mcp.xyn_mcp_server import (
     DEAL_FINDER_TOOL_NAMES,
     TOOL_NAMES,
     McpEndpointBinding,
+    _invoke_adapter_operation_by_name,
+    _normalize_compat_arguments,
     _assert_critical_planner_tools_available,
     _build_tool_surface,
     _resolve_binding_allowed_tools,
@@ -195,6 +197,54 @@ class XynMcpAdapterTests(TestCase):
         )
         allowed = _resolve_binding_allowed_tools(binding=binding, globally_enabled_tools=set(TOOL_NAMES))
         self.assertEqual(sorted(allowed), ["create_campaign"])
+
+    def test_normalize_compat_arguments_prefers_arguments_and_merges_kwargs(self) -> None:
+        payload = {
+            "arguments": {"application_id": "app-1", "payload": {"title": "t1"}},
+            "kwargs": {"application_id": "app-2"},
+            "ignored": True,
+        }
+        normalized = _normalize_compat_arguments(payload)
+        self.assertEqual(normalized, {"application_id": "app-1", "payload": {"title": "t1"}})
+
+        kwargs_payload = {"kwargs": {"workspace_id": "ws-1"}, "payload": {"title": "t2"}}
+        kwargs_normalized = _normalize_compat_arguments(kwargs_payload)
+        self.assertEqual(kwargs_normalized.get("workspace_id"), "ws-1")
+        self.assertEqual(kwargs_normalized.get("payload"), {"title": "t2"})
+
+    def test_invoke_adapter_operation_by_name_dispatches_known_operation(self) -> None:
+        class _AdapterStub:
+            def __init__(self) -> None:
+                self.called: Dict[str, Any] = {}
+
+            def create_application_change_session(
+                self,
+                *,
+                application_id: str,
+                artifact_source: Dict[str, Any] | None = None,
+                payload: Dict[str, Any] | None = None,
+            ) -> Dict[str, Any]:
+                self.called = {
+                    "application_id": application_id,
+                    "artifact_source": artifact_source,
+                    "payload": payload,
+                }
+                return {"ok": True, "status_code": 201, "response": {"session_id": "sess-1"}}
+
+        adapter = _AdapterStub()
+        result = _invoke_adapter_operation_by_name(
+            adapter=adapter,
+            operation_name="create_application_change_session",
+            arguments={
+                "application_id": "app-1",
+                "artifact_source": {"artifact_slug": "app.real-estate-deal-finder"},
+                "payload": {"title": "Deal Finder session"},
+            },
+        )
+        self.assertTrue(result.get("ok"))
+        self.assertEqual(adapter.called.get("application_id"), "app-1")
+        self.assertEqual(adapter.called.get("artifact_source"), {"artifact_slug": "app.real-estate-deal-finder"})
+        self.assertEqual(adapter.called.get("payload"), {"title": "Deal Finder session"})
 
     @mock.patch.dict(
         "os.environ",
@@ -3473,7 +3523,11 @@ class XynMcpAdapterTests(TestCase):
         adapter.declare_release.return_value = {"ok": True, "status_code": 200, "response": {"release": {"id": "r1"}}}
         adapter.get_artifact_provenance.return_value = {"ok": True, "status_code": 200, "response": {"artifact_slug": "xyn-api"}}
         adapter.create_campaign.return_value = {"ok": True, "status_code": 201, "response": {"campaign": {"id": "cmp-1"}}}
+        adapter.list_campaigns.return_value = {"ok": True, "status_code": 200, "response": {"campaigns": [{"id": "cmp-1"}]}}
+        adapter.get_campaign.return_value = {"ok": True, "status_code": 200, "response": {"campaign": {"id": "cmp-1"}}}
         adapter.update_campaign.return_value = {"ok": True, "status_code": 200, "response": {"campaign": {"id": "cmp-1"}}}
+        adapter.pause_campaign.return_value = {"ok": True, "status_code": 200, "response": {"campaign": {"id": "cmp-1", "status": "paused"}}}
+        adapter.archive_campaign.return_value = {"ok": True, "status_code": 200, "response": {"campaign": {"id": "cmp-1", "archived": True}}}
         adapter.create_data_source.return_value = {"ok": True, "status_code": 201, "response": {"data_source": {"id": "ds-1"}}}
         adapter.list_data_sources.return_value = {"ok": True, "status_code": 200, "response": {"sources": [{"id": "ds-1"}]}}
         adapter.get_data_source.return_value = {"ok": True, "status_code": 200, "response": {"data_source": {"id": "ds-1"}}}
@@ -3481,15 +3535,103 @@ class XynMcpAdapterTests(TestCase):
         adapter.activate_data_source.return_value = {"ok": True, "status_code": 200, "response": {"data_source": {"id": "ds-1"}}}
         adapter.pause_data_source.return_value = {"ok": True, "status_code": 200, "response": {"data_source": {"id": "ds-1"}}}
         adapter.delete_data_source.return_value = {"ok": True, "status_code": 200, "response": {"status": "deleted"}}
+        adapter.run_data_source_ingest.return_value = {"ok": True, "status_code": 200, "response": {"run": {"id": "run-1"}}}
+        adapter.get_data_source_ingest_status.return_value = {"ok": True, "status_code": 200, "response": {"latest_run": {"id": "run-1"}}}
+        adapter.list_data_source_runs.return_value = {"ok": True, "status_code": 200, "response": {"runs": [{"id": "run-1"}]}}
+        adapter.get_data_source_quality_report.return_value = {
+            "ok": True,
+            "status_code": 200,
+            "response": {"quality_summary_present": True},
+        }
         adapter.create_notification_rule.return_value = {
             "ok": True,
             "status_code": 201,
+            "response": {"notification_rule": {"id": "nr-1"}},
+        }
+        adapter.list_notification_rules.return_value = {
+            "ok": True,
+            "status_code": 200,
+            "response": {"notification_rules": [{"id": "nr-1"}]},
+        }
+        adapter.get_notification_rule.return_value = {
+            "ok": True,
+            "status_code": 200,
             "response": {"notification_rule": {"id": "nr-1"}},
         }
         adapter.update_notification_rule.return_value = {
             "ok": True,
             "status_code": 200,
             "response": {"notification_rule": {"id": "nr-1"}},
+        }
+        adapter.activate_notification_rule.return_value = {
+            "ok": True,
+            "status_code": 200,
+            "response": {"notification_rule": {"id": "nr-1", "enabled": True}},
+        }
+        adapter.pause_notification_rule.return_value = {
+            "ok": True,
+            "status_code": 200,
+            "response": {"notification_rule": {"id": "nr-1", "enabled": False}},
+        }
+        adapter.add_campaign_notification_rule.return_value = {
+            "ok": True,
+            "status_code": 201,
+            "response": {"association": {"id": "assoc-1"}, "attached": True},
+        }
+        adapter.remove_campaign_notification_rule.return_value = {
+            "ok": True,
+            "status_code": 200,
+            "response": {"association": {"id": "assoc-1"}, "removed": True},
+        }
+        adapter.list_campaign_notification_rules.return_value = {
+            "ok": True,
+            "status_code": 200,
+            "response": {"notification_rules": [{"id": "nr-1"}], "count": 1},
+        }
+        adapter.create_condition_definition.return_value = {
+            "ok": True,
+            "status_code": 201,
+            "response": {"condition_definition": {"id": "cond-1", "name": "3 tickets in 30 days"}},
+        }
+        adapter.update_condition_definition.return_value = {
+            "ok": True,
+            "status_code": 200,
+            "response": {"condition_definition": {"id": "cond-1", "threshold": 4}},
+        }
+        adapter.list_condition_definitions.return_value = {
+            "ok": True,
+            "status_code": 200,
+            "response": {"condition_definitions": [{"id": "cond-1"}], "count": 1},
+        }
+        adapter.get_condition_definition.return_value = {
+            "ok": True,
+            "status_code": 200,
+            "response": {"condition_definition": {"id": "cond-1"}},
+        }
+        adapter.activate_condition_definition.return_value = {
+            "ok": True,
+            "status_code": 200,
+            "response": {"condition_definition": {"id": "cond-1", "enabled": True}},
+        }
+        adapter.pause_condition_definition.return_value = {
+            "ok": True,
+            "status_code": 200,
+            "response": {"condition_definition": {"id": "cond-1", "enabled": False}},
+        }
+        adapter.resolve_parcel_by_address.return_value = {
+            "ok": True,
+            "status_code": 200,
+            "response": {"parcel": {"id": "parcel-1"}, "match_status": "exact_match"},
+        }
+        adapter.get_owner_snapshot_by_parcel.return_value = {
+            "ok": True,
+            "status_code": 200,
+            "response": {"owner_available": True, "owner_snapshot": {"owner_name": "Alpha LLC"}},
+        }
+        adapter.get_property_owner_by_address.return_value = {
+            "ok": True,
+            "status_code": 200,
+            "response": {"parcel": {"id": "parcel-1"}, "owner_available": True, "owner_snapshot": {"owner_name": "Alpha LLC"}},
         }
         adapter.assess_change_session_readiness.return_value = {"ok": True, "status_code": 200, "response": {"assessment_state": "ready"}}
         server = FakeMcpServer()
@@ -3521,8 +3663,21 @@ class XynMcpAdapterTests(TestCase):
             metadata=None,
             payload=None,
         )
+        server.tools["list_campaigns"]["fn"](workspace_id="w1", status="active")
+        adapter.list_campaigns.assert_called_once_with(
+            workspace_id="w1",
+            status="active",
+            campaign_type="",
+            include_archived=False,
+        )
+        server.tools["get_campaign"]["fn"](campaign_id="cmp-1", workspace_id="w1")
+        adapter.get_campaign.assert_called_once_with(campaign_id="cmp-1", workspace_id="w1")
         server.tools["update_campaign"]["fn"](campaign_id="cmp-1", workspace_id="w1", payload={"status": "active"})
         adapter.update_campaign.assert_called_once_with(campaign_id="cmp-1", workspace_id="w1", payload={"status": "active"})
+        server.tools["pause_campaign"]["fn"](campaign_id="cmp-1", workspace_id="w1")
+        adapter.pause_campaign.assert_called_once_with(campaign_id="cmp-1", workspace_id="w1", payload=None)
+        server.tools["archive_campaign"]["fn"](campaign_id="cmp-1", workspace_id="w1")
+        adapter.archive_campaign.assert_called_once_with(campaign_id="cmp-1", workspace_id="w1", payload=None)
         server.tools["create_data_source"]["fn"](workspace_id="w1", key="county-records", name="County Records")
         adapter.create_data_source.assert_called_once_with(
             workspace_id="w1",
@@ -3549,6 +3704,23 @@ class XynMcpAdapterTests(TestCase):
         adapter.pause_data_source.assert_called_once_with(source_id="ds-1", workspace_id="w1")
         server.tools["delete_data_source"]["fn"](source_id="ds-1", workspace_id="w1")
         adapter.delete_data_source.assert_called_once_with(source_id="ds-1", workspace_id="w1")
+        server.tools["run_data_source_ingest"]["fn"](source_id="ds-1", workspace_id="w1")
+        adapter.run_data_source_ingest.assert_called_once_with(
+            source_id="ds-1",
+            workspace_id="w1",
+            source_url="",
+            jurisdiction="",
+            source="",
+            timeout_seconds=60,
+            reprocess_unchanged=False,
+            payload=None,
+        )
+        server.tools["get_data_source_ingest_status"]["fn"](source_id="ds-1", workspace_id="w1", limit=10)
+        adapter.get_data_source_ingest_status.assert_called_once_with(source_id="ds-1", workspace_id="w1", limit=10)
+        server.tools["list_data_source_runs"]["fn"](source_id="ds-1", workspace_id="w1", limit=10, status="running")
+        adapter.list_data_source_runs.assert_called_once_with(source_id="ds-1", workspace_id="w1", limit=10, status="running")
+        server.tools["get_data_source_quality_report"]["fn"](source_id="ds-1", workspace_id="w1", limit=5)
+        adapter.get_data_source_quality_report.assert_called_once_with(source_id="ds-1", workspace_id="w1", limit=5)
         server.tools["create_notification_rule"]["fn"](
             workspace_id="w1",
             address="alerts@example.com",
@@ -3571,6 +3743,94 @@ class XynMcpAdapterTests(TestCase):
             enabled=False,
             payload=None,
         )
+        server.tools["list_notification_rules"]["fn"](workspace_id="w1")
+        adapter.list_notification_rules.assert_called_once_with(workspace_id="w1")
+        server.tools["get_notification_rule"]["fn"](target_id="nr-1", workspace_id="w1")
+        adapter.get_notification_rule.assert_called_once_with(target_id="nr-1", workspace_id="w1")
+        server.tools["activate_notification_rule"]["fn"](target_id="nr-1", workspace_id="w1")
+        adapter.activate_notification_rule.assert_called_once_with(target_id="nr-1", workspace_id="w1", payload=None)
+        server.tools["pause_notification_rule"]["fn"](target_id="nr-1", workspace_id="w1")
+        adapter.pause_notification_rule.assert_called_once_with(target_id="nr-1", workspace_id="w1", payload=None)
+        server.tools["add_campaign_notification_rule"]["fn"](campaign_id="cmp-1", target_id="nr-1", workspace_id="w1")
+        adapter.add_campaign_notification_rule.assert_called_once_with(
+            campaign_id="cmp-1",
+            target_id="nr-1",
+            workspace_id="w1",
+            payload=None,
+        )
+        server.tools["remove_campaign_notification_rule"]["fn"](campaign_id="cmp-1", target_id="nr-1", workspace_id="w1")
+        adapter.remove_campaign_notification_rule.assert_called_once_with(
+            campaign_id="cmp-1",
+            target_id="nr-1",
+            workspace_id="w1",
+            payload=None,
+        )
+        server.tools["list_campaign_notification_rules"]["fn"](campaign_id="cmp-1", workspace_id="w1", include_disabled=True)
+        adapter.list_campaign_notification_rules.assert_called_once_with(
+            campaign_id="cmp-1",
+            workspace_id="w1",
+            include_disabled=True,
+        )
+        server.tools["create_condition_definition"]["fn"](
+            workspace_id="w1",
+            name="3 tickets in 30 days",
+            signal_type="csb_ticket",
+            lookback_value=30,
+            lookback_unit="days",
+            aggregation_type="count",
+            operator="gte",
+            threshold=3,
+        )
+        adapter.create_condition_definition.assert_called_once_with(
+            workspace_id="w1",
+            name="3 tickets in 30 days",
+            signal_type="csb_ticket",
+            source_filter=None,
+            lookback_value=30,
+            lookback_unit="days",
+            aggregation_type="count",
+            operator="gte",
+            threshold=3,
+            severity="",
+            weight=0.0,
+            enabled=True,
+            payload=None,
+        )
+        server.tools["update_condition_definition"]["fn"](
+            condition_id="cond-1",
+            workspace_id="w1",
+            payload={"threshold": 4},
+        )
+        adapter.update_condition_definition.assert_called_once_with(
+            condition_id="cond-1",
+            workspace_id="w1",
+            payload={"threshold": 4},
+        )
+        server.tools["list_condition_definitions"]["fn"](workspace_id="w1", include_disabled=False)
+        adapter.list_condition_definitions.assert_called_once_with(
+            workspace_id="w1",
+            include_disabled=False,
+        )
+        server.tools["get_condition_definition"]["fn"](condition_id="cond-1", workspace_id="w1")
+        adapter.get_condition_definition.assert_called_once_with(condition_id="cond-1", workspace_id="w1")
+        server.tools["activate_condition_definition"]["fn"](condition_id="cond-1", workspace_id="w1")
+        adapter.activate_condition_definition.assert_called_once_with(
+            condition_id="cond-1",
+            workspace_id="w1",
+            payload=None,
+        )
+        server.tools["pause_condition_definition"]["fn"](condition_id="cond-1", workspace_id="w1")
+        adapter.pause_condition_definition.assert_called_once_with(
+            condition_id="cond-1",
+            workspace_id="w1",
+            payload=None,
+        )
+        server.tools["resolve_parcel_by_address"]["fn"](address="123 Market St", workspace_id="w1")
+        adapter.resolve_parcel_by_address.assert_called_once_with(address="123 Market St", workspace_id="w1")
+        server.tools["get_owner_snapshot_by_parcel"]["fn"](parcel_id="parcel-1", workspace_id="w1")
+        adapter.get_owner_snapshot_by_parcel.assert_called_once_with(parcel_id="parcel-1", workspace_id="w1")
+        server.tools["get_property_owner_by_address"]["fn"](address="123 Market St", workspace_id="w1")
+        adapter.get_property_owner_by_address.assert_called_once_with(address="123 Market St", workspace_id="w1")
         server.tools["list_change_session_pending_checkpoints"]["fn"](application_id="app-1", session_id="sess-1")
         adapter.list_change_session_pending_checkpoints.assert_called_once_with(application_id="app-1", session_id="sess-1")
         server.tools["decide_change_session_checkpoint"]["fn"](

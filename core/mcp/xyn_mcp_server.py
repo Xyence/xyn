@@ -100,7 +100,11 @@ TOOL_NAMES = [
     "declare_release",
     "get_artifact_provenance",
     "create_campaign",
+    "list_campaigns",
+    "get_campaign",
     "update_campaign",
+    "pause_campaign",
+    "archive_campaign",
     "create_data_source",
     "list_data_sources",
     "get_data_source",
@@ -108,13 +112,37 @@ TOOL_NAMES = [
     "activate_data_source",
     "pause_data_source",
     "delete_data_source",
+    "run_data_source_ingest",
+    "get_data_source_ingest_status",
+    "list_data_source_runs",
+    "get_data_source_quality_report",
     "create_notification_rule",
+    "list_notification_rules",
+    "get_notification_rule",
     "update_notification_rule",
+    "activate_notification_rule",
+    "pause_notification_rule",
+    "add_campaign_notification_rule",
+    "remove_campaign_notification_rule",
+    "list_campaign_notification_rules",
+    "create_condition_definition",
+    "update_condition_definition",
+    "list_condition_definitions",
+    "get_condition_definition",
+    "activate_condition_definition",
+    "pause_condition_definition",
+    "resolve_parcel_by_address",
+    "get_owner_snapshot_by_parcel",
+    "get_property_owner_by_address",
 ]
 
 DEAL_FINDER_TOOL_NAMES = [
     "create_campaign",
+    "list_campaigns",
+    "get_campaign",
     "update_campaign",
+    "pause_campaign",
+    "archive_campaign",
     "create_data_source",
     "list_data_sources",
     "get_data_source",
@@ -122,8 +150,28 @@ DEAL_FINDER_TOOL_NAMES = [
     "activate_data_source",
     "pause_data_source",
     "delete_data_source",
+    "run_data_source_ingest",
+    "get_data_source_ingest_status",
+    "list_data_source_runs",
+    "get_data_source_quality_report",
     "create_notification_rule",
+    "list_notification_rules",
+    "get_notification_rule",
     "update_notification_rule",
+    "activate_notification_rule",
+    "pause_notification_rule",
+    "add_campaign_notification_rule",
+    "remove_campaign_notification_rule",
+    "list_campaign_notification_rules",
+    "create_condition_definition",
+    "update_condition_definition",
+    "list_condition_definitions",
+    "get_condition_definition",
+    "activate_condition_definition",
+    "pause_condition_definition",
+    "resolve_parcel_by_address",
+    "get_owner_snapshot_by_parcel",
+    "get_property_owner_by_address",
 ]
 
 TOOL_GROUPS: Dict[str, tuple[str, ...]] = {
@@ -919,6 +967,39 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
             payload=payload,
         )
 
+    def list_campaigns(
+        workspace_id: str = "",
+        status: str = "",
+        campaign_type: str = "",
+        include_archived: bool = False,
+    ) -> Dict[str, Any]:
+        return adapter.list_campaigns(
+            workspace_id=workspace_id,
+            status=status,
+            campaign_type=campaign_type,
+            include_archived=include_archived,
+        )
+
+    def get_campaign(
+        campaign_id: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.get_campaign(campaign_id=campaign_id, workspace_id=workspace_id)
+
+    def pause_campaign(
+        campaign_id: str,
+        workspace_id: str = "",
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.pause_campaign(campaign_id=campaign_id, workspace_id=workspace_id, payload=payload)
+
+    def archive_campaign(
+        campaign_id: str,
+        workspace_id: str = "",
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.archive_campaign(campaign_id=campaign_id, workspace_id=workspace_id, payload=payload)
+
     def create_data_source(
         workspace_id: str = "",
         key: str = "",
@@ -978,6 +1059,49 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     ) -> Dict[str, Any]:
         return adapter.delete_data_source(source_id=source_id, workspace_id=workspace_id)
 
+    def run_data_source_ingest(
+        source_id: str,
+        workspace_id: str = "",
+        source_url: str = "",
+        jurisdiction: str = "",
+        source: str = "",
+        timeout_seconds: int = 60,
+        reprocess_unchanged: bool = False,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.run_data_source_ingest(
+            source_id=source_id,
+            workspace_id=workspace_id,
+            source_url=source_url,
+            jurisdiction=jurisdiction,
+            source=source,
+            timeout_seconds=timeout_seconds,
+            reprocess_unchanged=reprocess_unchanged,
+            payload=payload,
+        )
+
+    def get_data_source_ingest_status(
+        source_id: str,
+        workspace_id: str = "",
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        return adapter.get_data_source_ingest_status(source_id=source_id, workspace_id=workspace_id, limit=limit)
+
+    def list_data_source_runs(
+        source_id: str,
+        workspace_id: str = "",
+        limit: int = 20,
+        status: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.list_data_source_runs(source_id=source_id, workspace_id=workspace_id, limit=limit, status=status)
+
+    def get_data_source_quality_report(
+        source_id: str,
+        workspace_id: str = "",
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        return adapter.get_data_source_quality_report(source_id=source_id, workspace_id=workspace_id, limit=limit)
+
     def create_notification_rule(
         workspace_id: str = "",
         address: str = "",
@@ -1009,6 +1133,168 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
             enabled=enabled,
             payload=payload,
         )
+
+    def list_notification_rules(
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.list_notification_rules(workspace_id=workspace_id)
+
+    def get_notification_rule(
+        target_id: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.get_notification_rule(target_id=target_id, workspace_id=workspace_id)
+
+    def activate_notification_rule(
+        target_id: str,
+        workspace_id: str = "",
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.activate_notification_rule(target_id=target_id, workspace_id=workspace_id, payload=payload)
+
+    def pause_notification_rule(
+        target_id: str,
+        workspace_id: str = "",
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.pause_notification_rule(target_id=target_id, workspace_id=workspace_id, payload=payload)
+
+    def add_campaign_notification_rule(
+        campaign_id: str,
+        target_id: str,
+        workspace_id: str = "",
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.add_campaign_notification_rule(
+            campaign_id=campaign_id,
+            target_id=target_id,
+            workspace_id=workspace_id,
+            payload=payload,
+        )
+
+    def remove_campaign_notification_rule(
+        campaign_id: str,
+        target_id: str,
+        workspace_id: str = "",
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.remove_campaign_notification_rule(
+            campaign_id=campaign_id,
+            target_id=target_id,
+            workspace_id=workspace_id,
+            payload=payload,
+        )
+
+    def list_campaign_notification_rules(
+        campaign_id: str,
+        workspace_id: str = "",
+        include_disabled: bool = False,
+    ) -> Dict[str, Any]:
+        return adapter.list_campaign_notification_rules(
+            campaign_id=campaign_id,
+            workspace_id=workspace_id,
+            include_disabled=include_disabled,
+        )
+
+    def create_condition_definition(
+        workspace_id: str = "",
+        name: str = "",
+        signal_type: str = "",
+        source_filter: Dict[str, Any] | None = None,
+        lookback_value: int = 30,
+        lookback_unit: str = "days",
+        aggregation_type: str = "count",
+        operator: str = "gte",
+        threshold: float = 1.0,
+        severity: str = "",
+        weight: float = 0.0,
+        enabled: bool = True,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.create_condition_definition(
+            workspace_id=workspace_id,
+            name=name,
+            signal_type=signal_type,
+            source_filter=source_filter,
+            lookback_value=lookback_value,
+            lookback_unit=lookback_unit,
+            aggregation_type=aggregation_type,
+            operator=operator,
+            threshold=threshold,
+            severity=severity,
+            weight=weight,
+            enabled=enabled,
+            payload=payload,
+        )
+
+    def update_condition_definition(
+        condition_id: str,
+        workspace_id: str = "",
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.update_condition_definition(
+            condition_id=condition_id,
+            workspace_id=workspace_id,
+            payload=payload,
+        )
+
+    def list_condition_definitions(
+        workspace_id: str = "",
+        include_disabled: bool = True,
+    ) -> Dict[str, Any]:
+        return adapter.list_condition_definitions(
+            workspace_id=workspace_id,
+            include_disabled=include_disabled,
+        )
+
+    def get_condition_definition(
+        condition_id: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.get_condition_definition(
+            condition_id=condition_id,
+            workspace_id=workspace_id,
+        )
+
+    def activate_condition_definition(
+        condition_id: str,
+        workspace_id: str = "",
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.activate_condition_definition(
+            condition_id=condition_id,
+            workspace_id=workspace_id,
+            payload=payload,
+        )
+
+    def pause_condition_definition(
+        condition_id: str,
+        workspace_id: str = "",
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.pause_condition_definition(
+            condition_id=condition_id,
+            workspace_id=workspace_id,
+            payload=payload,
+        )
+
+    def resolve_parcel_by_address(
+        address: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.resolve_parcel_by_address(address=address, workspace_id=workspace_id)
+
+    def get_owner_snapshot_by_parcel(
+        parcel_id: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.get_owner_snapshot_by_parcel(parcel_id=parcel_id, workspace_id=workspace_id)
+
+    def get_property_owner_by_address(
+        address: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.get_property_owner_by_address(address=address, workspace_id=workspace_id)
 
     _register_tool(
         mcp_server,
@@ -1482,6 +1768,30 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     )
     _register_tool(
         mcp_server,
+        name="list_campaigns",
+        description="List campaigns for a workspace with optional status/type filters.",
+        fn=list_campaigns,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_campaign",
+        description="Get one campaign by id.",
+        fn=get_campaign,
+    )
+    _register_tool(
+        mcp_server,
+        name="pause_campaign",
+        description="Pause a campaign by setting status=paused.",
+        fn=pause_campaign,
+    )
+    _register_tool(
+        mcp_server,
+        name="archive_campaign",
+        description="Archive a campaign by setting archived=true.",
+        fn=archive_campaign,
+    )
+    _register_tool(
+        mcp_server,
         name="create_data_source",
         description="Create a source connector (data source) within a workspace.",
         fn=create_data_source,
@@ -1524,6 +1834,30 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     )
     _register_tool(
         mcp_server,
+        name="run_data_source_ingest",
+        description="Trigger ingest/refresh for a data source.",
+        fn=run_data_source_ingest,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_data_source_ingest_status",
+        description="Get source ingestion status summary from source health and latest runs.",
+        fn=get_data_source_ingest_status,
+    )
+    _register_tool(
+        mcp_server,
+        name="list_data_source_runs",
+        description="List orchestration runs associated with a data source.",
+        fn=list_data_source_runs,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_data_source_quality_report",
+        description="Get data source quality/ingest artifact summary.",
+        fn=get_data_source_quality_report,
+    )
+    _register_tool(
+        mcp_server,
         name="create_notification_rule",
         description="Create a notification target/rule for a workspace.",
         fn=create_notification_rule,
@@ -1533,6 +1867,102 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
         name="update_notification_rule",
         description="Update a notification target/rule for a workspace.",
         fn=update_notification_rule,
+    )
+    _register_tool(
+        mcp_server,
+        name="list_notification_rules",
+        description="List notification rules for a workspace.",
+        fn=list_notification_rules,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_notification_rule",
+        description="Get one notification rule by id.",
+        fn=get_notification_rule,
+    )
+    _register_tool(
+        mcp_server,
+        name="activate_notification_rule",
+        description="Activate a notification rule by setting enabled=true.",
+        fn=activate_notification_rule,
+    )
+    _register_tool(
+        mcp_server,
+        name="pause_notification_rule",
+        description="Pause a notification rule by setting enabled=false.",
+        fn=pause_notification_rule,
+    )
+    _register_tool(
+        mcp_server,
+        name="add_campaign_notification_rule",
+        description="Attach an existing notification rule to a campaign.",
+        fn=add_campaign_notification_rule,
+    )
+    _register_tool(
+        mcp_server,
+        name="remove_campaign_notification_rule",
+        description="Detach an existing notification rule from a campaign.",
+        fn=remove_campaign_notification_rule,
+    )
+    _register_tool(
+        mcp_server,
+        name="list_campaign_notification_rules",
+        description="List notification rules attached to a campaign.",
+        fn=list_campaign_notification_rules,
+    )
+    _register_tool(
+        mcp_server,
+        name="create_condition_definition",
+        description="Create a temporal distress condition definition (e.g., count threshold in a lookback window).",
+        fn=create_condition_definition,
+    )
+    _register_tool(
+        mcp_server,
+        name="update_condition_definition",
+        description="Update an existing temporal distress condition definition.",
+        fn=update_condition_definition,
+    )
+    _register_tool(
+        mcp_server,
+        name="list_condition_definitions",
+        description="List temporal distress condition definitions for a workspace.",
+        fn=list_condition_definitions,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_condition_definition",
+        description="Get one temporal distress condition definition by id.",
+        fn=get_condition_definition,
+    )
+    _register_tool(
+        mcp_server,
+        name="activate_condition_definition",
+        description="Activate a condition definition (enabled=true).",
+        fn=activate_condition_definition,
+    )
+    _register_tool(
+        mcp_server,
+        name="pause_condition_definition",
+        description="Pause a condition definition (enabled=false).",
+        fn=pause_condition_definition,
+    )
+    _register_tool(
+        mcp_server,
+        name="resolve_parcel_by_address",
+        description="Resolve canonical parcel identity from a property address.",
+        fn=resolve_parcel_by_address,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_owner_snapshot_by_parcel",
+        description="Get normalized owner snapshot for a canonical parcel.",
+        fn=get_owner_snapshot_by_parcel,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_property_owner_by_address",
+        description="Resolve parcel by address, then return owner snapshot with provenance.",
+        fn=get_property_owner_by_address,
     )
 
 
@@ -1610,6 +2040,45 @@ def _assert_critical_planner_tools_available(tool_surface: Dict[str, Any]) -> No
             + ", ".join(missing)
             + ". Verify planner control-plane route wiring."
         )
+
+
+def _normalize_compat_arguments(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    if isinstance(payload.get("arguments"), dict):
+        return dict(payload.get("arguments") or {})
+    normalized = dict(payload)
+    if isinstance(payload.get("kwargs"), dict):
+        normalized.update(dict(payload.get("kwargs") or {}))
+    normalized.pop("arguments", None)
+    normalized.pop("kwargs", None)
+    return normalized
+
+
+def _invoke_adapter_operation_by_name(
+    *,
+    adapter: XynApiAdapter,
+    operation_name: str,
+    arguments: Dict[str, Any],
+) -> Dict[str, Any]:
+    method = getattr(adapter, operation_name, None)
+    if not callable(method):
+        raise LookupError(operation_name)
+    signature = inspect.signature(method)
+    call_kwargs: Dict[str, Any] = {}
+    for param_name, param in signature.parameters.items():
+        if param_name == "self":
+            continue
+        if param.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}:
+            continue
+        if param_name in arguments:
+            call_kwargs[param_name] = arguments[param_name]
+    if "payload" in signature.parameters and "payload" not in call_kwargs:
+        # Compatibility: some path-based bridges pass payload fields at top level.
+        remaining = {k: v for k, v in arguments.items() if k not in signature.parameters}
+        if remaining:
+            call_kwargs["payload"] = remaining
+    return method(**call_kwargs)
 
 
 def _resolve_binding_allowed_tools(
@@ -2065,11 +2534,12 @@ def _create_xyn_mcp_http_subapp(
                 request.scope["raw_path"] = rewritten_path.encode("utf-8")
                 path = rewritten_path
         request.scope["xyn_mcp_binding_name"] = matched_binding.name if matched_binding is not None else "root"
-        if original_path in public_paths or not path.startswith("/mcp"):
+        is_compat_path = original_path.startswith("/Xyn 3/")
+        if original_path in public_paths or (not path.startswith("/mcp") and not is_compat_path):
             return await call_next(request)
         request_body = b""
         jsonrpc_message: Dict[str, Any] = {}
-        if str(request.method or "").upper() == "POST":
+        if str(request.method or "").upper() == "POST" and path.startswith("/mcp"):
             content_type = str(request.headers.get("content-type", "")).lower()
             if "application/json" in content_type:
                 request_body = await request.body()
@@ -2164,6 +2634,120 @@ def _create_xyn_mcp_http_subapp(
         return response
     app.add_middleware(BaseHTTPMiddleware, dispatch=_mcp_auth_guard)
 
+    async def xyn3_resource_compat_dispatch(request) -> Response:
+        raw_path = str(request.path_params.get("resource_path") or "").strip("/")
+        operation_name = raw_path.split("/")[-1] if raw_path else ""
+        if not operation_name:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "status_code": 404,
+                    "response": {
+                        "blocked_reason": "resource_not_found",
+                        "detail": "Missing operation segment in compatibility path",
+                    },
+                },
+                status_code=404,
+            )
+        if operation_name not in TOOL_NAMES:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "status_code": 404,
+                    "response": {
+                        "blocked_reason": "resource_not_found",
+                        "detail": f"Resource not found: /Xyn 3/{raw_path}",
+                        "operation_name": operation_name,
+                    },
+                },
+                status_code=404,
+            )
+        request_host = _request_host(request)
+        selected_binding = endpoint_bindings_by_name.get("root", endpoint_bindings[0])
+        for binding in endpoint_bindings:
+            host_rank = _host_match_rank(binding, request_host)
+            if host_rank > 0 and (binding.host or binding.hosts):
+                selected_binding = binding
+                break
+        allowed_for_binding = binding_allowed_tools.get(selected_binding.name, globally_enabled_tools)
+        if operation_name not in allowed_for_binding:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "status_code": 403,
+                    "response": {
+                        "blocked_reason": "tool_not_allowed_for_binding",
+                        "binding_name": selected_binding.name,
+                        "tool_name": operation_name,
+                        "detail": f"Operation '{operation_name}' is not exposed for binding '{selected_binding.name}'",
+                    },
+                },
+                status_code=403,
+            )
+        request_payload: Dict[str, Any] = {}
+        if str(request.method or "").upper() == "POST":
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            request_payload = body if isinstance(body, dict) else {}
+        normalized_args = _normalize_compat_arguments(request_payload)
+        for key, value in request.query_params.items():
+            normalized_args.setdefault(str(key), value)
+        binding_token = _CURRENT_BINDING_NAME.set(selected_binding.name)
+        tools_token = _CURRENT_ALLOWED_TOOLS.set(frozenset(allowed_for_binding))
+        try:
+            result = _invoke_adapter_operation_by_name(
+                adapter=adapter,
+                operation_name=operation_name,
+                arguments=normalized_args,
+            )
+        except LookupError:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "status_code": 404,
+                    "response": {
+                        "blocked_reason": "resource_not_found",
+                        "detail": f"Resource not found: /Xyn 3/{raw_path}",
+                        "operation_name": operation_name,
+                    },
+                },
+                status_code=404,
+            )
+        except TypeError as exc:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "status_code": 400,
+                    "response": {
+                        "blocked_reason": "invalid_operation_arguments",
+                        "operation_name": operation_name,
+                        "detail": str(exc),
+                        "arguments": normalized_args,
+                    },
+                },
+                status_code=400,
+            )
+        except Exception as exc:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "status_code": 500,
+                    "response": {
+                        "blocked_reason": "operation_dispatch_failed",
+                        "operation_name": operation_name,
+                        "detail": str(exc),
+                    },
+                },
+                status_code=500,
+            )
+        finally:
+            _CURRENT_ALLOWED_TOOLS.reset(tools_token)
+            _CURRENT_BINDING_NAME.reset(binding_token)
+        status_code = int(result.get("status_code") or (200 if result.get("ok") else 400)) if isinstance(result, dict) else 200
+        return JSONResponse(result if isinstance(result, dict) else {"ok": True, "response": result}, status_code=status_code)
+
     # Add diagnostics routes directly on the same MCP Starlette app so lifespan/task-group init stays intact.
     seen_health_paths = set()
     seen_oauth_paths = set()
@@ -2174,6 +2758,7 @@ def _create_xyn_mcp_http_subapp(
         if binding.oauth_protected_resource_path not in seen_oauth_paths:
             app.add_route(binding.oauth_protected_resource_path, oauth_protected_resource, methods=["GET"])
             seen_oauth_paths.add(binding.oauth_protected_resource_path)
+    app.add_route("/Xyn 3/{resource_path:path}", xyn3_resource_compat_dispatch, methods=["GET", "POST"])
     return app
 
 

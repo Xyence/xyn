@@ -2605,6 +2605,114 @@ class XynApiAdapter:
         }
         return result
 
+    def list_campaigns(
+        self,
+        *,
+        workspace_id: str = "",
+        status: str = "",
+        campaign_type: str = "",
+        include_archived: bool = False,
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="GET",
+                path="/xyn/api/campaigns",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        params: Dict[str, Any] = {
+            "workspace_id": resolved_workspace_id,
+            "status": str(status or "").strip() or None,
+            "campaign_type": str(campaign_type or "").strip() or None,
+            "include_archived": "true" if bool(include_archived) else None,
+        }
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=["/xyn/api/campaigns", "/api/v1/campaigns"],
+            params=params,
+            base_urls=self._planner_base_urls(),
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        campaigns = body.get("campaigns") if isinstance(body.get("campaigns"), list) else []
+        normalized = [{"type": "campaign", **item} for item in campaigns if isinstance(item, dict)]
+        result["response"] = {
+            "operation": "list_campaigns",
+            "workspace_id": resolved_workspace_id,
+            "campaigns": normalized,
+            "count": len(normalized),
+            "campaign_types": body.get("campaign_types") if isinstance(body.get("campaign_types"), list) else [],
+        }
+        return result
+
+    def get_campaign(
+        self,
+        *,
+        campaign_id: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="GET",
+                path=f"/xyn/api/campaigns/{campaign_id}",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=[f"/xyn/api/campaigns/{campaign_id}", f"/api/v1/campaigns/{campaign_id}"],
+            params={"workspace_id": resolved_workspace_id},
+            base_urls=self._planner_base_urls(),
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        result["response"] = {
+            "operation": "get_campaign",
+            "workspace_id": resolved_workspace_id,
+            "campaign": {"type": "campaign", **body},
+        }
+        return result
+
+    def pause_campaign(
+        self,
+        *,
+        campaign_id: str,
+        workspace_id: str = "",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        request_payload = dict(payload or {})
+        request_payload["status"] = "paused"
+        return self.update_campaign(campaign_id=campaign_id, workspace_id=workspace_id, payload=request_payload)
+
+    def archive_campaign(
+        self,
+        *,
+        campaign_id: str,
+        workspace_id: str = "",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        request_payload = dict(payload or {})
+        request_payload["archived"] = True
+        return self.update_campaign(campaign_id=campaign_id, workspace_id=workspace_id, payload=request_payload)
+
     def create_data_source(
         self,
         *,
@@ -2830,6 +2938,65 @@ class XynApiAdapter:
         }
         return result
 
+    def run_data_source_ingest(
+        self,
+        *,
+        source_id: str,
+        workspace_id: str = "",
+        source_url: str = "",
+        jurisdiction: str = "",
+        source: str = "",
+        timeout_seconds: int = 60,
+        reprocess_unchanged: bool = False,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="POST",
+                path=f"/xyn/api/source-connectors/{source_id}/refresh",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        request_payload = dict(payload or {})
+        request_payload["workspace_id"] = resolved_workspace_id
+        if str(source_url or "").strip():
+            request_payload["source_url"] = str(source_url).strip()
+        if str(jurisdiction or "").strip():
+            request_payload["jurisdiction"] = str(jurisdiction).strip()
+        if str(source or "").strip():
+            request_payload["source"] = str(source).strip()
+        request_payload["timeout_seconds"] = int(timeout_seconds or 60)
+        request_payload["reprocess_unchanged"] = bool(reprocess_unchanged)
+        result = self._request_with_fallback_paths(
+            method="POST",
+            paths=[f"/xyn/api/source-connectors/{source_id}/refresh", f"/api/v1/source-connectors/{source_id}/refresh"],
+            json_payload=request_payload,
+            base_urls=self._planner_base_urls(),
+            allow_reissue_on_transport_error=False,
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        result["response"] = {
+            "operation": "run_data_source_ingest",
+            "workspace_id": resolved_workspace_id,
+            "source_id": source_id,
+            "source": body.get("source") if isinstance(body.get("source"), dict) else {},
+            "run": body.get("run") if isinstance(body.get("run"), dict) else {},
+            "artifact_record_id": str(body.get("artifact_record_id") or ""),
+            "parsed_record_count": int(body.get("parsed_record_count") or 0),
+            "warnings": body.get("warnings") if isinstance(body.get("warnings"), list) else [],
+        }
+        return result
+
     def _set_data_source_active_state(
         self,
         *,
@@ -2881,6 +3048,129 @@ class XynApiAdapter:
             "workspace_id": resolved_workspace_id,
             "data_source": {"type": "datasource", **body},
             "source_connector": body,
+        }
+        return result
+
+    def list_data_source_runs(
+        self,
+        *,
+        source_id: str,
+        workspace_id: str = "",
+        limit: int = 20,
+        status: str = "",
+    ) -> Dict[str, Any]:
+        source_result = self.get_data_source(source_id=source_id, workspace_id=workspace_id)
+        if not source_result.get("ok"):
+            return source_result
+        source_body = source_result.get("response") if isinstance(source_result.get("response"), dict) else {}
+        source_row = source_body.get("source_connector") if isinstance(source_body.get("source_connector"), dict) else (
+            source_body.get("data_source") if isinstance(source_body.get("data_source"), dict) else {}
+        )
+        source_key = str(source_row.get("key") or "").strip()
+        resolved_workspace_id = str(source_body.get("workspace_id") or workspace_id or "").strip()
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=["/xyn/api/orchestration/runs", "/api/v1/orchestration/runs"],
+            params={
+                "workspace_id": resolved_workspace_id,
+                "source": source_key or None,
+                "status": str(status or "").strip() or None,
+                "limit": int(limit or 20),
+            },
+            base_urls=self._planner_base_urls(),
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        rows = body.get("runs") if isinstance(body.get("runs"), list) else []
+        result["response"] = {
+            "operation": "list_data_source_runs",
+            "workspace_id": resolved_workspace_id,
+            "source_id": source_id,
+            "source_key": source_key,
+            "runs": [row for row in rows if isinstance(row, dict)],
+            "count": len([row for row in rows if isinstance(row, dict)]),
+        }
+        return result
+
+    def get_data_source_ingest_status(
+        self,
+        *,
+        source_id: str,
+        workspace_id: str = "",
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        source_result = self.get_data_source(source_id=source_id, workspace_id=workspace_id)
+        if not source_result.get("ok"):
+            return source_result
+        source_body = source_result.get("response") if isinstance(source_result.get("response"), dict) else {}
+        source_row = source_body.get("source_connector") if isinstance(source_body.get("source_connector"), dict) else (
+            source_body.get("data_source") if isinstance(source_body.get("data_source"), dict) else {}
+        )
+        runs_result = self.list_data_source_runs(source_id=source_id, workspace_id=workspace_id, limit=limit)
+        if not runs_result.get("ok"):
+            return runs_result
+        run_rows = runs_result.get("response", {}).get("runs") if isinstance(runs_result.get("response"), dict) else []
+        run_items = [row for row in run_rows if isinstance(row, dict)] if isinstance(run_rows, list) else []
+        latest = run_items[0] if run_items else {}
+        result = dict(runs_result)
+        result["response"] = {
+            "operation": "get_data_source_ingest_status",
+            "workspace_id": str(source_body.get("workspace_id") or workspace_id or "").strip(),
+            "source_id": source_id,
+            "source": {"type": "datasource", **(source_row if isinstance(source_row, dict) else {})},
+            "latest_run": latest if isinstance(latest, dict) else {},
+            "runs": run_items,
+            "count": len(run_items),
+        }
+        return result
+
+    def get_data_source_quality_report(
+        self,
+        *,
+        source_id: str,
+        workspace_id: str = "",
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="GET",
+                path="/xyn/api/ingest-artifacts",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=["/xyn/api/ingest-artifacts", "/api/v1/ingest-artifacts"],
+            params={
+                "workspace_id": resolved_workspace_id,
+                "source_id": source_id,
+                "limit": int(limit or 20),
+            },
+            base_urls=self._planner_base_urls(),
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        rows = body.get("artifacts") if isinstance(body.get("artifacts"), list) else []
+        artifacts = [row for row in rows if isinstance(row, dict)]
+        latest = artifacts[0] if artifacts else {}
+        result["response"] = {
+            "operation": "get_data_source_quality_report",
+            "workspace_id": resolved_workspace_id,
+            "source_id": source_id,
+            "artifacts": artifacts,
+            "latest_artifact": latest if isinstance(latest, dict) else {},
+            "count": len(artifacts),
+            "quality_summary_present": bool(artifacts),
         }
         return result
 
@@ -2985,6 +3275,1359 @@ class XynApiAdapter:
             "notification_rule": {"type": "notification_rule", **(target if isinstance(target, dict) else {})},
         }
         return result
+
+    def list_notification_rules(
+        self,
+        *,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="GET",
+                path="/xyn/api/notifications/targets",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=["/xyn/api/notifications/targets", "/api/v1/notifications/targets"],
+            params={"workspace_id": resolved_workspace_id},
+            base_urls=self._planner_base_urls(),
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        rows = body.get("targets") if isinstance(body.get("targets"), list) else (
+            body.get("notification_rules") if isinstance(body.get("notification_rules"), list) else []
+        )
+        normalized = [{"type": "notification_rule", **item} for item in rows if isinstance(item, dict)]
+        result["response"] = {
+            "operation": "list_notification_rules",
+            "workspace_id": resolved_workspace_id,
+            "notification_rules": normalized,
+            "count": len(normalized),
+        }
+        return result
+
+    def get_notification_rule(
+        self,
+        *,
+        target_id: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="GET",
+                path=f"/xyn/api/notifications/targets/{target_id}",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=[f"/xyn/api/notifications/targets/{target_id}", f"/api/v1/notifications/targets/{target_id}"],
+            params={"workspace_id": resolved_workspace_id},
+            base_urls=self._planner_base_urls(),
+        )
+        if not result.get("ok"):
+            if int(result.get("status_code") or 0) not in {404, 405}:
+                return result
+            listing = self.list_notification_rules(workspace_id=resolved_workspace_id)
+            if not listing.get("ok"):
+                return result
+            listing_body = listing.get("response") if isinstance(listing.get("response"), dict) else {}
+            rows = listing_body.get("notification_rules") if isinstance(listing_body.get("notification_rules"), list) else []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                row_id = str(row.get("id") or row.get("target_id") or "").strip()
+                if row_id == str(target_id).strip():
+                    return {
+                        "ok": True,
+                        "status_code": 200,
+                        "method": "GET",
+                        "path": f"/xyn/api/notifications/targets/{target_id}",
+                        "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                        "response": {
+                            "operation": "get_notification_rule",
+                            "workspace_id": resolved_workspace_id,
+                            "notification_rule": {"type": "notification_rule", **row},
+                            "fallback_source": "list_notification_rules",
+                        },
+                    }
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        target = body.get("target") if isinstance(body.get("target"), dict) else body
+        result["response"] = {
+            "operation": "get_notification_rule",
+            "workspace_id": resolved_workspace_id,
+            "notification_rule": {"type": "notification_rule", **(target if isinstance(target, dict) else {})},
+        }
+        return result
+
+    def activate_notification_rule(
+        self,
+        *,
+        target_id: str,
+        workspace_id: str = "",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        request_payload = dict(payload or {})
+        request_payload["enabled"] = True
+        return self.update_notification_rule(target_id=target_id, workspace_id=workspace_id, enabled=True, payload=request_payload)
+
+    def pause_notification_rule(
+        self,
+        *,
+        target_id: str,
+        workspace_id: str = "",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        request_payload = dict(payload or {})
+        request_payload["enabled"] = False
+        return self.update_notification_rule(target_id=target_id, workspace_id=workspace_id, enabled=False, payload=request_payload)
+
+    @staticmethod
+    def _campaign_notification_watch_key(campaign_id: str) -> str:
+        token = "".join(ch for ch in str(campaign_id or "").strip().lower() if ch.isalnum())
+        return f"campaign_notification_{token}" if token else "campaign_notification"
+
+    def _list_watches_for_workspace(self, *, workspace_id: str) -> Dict[str, Any]:
+        return self._request_with_fallback_paths(
+            method="GET",
+            paths=["/xyn/api/watches", "/api/v1/watches"],
+            params={"workspace_id": workspace_id},
+            base_urls=self._planner_base_urls(),
+        )
+
+    def _get_or_create_campaign_notification_watch(
+        self,
+        *,
+        workspace_id: str,
+        campaign_id: str,
+    ) -> Dict[str, Any]:
+        list_result = self._list_watches_for_workspace(workspace_id=workspace_id)
+        if not list_result.get("ok"):
+            return list_result
+        body = list_result.get("response") if isinstance(list_result.get("response"), dict) else {}
+        rows = body.get("watches") if isinstance(body.get("watches"), list) else []
+        existing: Dict[str, Any] | None = None
+        expected_key = self._campaign_notification_watch_key(campaign_id)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            linked_campaign_id = str(row.get("linked_campaign_id") or "").strip()
+            if linked_campaign_id != str(campaign_id).strip():
+                continue
+            if str(row.get("key") or "").strip() == expected_key:
+                existing = row
+                break
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if str(metadata.get("association_kind") or "").strip() == "campaign_notification_rule":
+                existing = row
+                break
+
+        if existing is not None:
+            return {
+                "ok": True,
+                "status_code": 200,
+                "method": "GET",
+                "path": "/xyn/api/watches",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {
+                    "operation": "ensure_campaign_notification_watch",
+                    "workspace_id": workspace_id,
+                    "campaign_id": campaign_id,
+                    "watch": existing,
+                    "created": False,
+                },
+            }
+
+        create_result = self._request_with_fallback_paths(
+            method="POST",
+            paths=["/xyn/api/watches", "/api/v1/watches"],
+            json_payload={
+                "workspace_id": workspace_id,
+                "key": expected_key,
+                "name": f"Campaign {campaign_id} notification associations",
+                "target_kind": "campaign_notification",
+                "target_ref": {"campaign_id": campaign_id},
+                "filter_criteria": {},
+                "lifecycle_state": "active",
+                "linked_campaign_id": campaign_id,
+                "metadata": {
+                    "association_kind": "campaign_notification_rule",
+                    "managed_by": "deal_finder_mcp",
+                },
+            },
+            base_urls=self._planner_base_urls(),
+            allow_reissue_on_transport_error=False,
+        )
+        if not create_result.get("ok"):
+            return create_result
+        created_watch = create_result.get("response") if isinstance(create_result.get("response"), dict) else {}
+        return {
+            "ok": True,
+            "status_code": int(create_result.get("status_code") or 201),
+            "method": "POST",
+            "path": "/xyn/api/watches",
+            "base_url": str(self._config.control_api_base_url).rstrip("/"),
+            "response": {
+                "operation": "ensure_campaign_notification_watch",
+                "workspace_id": workspace_id,
+                "campaign_id": campaign_id,
+                "watch": created_watch,
+                "created": True,
+            },
+        }
+
+    def _list_watch_subscribers(
+        self,
+        *,
+        watch_id: str,
+        workspace_id: str,
+    ) -> Dict[str, Any]:
+        return self._request_with_fallback_paths(
+            method="GET",
+            paths=[f"/xyn/api/watches/{watch_id}/subscribers", f"/api/v1/watches/{watch_id}/subscribers"],
+            params={"workspace_id": workspace_id},
+            base_urls=self._planner_base_urls(),
+        )
+
+    def add_campaign_notification_rule(
+        self,
+        *,
+        campaign_id: str,
+        target_id: str,
+        workspace_id: str = "",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="POST",
+                path=f"/xyn/api/campaigns/{campaign_id}/notification-rules/{target_id}",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        campaign_lookup = self.get_campaign(campaign_id=campaign_id, workspace_id=resolved_workspace_id)
+        if not campaign_lookup.get("ok"):
+            return campaign_lookup
+        rule_lookup = self.get_notification_rule(target_id=target_id, workspace_id=resolved_workspace_id)
+        if not rule_lookup.get("ok"):
+            return rule_lookup
+        watch_result = self._get_or_create_campaign_notification_watch(
+            workspace_id=resolved_workspace_id,
+            campaign_id=campaign_id,
+        )
+        if not watch_result.get("ok"):
+            return watch_result
+        watch_payload = watch_result.get("response") if isinstance(watch_result.get("response"), dict) else {}
+        watch = watch_payload.get("watch") if isinstance(watch_payload.get("watch"), dict) else {}
+        watch_id = str(watch.get("id") or "").strip()
+        if not watch_id:
+            return {
+                "ok": False,
+                "status_code": 502,
+                "method": "GET",
+                "path": "/xyn/api/watches",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {"error": "campaign notification watch id missing"},
+                "error_classification": "contract_mismatch",
+            }
+
+        subscribers_result = self._list_watch_subscribers(watch_id=watch_id, workspace_id=resolved_workspace_id)
+        if not subscribers_result.get("ok"):
+            return subscribers_result
+        subscribers_body = subscribers_result.get("response") if isinstance(subscribers_result.get("response"), dict) else {}
+        subscribers = subscribers_body.get("subscribers") if isinstance(subscribers_body.get("subscribers"), list) else []
+        existing = next(
+            (
+                row
+                for row in subscribers
+                if isinstance(row, dict)
+                and str(row.get("subscriber_type") or "").strip() == "delivery_target"
+                and str(row.get("subscriber_ref") or "").strip() == str(target_id).strip()
+            ),
+            None,
+        )
+        if isinstance(existing, dict) and bool(existing.get("enabled")):
+            return {
+                "ok": False,
+                "status_code": 409,
+                "method": "POST",
+                "path": f"/xyn/api/watches/{watch_id}/subscribers",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {
+                    "error": "notification rule is already attached to campaign",
+                    "operation": "add_campaign_notification_rule",
+                    "workspace_id": resolved_workspace_id,
+                    "campaign_id": campaign_id,
+                    "target_id": target_id,
+                    "watch_id": watch_id,
+                    "association": existing,
+                },
+                "error_classification": "backend_validation_error",
+            }
+
+        request_payload = dict(payload or {})
+        request_payload.update(
+            {
+                "workspace_id": resolved_workspace_id,
+                "subscriber_type": "delivery_target",
+                "subscriber_ref": str(target_id).strip(),
+                "enabled": True,
+            }
+        )
+        if not isinstance(request_payload.get("destination"), dict):
+            request_payload["destination"] = {"target_id": str(target_id).strip()}
+        if not isinstance(request_payload.get("preferences"), dict):
+            request_payload["preferences"] = {"association_kind": "campaign_notification_rule"}
+        attach_result = self._request_with_fallback_paths(
+            method="POST",
+            paths=[f"/xyn/api/watches/{watch_id}/subscribers", f"/api/v1/watches/{watch_id}/subscribers"],
+            json_payload=request_payload,
+            base_urls=self._planner_base_urls(),
+            allow_reissue_on_transport_error=False,
+        )
+        if not attach_result.get("ok"):
+            return attach_result
+        association = attach_result.get("response") if isinstance(attach_result.get("response"), dict) else {}
+        campaign_body = campaign_lookup.get("response") if isinstance(campaign_lookup.get("response"), dict) else {}
+        rule_body = rule_lookup.get("response") if isinstance(rule_lookup.get("response"), dict) else {}
+        attach_result["response"] = {
+            "operation": "add_campaign_notification_rule",
+            "workspace_id": resolved_workspace_id,
+            "campaign": campaign_body.get("campaign") if isinstance(campaign_body.get("campaign"), dict) else campaign_body,
+            "notification_rule": rule_body.get("notification_rule")
+            if isinstance(rule_body.get("notification_rule"), dict)
+            else rule_body,
+            "watch": watch,
+            "association": association,
+            "attached": True,
+            "created_watch": bool(watch_payload.get("created")),
+        }
+        return attach_result
+
+    def remove_campaign_notification_rule(
+        self,
+        *,
+        campaign_id: str,
+        target_id: str,
+        workspace_id: str = "",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="POST",
+                path=f"/xyn/api/campaigns/{campaign_id}/notification-rules/{target_id}/detach",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        campaign_lookup = self.get_campaign(campaign_id=campaign_id, workspace_id=resolved_workspace_id)
+        if not campaign_lookup.get("ok"):
+            return campaign_lookup
+        rule_lookup = self.get_notification_rule(target_id=target_id, workspace_id=resolved_workspace_id)
+        if not rule_lookup.get("ok"):
+            return rule_lookup
+        watch_list = self._list_watches_for_workspace(workspace_id=resolved_workspace_id)
+        if not watch_list.get("ok"):
+            return watch_list
+        watches = (
+            watch_list.get("response", {}).get("watches")
+            if isinstance(watch_list.get("response"), dict)
+            else []
+        )
+        watch = next(
+            (
+                row
+                for row in (watches if isinstance(watches, list) else [])
+                if isinstance(row, dict) and str(row.get("linked_campaign_id") or "").strip() == str(campaign_id).strip()
+            ),
+            None,
+        )
+        if not isinstance(watch, dict):
+            return {
+                "ok": False,
+                "status_code": 404,
+                "method": "GET",
+                "path": "/xyn/api/watches",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {
+                    "error": "no campaign notification association watch found",
+                    "operation": "remove_campaign_notification_rule",
+                    "workspace_id": resolved_workspace_id,
+                    "campaign_id": campaign_id,
+                    "target_id": target_id,
+                },
+                "error_classification": "backend_validation_error",
+            }
+        watch_id = str(watch.get("id") or "").strip()
+        subscribers_result = self._list_watch_subscribers(watch_id=watch_id, workspace_id=resolved_workspace_id)
+        if not subscribers_result.get("ok"):
+            return subscribers_result
+        subscribers = (
+            subscribers_result.get("response", {}).get("subscribers")
+            if isinstance(subscribers_result.get("response"), dict)
+            else []
+        )
+        existing = next(
+            (
+                row
+                for row in (subscribers if isinstance(subscribers, list) else [])
+                if isinstance(row, dict)
+                and str(row.get("subscriber_type") or "").strip() == "delivery_target"
+                and str(row.get("subscriber_ref") or "").strip() == str(target_id).strip()
+            ),
+            None,
+        )
+        if not isinstance(existing, dict) or not bool(existing.get("enabled")):
+            return {
+                "ok": False,
+                "status_code": 404,
+                "method": "POST",
+                "path": f"/xyn/api/watches/{watch_id}/subscribers",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {
+                    "error": "notification rule is not attached to campaign",
+                    "operation": "remove_campaign_notification_rule",
+                    "workspace_id": resolved_workspace_id,
+                    "campaign_id": campaign_id,
+                    "target_id": target_id,
+                    "watch_id": watch_id,
+                },
+                "error_classification": "backend_validation_error",
+            }
+        request_payload = dict(payload or {})
+        request_payload.update(
+            {
+                "workspace_id": resolved_workspace_id,
+                "subscriber_type": "delivery_target",
+                "subscriber_ref": str(target_id).strip(),
+                "enabled": False,
+            }
+        )
+        if not isinstance(request_payload.get("destination"), dict):
+            request_payload["destination"] = existing.get("destination") if isinstance(existing.get("destination"), dict) else {}
+        if not isinstance(request_payload.get("preferences"), dict):
+            request_payload["preferences"] = existing.get("preferences") if isinstance(existing.get("preferences"), dict) else {}
+        detach_result = self._request_with_fallback_paths(
+            method="POST",
+            paths=[f"/xyn/api/watches/{watch_id}/subscribers", f"/api/v1/watches/{watch_id}/subscribers"],
+            json_payload=request_payload,
+            base_urls=self._planner_base_urls(),
+            allow_reissue_on_transport_error=False,
+        )
+        if not detach_result.get("ok"):
+            return detach_result
+        campaign_body = campaign_lookup.get("response") if isinstance(campaign_lookup.get("response"), dict) else {}
+        rule_body = rule_lookup.get("response") if isinstance(rule_lookup.get("response"), dict) else {}
+        association = detach_result.get("response") if isinstance(detach_result.get("response"), dict) else {}
+        detach_result["response"] = {
+            "operation": "remove_campaign_notification_rule",
+            "workspace_id": resolved_workspace_id,
+            "campaign": campaign_body.get("campaign") if isinstance(campaign_body.get("campaign"), dict) else campaign_body,
+            "notification_rule": rule_body.get("notification_rule")
+            if isinstance(rule_body.get("notification_rule"), dict)
+            else rule_body,
+            "watch": watch,
+            "association": association,
+            "removed": True,
+        }
+        return detach_result
+
+    def list_campaign_notification_rules(
+        self,
+        *,
+        campaign_id: str,
+        workspace_id: str = "",
+        include_disabled: bool = False,
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="GET",
+                path=f"/xyn/api/campaigns/{campaign_id}/notification-rules",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        campaign_lookup = self.get_campaign(campaign_id=campaign_id, workspace_id=resolved_workspace_id)
+        if not campaign_lookup.get("ok"):
+            return campaign_lookup
+        watch_list = self._list_watches_for_workspace(workspace_id=resolved_workspace_id)
+        if not watch_list.get("ok"):
+            return watch_list
+        watches = (
+            watch_list.get("response", {}).get("watches")
+            if isinstance(watch_list.get("response"), dict)
+            else []
+        )
+        matching_watches = [
+            row
+            for row in (watches if isinstance(watches, list) else [])
+            if isinstance(row, dict) and str(row.get("linked_campaign_id") or "").strip() == str(campaign_id).strip()
+        ]
+        rule_map: Dict[str, Dict[str, Any]] = {}
+        associations: list[Dict[str, Any]] = []
+        for watch in matching_watches:
+            watch_id = str(watch.get("id") or "").strip()
+            if not watch_id:
+                continue
+            subscribers_result = self._list_watch_subscribers(watch_id=watch_id, workspace_id=resolved_workspace_id)
+            if not subscribers_result.get("ok"):
+                return subscribers_result
+            subscriber_rows = (
+                subscribers_result.get("response", {}).get("subscribers")
+                if isinstance(subscribers_result.get("response"), dict)
+                else []
+            )
+            for row in subscriber_rows if isinstance(subscriber_rows, list) else []:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("subscriber_type") or "").strip() != "delivery_target":
+                    continue
+                if not include_disabled and not bool(row.get("enabled")):
+                    continue
+                target_id = str(row.get("subscriber_ref") or "").strip()
+                if not target_id:
+                    continue
+                associations.append(
+                    {
+                        "watch_id": watch_id,
+                        "subscriber_id": str(row.get("id") or "").strip(),
+                        "subscriber_ref": target_id,
+                        "enabled": bool(row.get("enabled")),
+                    }
+                )
+                if target_id in rule_map:
+                    continue
+                rule_result = self.get_notification_rule(target_id=target_id, workspace_id=resolved_workspace_id)
+                if rule_result.get("ok"):
+                    rule_body = rule_result.get("response") if isinstance(rule_result.get("response"), dict) else {}
+                    rule_payload = (
+                        rule_body.get("notification_rule")
+                        if isinstance(rule_body.get("notification_rule"), dict)
+                        else rule_body
+                    )
+                    rule_map[target_id] = rule_payload if isinstance(rule_payload, dict) else {"id": target_id}
+                else:
+                    rule_map[target_id] = {"id": target_id, "missing": True}
+        campaign_body = campaign_lookup.get("response") if isinstance(campaign_lookup.get("response"), dict) else {}
+        return {
+            "ok": True,
+            "status_code": 200,
+            "method": "GET",
+            "path": "/xyn/api/watches",
+            "base_url": str(self._config.control_api_base_url).rstrip("/"),
+            "response": {
+                "operation": "list_campaign_notification_rules",
+                "workspace_id": resolved_workspace_id,
+                "campaign": campaign_body.get("campaign") if isinstance(campaign_body.get("campaign"), dict) else campaign_body,
+                "watch_ids": [str(item.get("id") or "") for item in matching_watches if isinstance(item, dict)],
+                "notification_rules": list(rule_map.values()),
+                "associations": associations,
+                "count": len(rule_map),
+            },
+        }
+
+    @staticmethod
+    def _condition_definition_watch_key(name: str) -> str:
+        token = "".join(ch for ch in str(name or "").strip().lower() if ch.isalnum())
+        return f"condition_definition_{token}" if token else "condition_definition"
+
+    @staticmethod
+    def _normalize_temporal_window_config(
+        *,
+        lookback_value: int,
+        lookback_unit: str,
+        aggregation_type: str,
+        operator: str,
+        threshold: float,
+    ) -> Dict[str, Any]:
+        allowed_units = {"hours", "days", "weeks"}
+        allowed_operators = {"eq", "gt", "gte", "lt", "lte"}
+        unit = str(lookback_unit or "").strip().lower()
+        if unit.endswith("s"):
+            unit = unit
+        elif unit in {"hour", "day", "week"}:
+            unit = f"{unit}s"
+        if unit not in allowed_units:
+            raise ValueError("lookback_unit must be one of hours, days, weeks")
+        window_value = int(lookback_value or 0)
+        if window_value <= 0:
+            raise ValueError("lookback_value must be a positive integer")
+        aggregation = str(aggregation_type or "").strip().lower() or "count"
+        if aggregation != "count":
+            raise ValueError("aggregation_type must be 'count' for this version")
+        normalized_operator = str(operator or "").strip().lower() or "gte"
+        if normalized_operator not in allowed_operators:
+            raise ValueError("operator must be one of eq, gt, gte, lt, lte")
+        normalized_threshold = float(threshold)
+        if normalized_threshold < 0:
+            raise ValueError("threshold must be >= 0")
+        return {
+            "lookback_window": {
+                "value": window_value,
+                "unit": unit,
+            },
+            "aggregation_type": aggregation,
+            "operator": normalized_operator,
+            "threshold": normalized_threshold,
+        }
+
+    @staticmethod
+    def _condition_definition_from_watch(watch: Dict[str, Any]) -> Dict[str, Any]:
+        metadata = watch.get("metadata") if isinstance(watch.get("metadata"), dict) else {}
+        condition = metadata.get("condition_definition") if isinstance(metadata.get("condition_definition"), dict) else {}
+        target_ref = watch.get("target_ref") if isinstance(watch.get("target_ref"), dict) else {}
+        filter_criteria = watch.get("filter_criteria") if isinstance(watch.get("filter_criteria"), dict) else {}
+        lookback_window = condition.get("lookback_window") if isinstance(condition.get("lookback_window"), dict) else {}
+        source_filter = condition.get("source_filter") if isinstance(condition.get("source_filter"), dict) else (
+            filter_criteria.get("source_filter") if isinstance(filter_criteria.get("source_filter"), dict) else {}
+        )
+        return {
+            "id": str(watch.get("id") or "").strip(),
+            "workspace_id": str(watch.get("workspace_id") or "").strip(),
+            "name": str(condition.get("name") or watch.get("name") or "").strip(),
+            "signal_type": str(condition.get("signal_type") or target_ref.get("signal_type") or "").strip(),
+            "source_filter": source_filter,
+            "lookback_window": {
+                "value": int(lookback_window.get("value") or 0),
+                "unit": str(lookback_window.get("unit") or "").strip(),
+            },
+            "aggregation_type": str(condition.get("aggregation_type") or "count").strip(),
+            "operator": str(condition.get("operator") or "gte").strip(),
+            "threshold": float(condition.get("threshold") or 0.0),
+            "severity": str(condition.get("severity") or "").strip(),
+            "weight": float(condition.get("weight") or 0.0),
+            "enabled": bool(
+                condition.get("enabled")
+                if "enabled" in condition
+                else str(watch.get("lifecycle_state") or "").strip().lower() != "paused"
+            ),
+            "lifecycle_state": str(watch.get("lifecycle_state") or "").strip() or ("active" if condition.get("enabled", True) else "paused"),
+            "key": str(watch.get("key") or "").strip(),
+            "metadata": metadata,
+            "created_at": watch.get("created_at"),
+            "updated_at": watch.get("updated_at"),
+        }
+
+    def create_condition_definition(
+        self,
+        *,
+        workspace_id: str = "",
+        name: str = "",
+        signal_type: str = "",
+        source_filter: Optional[Dict[str, Any]] = None,
+        lookback_value: int = 30,
+        lookback_unit: str = "days",
+        aggregation_type: str = "count",
+        operator: str = "gte",
+        threshold: float = 1.0,
+        severity: str = "",
+        weight: float = 0.0,
+        enabled: bool = True,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="POST",
+                path="/xyn/api/watches",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        normalized_name = str(name or "").strip()
+        normalized_signal_type = str(signal_type or "").strip()
+        if not normalized_name:
+            return {
+                "ok": False,
+                "status_code": 400,
+                "method": "POST",
+                "path": "/xyn/api/watches",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {"error": "name is required"},
+                "error_classification": "backend_validation_error",
+            }
+        if not normalized_signal_type:
+            return {
+                "ok": False,
+                "status_code": 400,
+                "method": "POST",
+                "path": "/xyn/api/watches",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {"error": "signal_type is required"},
+                "error_classification": "backend_validation_error",
+            }
+        try:
+            temporal = self._normalize_temporal_window_config(
+                lookback_value=lookback_value,
+                lookback_unit=lookback_unit,
+                aggregation_type=aggregation_type,
+                operator=operator,
+                threshold=threshold,
+            )
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "status_code": 400,
+                "method": "POST",
+                "path": "/xyn/api/watches",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {"error": str(exc)},
+                "error_classification": "backend_validation_error",
+            }
+        definition = {
+            "name": normalized_name,
+            "signal_type": normalized_signal_type,
+            "source_filter": source_filter if isinstance(source_filter, dict) else {},
+            **temporal,
+            "severity": str(severity or "").strip(),
+            "weight": float(weight or 0.0),
+            "enabled": bool(enabled),
+            "version": "temporal_window_count_v1",
+        }
+        request_payload = dict(payload or {})
+        metadata_payload = request_payload.get("metadata") if isinstance(request_payload.get("metadata"), dict) else {}
+        request_payload.update(
+            {
+                "workspace_id": resolved_workspace_id,
+                "key": str(request_payload.get("key") or self._condition_definition_watch_key(normalized_name)).strip(),
+                "name": normalized_name,
+                "target_kind": "condition_definition",
+                "target_ref": {"signal_type": normalized_signal_type},
+                "filter_criteria": {
+                    "signal_type": normalized_signal_type,
+                    "source_filter": definition.get("source_filter"),
+                },
+                "lifecycle_state": "active" if bool(enabled) else "paused",
+                "metadata": {
+                    **metadata_payload,
+                    "condition_kind": "temporal_window_count_v1",
+                    "managed_by": "deal_finder_mcp",
+                    "condition_definition": definition,
+                },
+            }
+        )
+        result = self._request_with_fallback_paths(
+            method="POST",
+            paths=["/xyn/api/watches", "/api/v1/watches"],
+            json_payload=request_payload,
+            base_urls=self._planner_base_urls(),
+            allow_reissue_on_transport_error=False,
+        )
+        if not result.get("ok"):
+            return result
+        watch = result.get("response") if isinstance(result.get("response"), dict) else {}
+        result["response"] = {
+            "operation": "create_condition_definition",
+            "workspace_id": resolved_workspace_id,
+            "condition_definition": self._condition_definition_from_watch(watch if isinstance(watch, dict) else {}),
+            "watch": watch,
+        }
+        return result
+
+    def list_condition_definitions(
+        self,
+        *,
+        workspace_id: str = "",
+        include_disabled: bool = True,
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="GET",
+                path="/xyn/api/watches",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        watches_result = self._list_watches_for_workspace(workspace_id=resolved_workspace_id)
+        if not watches_result.get("ok"):
+            return watches_result
+        body = watches_result.get("response") if isinstance(watches_result.get("response"), dict) else {}
+        rows = body.get("watches") if isinstance(body.get("watches"), list) else []
+        definitions: list[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if (
+                str(row.get("target_kind") or "").strip() != "condition_definition"
+                and str(metadata.get("condition_kind") or "").strip() != "temporal_window_count_v1"
+            ):
+                continue
+            definition = self._condition_definition_from_watch(row)
+            if not include_disabled and not bool(definition.get("enabled")):
+                continue
+            definitions.append(definition)
+        return {
+            "ok": True,
+            "status_code": 200,
+            "method": "GET",
+            "path": "/xyn/api/watches",
+            "base_url": str(self._config.control_api_base_url).rstrip("/"),
+            "response": {
+                "operation": "list_condition_definitions",
+                "workspace_id": resolved_workspace_id,
+                "condition_definitions": definitions,
+                "count": len(definitions),
+            },
+        }
+
+    def get_condition_definition(
+        self,
+        *,
+        condition_id: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="GET",
+                path=f"/xyn/api/watches/{condition_id}",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=[f"/xyn/api/watches/{condition_id}", f"/api/v1/watches/{condition_id}"],
+            params={"workspace_id": resolved_workspace_id},
+            base_urls=self._planner_base_urls(),
+        )
+        if not result.get("ok"):
+            return result
+        watch = result.get("response") if isinstance(result.get("response"), dict) else {}
+        definition = self._condition_definition_from_watch(watch if isinstance(watch, dict) else {})
+        if not str(definition.get("id") or "").strip():
+            return {
+                "ok": False,
+                "status_code": 404,
+                "method": "GET",
+                "path": f"/xyn/api/watches/{condition_id}",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {"error": "condition definition not found"},
+                "error_classification": "backend_validation_error",
+            }
+        result["response"] = {
+            "operation": "get_condition_definition",
+            "workspace_id": resolved_workspace_id,
+            "condition_definition": definition,
+            "watch": watch,
+        }
+        return result
+
+    def update_condition_definition(
+        self,
+        *,
+        condition_id: str,
+        workspace_id: str = "",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        current = self.get_condition_definition(condition_id=condition_id, workspace_id=workspace_id)
+        if not current.get("ok"):
+            return current
+        current_body = current.get("response") if isinstance(current.get("response"), dict) else {}
+        current_definition = (
+            current_body.get("condition_definition")
+            if isinstance(current_body.get("condition_definition"), dict)
+            else {}
+        )
+        current_watch = current_body.get("watch") if isinstance(current_body.get("watch"), dict) else {}
+        updates = dict(payload or {})
+        next_name = str(updates.get("name") or current_definition.get("name") or "").strip()
+        next_signal_type = str(updates.get("signal_type") or current_definition.get("signal_type") or "").strip()
+        if not next_name:
+            return {
+                "ok": False,
+                "status_code": 400,
+                "method": "PATCH",
+                "path": f"/xyn/api/watches/{condition_id}",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {"error": "name is required"},
+                "error_classification": "backend_validation_error",
+            }
+        if not next_signal_type:
+            return {
+                "ok": False,
+                "status_code": 400,
+                "method": "PATCH",
+                "path": f"/xyn/api/watches/{condition_id}",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {"error": "signal_type is required"},
+                "error_classification": "backend_validation_error",
+            }
+        lookback_window = updates.get("lookback_window") if isinstance(updates.get("lookback_window"), dict) else {}
+        current_lookback = (
+            current_definition.get("lookback_window")
+            if isinstance(current_definition.get("lookback_window"), dict)
+            else {}
+        )
+        try:
+            temporal = self._normalize_temporal_window_config(
+                lookback_value=int(
+                    updates.get("lookback_value")
+                    or lookback_window.get("value")
+                    or current_lookback.get("value")
+                    or 0
+                ),
+                lookback_unit=str(
+                    updates.get("lookback_unit")
+                    or lookback_window.get("unit")
+                    or current_lookback.get("unit")
+                    or ""
+                ),
+                aggregation_type=str(
+                    updates.get("aggregation_type")
+                    or current_definition.get("aggregation_type")
+                    or "count"
+                ),
+                operator=str(updates.get("operator") or current_definition.get("operator") or "gte"),
+                threshold=float(updates.get("threshold") if "threshold" in updates else current_definition.get("threshold") or 0),
+            )
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "status_code": 400,
+                "method": "PATCH",
+                "path": f"/xyn/api/watches/{condition_id}",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {"error": str(exc)},
+                "error_classification": "backend_validation_error",
+            }
+        next_enabled = bool(updates.get("enabled")) if "enabled" in updates else bool(current_definition.get("enabled", True))
+        next_definition = {
+            "name": next_name,
+            "signal_type": next_signal_type,
+            "source_filter": (
+                updates.get("source_filter")
+                if isinstance(updates.get("source_filter"), dict)
+                else current_definition.get("source_filter")
+                if isinstance(current_definition.get("source_filter"), dict)
+                else {}
+            ),
+            **temporal,
+            "severity": str(updates.get("severity") or current_definition.get("severity") or "").strip(),
+            "weight": float(updates.get("weight") if "weight" in updates else current_definition.get("weight") or 0.0),
+            "enabled": next_enabled,
+            "version": "temporal_window_count_v1",
+        }
+        resolved_workspace_id = str(current_body.get("workspace_id") or workspace_id or "").strip()
+        watch_metadata = current_watch.get("metadata") if isinstance(current_watch.get("metadata"), dict) else {}
+        request_payload = {
+            "workspace_id": resolved_workspace_id,
+            "name": next_name,
+            "target_ref": {"signal_type": next_signal_type},
+            "filter_criteria": {
+                "signal_type": next_signal_type,
+                "source_filter": next_definition.get("source_filter"),
+            },
+            "lifecycle_state": "active" if next_enabled else "paused",
+            "metadata": {
+                **watch_metadata,
+                "condition_kind": "temporal_window_count_v1",
+                "managed_by": "deal_finder_mcp",
+                "condition_definition": next_definition,
+            },
+        }
+        result = self._request_with_fallback_paths(
+            method="PATCH",
+            paths=[f"/xyn/api/watches/{condition_id}", f"/api/v1/watches/{condition_id}"],
+            json_payload=request_payload,
+            base_urls=self._planner_base_urls(),
+            allow_reissue_on_transport_error=False,
+        )
+        if not result.get("ok"):
+            return result
+        watch = result.get("response") if isinstance(result.get("response"), dict) else {}
+        result["response"] = {
+            "operation": "update_condition_definition",
+            "workspace_id": resolved_workspace_id,
+            "condition_definition": self._condition_definition_from_watch(watch if isinstance(watch, dict) else {}),
+            "watch": watch,
+        }
+        return result
+
+    def activate_condition_definition(
+        self,
+        *,
+        condition_id: str,
+        workspace_id: str = "",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        request_payload = dict(payload or {})
+        request_payload["enabled"] = True
+        return self.update_condition_definition(
+            condition_id=condition_id,
+            workspace_id=workspace_id,
+            payload=request_payload,
+        )
+
+    def pause_condition_definition(
+        self,
+        *,
+        condition_id: str,
+        workspace_id: str = "",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        request_payload = dict(payload or {})
+        request_payload["enabled"] = False
+        return self.update_condition_definition(
+            condition_id=condition_id,
+            workspace_id=workspace_id,
+            payload=request_payload,
+        )
+
+    @staticmethod
+    def _normalize_lookup_token(value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+    @staticmethod
+    def _flatten_owner_candidates(payload: Any) -> Dict[str, str]:
+        rows: Dict[str, str] = {}
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                normalized_key = XynApiAdapter._normalize_lookup_token(key)
+                if not normalized_key:
+                    continue
+                if isinstance(value, str):
+                    text = str(value or "").strip()
+                    if text:
+                        rows[normalized_key] = text
+                    continue
+                nested = XynApiAdapter._flatten_owner_candidates(value)
+                for nested_key, nested_value in nested.items():
+                    rows.setdefault(nested_key, nested_value)
+        elif isinstance(payload, list):
+            for item in payload:
+                nested = XynApiAdapter._flatten_owner_candidates(item)
+                for nested_key, nested_value in nested.items():
+                    rows.setdefault(nested_key, nested_value)
+        return rows
+
+    @staticmethod
+    def _extract_owner_snapshot_from_crosswalk(crosswalk: Dict[str, Any]) -> Dict[str, Any]:
+        explanation = crosswalk.get("explanation") if isinstance(crosswalk.get("explanation"), dict) else {}
+        metadata = crosswalk.get("metadata") if isinstance(crosswalk.get("metadata"), dict) else {}
+        flattened = {
+            **XynApiAdapter._flatten_owner_candidates(explanation),
+            **XynApiAdapter._flatten_owner_candidates(metadata),
+        }
+        owner_keys = (
+            "ownername",
+            "owner",
+            "taxpayername",
+            "taxpayer",
+            "propertyowner",
+            "ownerfullname",
+        )
+        mailing_keys = (
+            "owneraddress",
+            "mailingaddress",
+            "taxpayeraddress",
+            "mailaddress",
+            "ownerstreet",
+        )
+        owner_name = ""
+        for key in owner_keys:
+            owner_name = str(flattened.get(key) or "").strip()
+            if owner_name:
+                break
+        mailing_address = ""
+        for key in mailing_keys:
+            mailing_address = str(flattened.get(key) or "").strip()
+            if mailing_address:
+                break
+        if not owner_name:
+            return {}
+        return {
+            "owner_name": owner_name,
+            "owner_name_normalized": XynApiAdapter._normalize_lookup_token(owner_name),
+            "mailing_address": mailing_address,
+            "parcel_id": str(crosswalk.get("parcel_id") or "").strip(),
+            "source_id": str(crosswalk.get("source_id") or "").strip(),
+            "source_record_id": str(crosswalk.get("adapted_record_id") or metadata.get("adapted_record_id") or "").strip(),
+            "effective_date": str(crosswalk.get("valid_from") or crosswalk.get("created_at") or "").strip() or None,
+            "match_method": str(crosswalk.get("resolution_method") or "").strip(),
+            "match_score": float(crosswalk.get("confidence") or 0.0),
+            "provenance": {
+                "crosswalk_id": str(crosswalk.get("id") or "").strip(),
+                "reason": str(crosswalk.get("reason") or "").strip(),
+                "source_type": str(metadata.get("source_format") or "").strip() or None,
+                "adapter_kind": str(metadata.get("adapter_kind") or "").strip() or None,
+            },
+        }
+
+    def resolve_parcel_by_address(
+        self,
+        *,
+        address: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="GET",
+                path="/xyn/api/parcel-identities/lookup",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        normalized_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        address_text = str(address or "").strip()
+        if not address_text:
+            return {
+                "ok": False,
+                "status_code": 400,
+                "method": "GET",
+                "path": "/xyn/api/parcel-identities/lookup",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {"error": "address is required"},
+                "error_classification": "backend_validation_error",
+            }
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=["/xyn/api/parcel-identities/lookup", "/api/v1/parcel-identities/lookup"],
+            params={
+                "workspace_id": normalized_workspace_id,
+                "namespace": "address",
+                "value": address_text,
+            },
+            base_urls=self._planner_base_urls(),
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        parcel = body.get("parcel") if isinstance(body.get("parcel"), dict) else {}
+        if not parcel:
+            result["response"] = {
+                "operation": "resolve_parcel_by_address",
+                "workspace_id": normalized_workspace_id,
+                "address": address_text,
+                "parcel": None,
+                "match_status": "no_match",
+                "match_method": "address_alias_lookup",
+                "match_score": 0.0,
+            }
+            return result
+        aliases = parcel.get("aliases") if isinstance(parcel.get("aliases"), list) else []
+        normalized_input = self._normalize_lookup_token(address_text)
+        matching_aliases = [
+            row
+            for row in aliases
+            if isinstance(row, dict)
+            and str(row.get("namespace") or "").strip().lower() == "address"
+            and (
+                self._normalize_lookup_token(row.get("value_normalized")) == normalized_input
+                or self._normalize_lookup_token(row.get("value_raw")) == normalized_input
+            )
+        ]
+        best_confidence = max([float(row.get("confidence") or 0.0) for row in matching_aliases], default=0.0)
+        match_status = "exact_match" if best_confidence >= 0.75 else "low_confidence"
+        result["response"] = {
+            "operation": "resolve_parcel_by_address",
+            "workspace_id": normalized_workspace_id,
+            "address": address_text,
+            "parcel": parcel,
+            "match_status": match_status,
+            "match_method": "address_alias_lookup",
+            "match_score": best_confidence,
+            "matched_aliases": matching_aliases,
+        }
+        return result
+
+    def get_owner_snapshot_by_parcel(
+        self,
+        *,
+        parcel_id: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="GET",
+                path=f"/xyn/api/parcel-identities/{parcel_id}",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        normalized_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        parcel_result = self._request_with_fallback_paths(
+            method="GET",
+            paths=[f"/xyn/api/parcel-identities/{parcel_id}", f"/api/v1/parcel-identities/{parcel_id}"],
+            params={"workspace_id": normalized_workspace_id},
+            base_urls=self._planner_base_urls(),
+        )
+        if not parcel_result.get("ok"):
+            return parcel_result
+        parcel_body = parcel_result.get("response") if isinstance(parcel_result.get("response"), dict) else {}
+        crosswalk_result = self._request_with_fallback_paths(
+            method="GET",
+            paths=["/xyn/api/parcel-crosswalks", "/api/v1/parcel-crosswalks"],
+            params={
+                "workspace_id": normalized_workspace_id,
+                "parcel_id": str(parcel_id).strip(),
+                "status": "resolved",
+                "limit": 200,
+            },
+            base_urls=self._planner_base_urls(),
+        )
+        if not crosswalk_result.get("ok"):
+            return crosswalk_result
+        crosswalk_body = crosswalk_result.get("response") if isinstance(crosswalk_result.get("response"), dict) else {}
+        crosswalk_rows = crosswalk_body.get("crosswalks") if isinstance(crosswalk_body.get("crosswalks"), list) else []
+        owner_snapshots: list[Dict[str, Any]] = []
+        dedup_keys: set[str] = set()
+        for row in crosswalk_rows:
+            if not isinstance(row, dict):
+                continue
+            snapshot = self._extract_owner_snapshot_from_crosswalk(row)
+            if not snapshot:
+                continue
+            dedup_key = f"{snapshot.get('owner_name_normalized')}::{snapshot.get('source_record_id')}::{snapshot.get('parcel_id')}"
+            if dedup_key in dedup_keys:
+                continue
+            dedup_keys.add(dedup_key)
+            owner_snapshots.append(snapshot)
+        owner_available = bool(owner_snapshots)
+        primary = owner_snapshots[0] if owner_snapshots else None
+        owner_status = "owner_available" if owner_available else "owner_unavailable"
+        crosswalk_result["response"] = {
+            "operation": "get_owner_snapshot_by_parcel",
+            "workspace_id": normalized_workspace_id,
+            "parcel": parcel_body,
+            "owner_status": owner_status,
+            "owner_available": owner_available,
+            "owner_snapshot": primary,
+            "owner_snapshots": owner_snapshots,
+            "count": len(owner_snapshots),
+            "unavailable_reason": None if owner_available else "owner fields not present in resolved parcel crosswalk evidence",
+        }
+        return crosswalk_result
+
+    def get_property_owner_by_address(
+        self,
+        *,
+        address: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        resolution = self.resolve_parcel_by_address(address=address, workspace_id=workspace_id)
+        if not resolution.get("ok"):
+            return resolution
+        resolution_body = resolution.get("response") if isinstance(resolution.get("response"), dict) else {}
+        parcel = resolution_body.get("parcel") if isinstance(resolution_body.get("parcel"), dict) else {}
+        if not parcel:
+            return {
+                "ok": True,
+                "status_code": 200,
+                "method": "GET",
+                "path": "/xyn/api/parcel-identities/lookup",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {
+                    "operation": "get_property_owner_by_address",
+                    "workspace_id": str(resolution_body.get("workspace_id") or workspace_id or "").strip(),
+                    "address": str(address or "").strip(),
+                    "match_status": "no_match",
+                    "parcel": None,
+                    "owner_status": "no_match",
+                    "owner_available": False,
+                    "owner_snapshot": None,
+                    "owner_snapshots": [],
+                },
+            }
+        owner_result = self.get_owner_snapshot_by_parcel(
+            parcel_id=str(parcel.get("id") or "").strip(),
+            workspace_id=str(resolution_body.get("workspace_id") or workspace_id or "").strip(),
+        )
+        if not owner_result.get("ok"):
+            return owner_result
+        owner_body = owner_result.get("response") if isinstance(owner_result.get("response"), dict) else {}
+        owner_result["response"] = {
+            "operation": "get_property_owner_by_address",
+            "workspace_id": str(resolution_body.get("workspace_id") or "").strip(),
+            "address": str(address or "").strip(),
+            "match_status": str(resolution_body.get("match_status") or "no_match"),
+            "match_method": str(resolution_body.get("match_method") or "address_alias_lookup"),
+            "match_score": float(resolution_body.get("match_score") or 0.0),
+            "parcel": parcel,
+            "owner_status": str(owner_body.get("owner_status") or "owner_unavailable"),
+            "owner_available": bool(owner_body.get("owner_available")),
+            "owner_snapshot": owner_body.get("owner_snapshot") if isinstance(owner_body.get("owner_snapshot"), dict) else None,
+            "owner_snapshots": owner_body.get("owner_snapshots") if isinstance(owner_body.get("owner_snapshots"), list) else [],
+            "unavailable_reason": str(owner_body.get("unavailable_reason") or "") or None,
+            "provenance": {
+                "parcel_lookup_operation": "resolve_parcel_by_address",
+                "owner_lookup_operation": "get_owner_snapshot_by_parcel",
+            },
+        }
+        return owner_result
 
     def _workspace_intent_for_artifact_scope(
         self,
