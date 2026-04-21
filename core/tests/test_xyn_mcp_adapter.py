@@ -151,6 +151,20 @@ class XynMcpAdapterTests(TestCase):
 
         self.assertEqual(sorted(server.tools.keys()), sorted(TOOL_NAMES))
 
+    def test_register_xyn_tools_preserves_callable_signature_for_schema_inference(self) -> None:
+        adapter = mock.Mock()
+        server = FakeMcpServer()
+
+        register_xyn_tools(server, adapter)
+
+        list_sig = inspect.signature(server.tools["list_data_sources"]["fn"])
+        self.assertEqual(list(list_sig.parameters.keys()), ["workspace_id"])
+        self.assertNotIn("args", list_sig.parameters)
+        self.assertNotIn("kwargs", list_sig.parameters)
+
+        get_sig = inspect.signature(server.tools["get_data_source"]["fn"])
+        self.assertEqual(list(get_sig.parameters.keys()), ["source_id", "workspace_id"])
+
     def test_resolve_binding_allowed_tools_deal_finder_profile_filters_root_tools(self) -> None:
         binding = McpEndpointBinding(
             name="deal-finder",

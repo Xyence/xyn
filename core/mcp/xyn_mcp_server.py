@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import secrets
 import json
+import inspect
+from functools import wraps
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple, List
@@ -344,6 +346,9 @@ def _register_tool(mcp_server: Any, *, name: str, description: str, fn: Callable
     enabled_tools = getattr(mcp_server, "_xyn_enabled_tools", None)
     if isinstance(enabled_tools, set) and enabled_tools and name not in enabled_tools:
         return
+    fn_signature = inspect.signature(fn)
+
+    @wraps(fn)
     def _guarded_tool(*args, **kwargs):
         allowed = _CURRENT_ALLOWED_TOOLS.get()
         if allowed and name not in allowed:
@@ -359,6 +364,7 @@ def _register_tool(mcp_server: Any, *, name: str, description: str, fn: Callable
                 },
             }
         return fn(*args, **kwargs)
+    _guarded_tool.__signature__ = fn_signature  # type: ignore[attr-defined]
 
     if hasattr(mcp_server, "add_tool"):
         mcp_server.add_tool(_guarded_tool, name=name, description=description)
