@@ -2498,6 +2498,301 @@ class XynApiAdapter:
         }
         return result
 
+    def create_campaign(
+        self,
+        *,
+        workspace_id: str = "",
+        name: str = "",
+        campaign_type: str = "generic",
+        status: str = "draft",
+        description: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="POST",
+                path="/xyn/api/campaigns",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        request_payload = dict(payload or {})
+        request_payload["workspace_id"] = resolved_workspace_id
+        if str(name or "").strip():
+            request_payload["name"] = str(name).strip()
+        if str(campaign_type or "").strip():
+            request_payload["campaign_type"] = str(campaign_type).strip()
+        if str(status or "").strip():
+            request_payload["status"] = str(status).strip()
+        if str(description or "").strip():
+            request_payload["description"] = str(description).strip()
+        if isinstance(metadata, dict):
+            request_payload["metadata"] = metadata
+
+        result = self._request_with_fallback_paths(
+            method="POST",
+            paths=["/xyn/api/campaigns", "/api/v1/campaigns"],
+            json_payload=request_payload,
+            base_urls=self._planner_base_urls(),
+            allow_reissue_on_transport_error=False,
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        result["response"] = {
+            "operation": "create_campaign",
+            "workspace_id": resolved_workspace_id,
+            "campaign": {"type": "campaign", **body},
+        }
+        return result
+
+    def update_campaign(
+        self,
+        *,
+        campaign_id: str,
+        workspace_id: str = "",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="PATCH",
+                path=f"/xyn/api/campaigns/{campaign_id}",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        request_payload = dict(payload or {})
+        request_payload["workspace_id"] = resolved_workspace_id
+        result = self._request_with_fallback_paths(
+            method="PATCH",
+            paths=[f"/xyn/api/campaigns/{campaign_id}", f"/api/v1/campaigns/{campaign_id}"],
+            json_payload=request_payload,
+            base_urls=self._planner_base_urls(),
+            allow_reissue_on_transport_error=False,
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        result["response"] = {
+            "operation": "update_campaign",
+            "workspace_id": resolved_workspace_id,
+            "campaign": {"type": "campaign", **body},
+        }
+        return result
+
+    def create_data_source(
+        self,
+        *,
+        workspace_id: str = "",
+        key: str = "",
+        name: str = "",
+        source_type: str = "generic",
+        source_mode: str = "manual",
+        refresh_cadence_seconds: int = 0,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="POST",
+                path="/xyn/api/source-connectors",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        request_payload = dict(payload or {})
+        request_payload["workspace_id"] = resolved_workspace_id
+        if str(key or "").strip():
+            request_payload["key"] = str(key).strip()
+        if str(name or "").strip():
+            request_payload["name"] = str(name).strip()
+        request_payload["source_type"] = str(source_type or "generic").strip() or "generic"
+        request_payload["source_mode"] = str(source_mode or "manual").strip() or "manual"
+        request_payload["refresh_cadence_seconds"] = int(refresh_cadence_seconds or 0)
+
+        result = self._request_with_fallback_paths(
+            method="POST",
+            paths=["/xyn/api/source-connectors", "/api/v1/source-connectors"],
+            json_payload=request_payload,
+            base_urls=self._planner_base_urls(),
+            allow_reissue_on_transport_error=False,
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        result["response"] = {
+            "operation": "create_data_source",
+            "workspace_id": resolved_workspace_id,
+            "data_source": {"type": "datasource", **body},
+            "source_connector": body,
+        }
+        return result
+
+    def update_data_source(
+        self,
+        *,
+        source_id: str,
+        workspace_id: str = "",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="PATCH",
+                path=f"/xyn/api/source-connectors/{source_id}",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        request_payload = dict(payload or {})
+        request_payload["workspace_id"] = resolved_workspace_id
+        result = self._request_with_fallback_paths(
+            method="PATCH",
+            paths=[f"/xyn/api/source-connectors/{source_id}", f"/api/v1/source-connectors/{source_id}"],
+            json_payload=request_payload,
+            base_urls=self._planner_base_urls(),
+            allow_reissue_on_transport_error=False,
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        result["response"] = {
+            "operation": "update_data_source",
+            "workspace_id": resolved_workspace_id,
+            "data_source": {"type": "datasource", **body},
+            "source_connector": body,
+        }
+        return result
+
+    def create_notification_rule(
+        self,
+        *,
+        workspace_id: str = "",
+        address: str = "",
+        channel: str = "email",
+        event: str = "campaign",
+        enabled: bool = True,
+        is_primary: bool = False,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="POST",
+                path="/xyn/api/notifications/targets",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        request_payload = dict(payload or {})
+        request_payload["workspace_id"] = resolved_workspace_id
+        if str(address or "").strip():
+            request_payload["address"] = str(address).strip()
+        request_payload["channel"] = str(channel or "email").strip() or "email"
+        request_payload["event"] = str(event or "campaign").strip() or "campaign"
+        request_payload["enabled"] = bool(enabled)
+        request_payload["is_primary"] = bool(is_primary)
+
+        result = self._request_with_fallback_paths(
+            method="POST",
+            paths=["/xyn/api/notifications/targets", "/api/v1/notifications/targets"],
+            json_payload=request_payload,
+            base_urls=self._planner_base_urls(),
+            allow_reissue_on_transport_error=False,
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        target = body.get("target") if isinstance(body.get("target"), dict) else body
+        result["response"] = {
+            "operation": "create_notification_rule",
+            "workspace_id": resolved_workspace_id,
+            "notification_rule": {
+                "type": "notification_rule",
+                "channel": request_payload.get("channel"),
+                "event": request_payload.get("event"),
+                **(target if isinstance(target, dict) else {}),
+            },
+        }
+        return result
+
+    def update_notification_rule(
+        self,
+        *,
+        target_id: str,
+        workspace_id: str = "",
+        enabled: bool = True,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="PATCH",
+                path=f"/xyn/api/notifications/targets/{target_id}",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        request_payload = dict(payload or {})
+        request_payload["workspace_id"] = resolved_workspace_id
+        request_payload["enabled"] = bool(enabled)
+        result = self._request_with_fallback_paths(
+            method="PATCH",
+            paths=[f"/xyn/api/notifications/targets/{target_id}", f"/api/v1/notifications/targets/{target_id}"],
+            json_payload=request_payload,
+            base_urls=self._planner_base_urls(),
+            allow_reissue_on_transport_error=False,
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        target = body.get("target") if isinstance(body.get("target"), dict) else body
+        result["response"] = {
+            "operation": "update_notification_rule",
+            "workspace_id": resolved_workspace_id,
+            "notification_rule": {"type": "notification_rule", **(target if isinstance(target, dict) else {})},
+        }
+        return result
+
     def _workspace_intent_for_artifact_scope(
         self,
         *,

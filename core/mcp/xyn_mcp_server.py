@@ -95,6 +95,12 @@ TOOL_NAMES = [
     "promote_change_effort",
     "declare_release",
     "get_artifact_provenance",
+    "create_campaign",
+    "update_campaign",
+    "create_data_source",
+    "update_data_source",
+    "create_notification_rule",
+    "update_notification_rule",
 ]
 
 _TOOL_ROUTE_PROBES: Dict[str, tuple[str, str, str]] = {
@@ -665,6 +671,98 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
     def get_artifact_provenance(artifact_slug: str, workspace_id: str = "") -> Dict[str, Any]:
         return adapter.get_artifact_provenance(artifact_slug=artifact_slug, workspace_id=workspace_id)
 
+    def create_campaign(
+        workspace_id: str = "",
+        name: str = "",
+        campaign_type: str = "generic",
+        status: str = "draft",
+        description: str = "",
+        metadata: Dict[str, Any] | None = None,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.create_campaign(
+            workspace_id=workspace_id,
+            name=name,
+            campaign_type=campaign_type,
+            status=status,
+            description=description,
+            metadata=metadata,
+            payload=payload,
+        )
+
+    def update_campaign(
+        campaign_id: str,
+        workspace_id: str = "",
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.update_campaign(
+            campaign_id=campaign_id,
+            workspace_id=workspace_id,
+            payload=payload,
+        )
+
+    def create_data_source(
+        workspace_id: str = "",
+        key: str = "",
+        name: str = "",
+        source_type: str = "generic",
+        source_mode: str = "manual",
+        refresh_cadence_seconds: int = 0,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.create_data_source(
+            workspace_id=workspace_id,
+            key=key,
+            name=name,
+            source_type=source_type,
+            source_mode=source_mode,
+            refresh_cadence_seconds=refresh_cadence_seconds,
+            payload=payload,
+        )
+
+    def update_data_source(
+        source_id: str,
+        workspace_id: str = "",
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.update_data_source(
+            source_id=source_id,
+            workspace_id=workspace_id,
+            payload=payload,
+        )
+
+    def create_notification_rule(
+        workspace_id: str = "",
+        address: str = "",
+        channel: str = "email",
+        event: str = "campaign",
+        enabled: bool = True,
+        is_primary: bool = False,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.create_notification_rule(
+            workspace_id=workspace_id,
+            address=address,
+            channel=channel,
+            event=event,
+            enabled=enabled,
+            is_primary=is_primary,
+            payload=payload,
+        )
+
+    def update_notification_rule(
+        target_id: str,
+        workspace_id: str = "",
+        enabled: bool = True,
+        payload: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return adapter.update_notification_rule(
+            target_id=target_id,
+            workspace_id=workspace_id,
+            enabled=enabled,
+            payload=payload,
+        )
+
     _register_tool(
         mcp_server,
         name="list_applications",
@@ -1122,6 +1220,42 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
         name="get_artifact_provenance",
         description="Read artifact provenance timeline across efforts, promotions, and release declarations.",
         fn=get_artifact_provenance,
+    )
+    _register_tool(
+        mcp_server,
+        name="create_campaign",
+        description="Create a campaign within a workspace.",
+        fn=create_campaign,
+    )
+    _register_tool(
+        mcp_server,
+        name="update_campaign",
+        description="Update a campaign within a workspace.",
+        fn=update_campaign,
+    )
+    _register_tool(
+        mcp_server,
+        name="create_data_source",
+        description="Create a source connector (data source) within a workspace.",
+        fn=create_data_source,
+    )
+    _register_tool(
+        mcp_server,
+        name="update_data_source",
+        description="Update a source connector (data source) within a workspace.",
+        fn=update_data_source,
+    )
+    _register_tool(
+        mcp_server,
+        name="create_notification_rule",
+        description="Create a notification target/rule for a workspace.",
+        fn=create_notification_rule,
+    )
+    _register_tool(
+        mcp_server,
+        name="update_notification_rule",
+        description="Update a notification target/rule for a workspace.",
+        fn=update_notification_rule,
     )
 
 

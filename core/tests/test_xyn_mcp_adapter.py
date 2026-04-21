@@ -3325,6 +3325,20 @@ class XynMcpAdapterTests(TestCase):
         adapter.promote_change_effort.return_value = {"ok": True, "status_code": 200, "response": {"promotion": {"id": "p1"}}}
         adapter.declare_release.return_value = {"ok": True, "status_code": 200, "response": {"release": {"id": "r1"}}}
         adapter.get_artifact_provenance.return_value = {"ok": True, "status_code": 200, "response": {"artifact_slug": "xyn-api"}}
+        adapter.create_campaign.return_value = {"ok": True, "status_code": 201, "response": {"campaign": {"id": "cmp-1"}}}
+        adapter.update_campaign.return_value = {"ok": True, "status_code": 200, "response": {"campaign": {"id": "cmp-1"}}}
+        adapter.create_data_source.return_value = {"ok": True, "status_code": 201, "response": {"data_source": {"id": "ds-1"}}}
+        adapter.update_data_source.return_value = {"ok": True, "status_code": 200, "response": {"data_source": {"id": "ds-1"}}}
+        adapter.create_notification_rule.return_value = {
+            "ok": True,
+            "status_code": 201,
+            "response": {"notification_rule": {"id": "nr-1"}},
+        }
+        adapter.update_notification_rule.return_value = {
+            "ok": True,
+            "status_code": 200,
+            "response": {"notification_rule": {"id": "nr-1"}},
+        }
         adapter.assess_change_session_readiness.return_value = {"ok": True, "status_code": 200, "response": {"assessment_state": "ready"}}
         server = FakeMcpServer()
         register_xyn_tools(server, adapter)
@@ -3345,6 +3359,56 @@ class XynMcpAdapterTests(TestCase):
         adapter.declare_release.assert_called_once_with(payload={"workspace_id": "w1"})
         server.tools["get_artifact_provenance"]["fn"](artifact_slug="xyn-api", workspace_id="w1")
         adapter.get_artifact_provenance.assert_called_once_with(artifact_slug="xyn-api", workspace_id="w1")
+        server.tools["create_campaign"]["fn"](workspace_id="w1", name="Retail Expansion")
+        adapter.create_campaign.assert_called_once_with(
+            workspace_id="w1",
+            name="Retail Expansion",
+            campaign_type="generic",
+            status="draft",
+            description="",
+            metadata=None,
+            payload=None,
+        )
+        server.tools["update_campaign"]["fn"](campaign_id="cmp-1", workspace_id="w1", payload={"status": "active"})
+        adapter.update_campaign.assert_called_once_with(campaign_id="cmp-1", workspace_id="w1", payload={"status": "active"})
+        server.tools["create_data_source"]["fn"](workspace_id="w1", key="county-records", name="County Records")
+        adapter.create_data_source.assert_called_once_with(
+            workspace_id="w1",
+            key="county-records",
+            name="County Records",
+            source_type="generic",
+            source_mode="manual",
+            refresh_cadence_seconds=0,
+            payload=None,
+        )
+        server.tools["update_data_source"]["fn"](source_id="ds-1", workspace_id="w1", payload={"refresh_cadence_seconds": 86400})
+        adapter.update_data_source.assert_called_once_with(
+            source_id="ds-1",
+            workspace_id="w1",
+            payload={"refresh_cadence_seconds": 86400},
+        )
+        server.tools["create_notification_rule"]["fn"](
+            workspace_id="w1",
+            address="alerts@example.com",
+            channel="slack",
+            event="campaign",
+        )
+        adapter.create_notification_rule.assert_called_once_with(
+            workspace_id="w1",
+            address="alerts@example.com",
+            channel="slack",
+            event="campaign",
+            enabled=True,
+            is_primary=False,
+            payload=None,
+        )
+        server.tools["update_notification_rule"]["fn"](target_id="nr-1", workspace_id="w1", enabled=False)
+        adapter.update_notification_rule.assert_called_once_with(
+            target_id="nr-1",
+            workspace_id="w1",
+            enabled=False,
+            payload=None,
+        )
         server.tools["list_change_session_pending_checkpoints"]["fn"](application_id="app-1", session_id="sess-1")
         adapter.list_change_session_pending_checkpoints.assert_called_once_with(application_id="app-1", session_id="sess-1")
         server.tools["decide_change_session_checkpoint"]["fn"](
