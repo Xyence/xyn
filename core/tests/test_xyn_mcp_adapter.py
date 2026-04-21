@@ -3328,7 +3328,12 @@ class XynMcpAdapterTests(TestCase):
         adapter.create_campaign.return_value = {"ok": True, "status_code": 201, "response": {"campaign": {"id": "cmp-1"}}}
         adapter.update_campaign.return_value = {"ok": True, "status_code": 200, "response": {"campaign": {"id": "cmp-1"}}}
         adapter.create_data_source.return_value = {"ok": True, "status_code": 201, "response": {"data_source": {"id": "ds-1"}}}
+        adapter.list_data_sources.return_value = {"ok": True, "status_code": 200, "response": {"sources": [{"id": "ds-1"}]}}
+        adapter.get_data_source.return_value = {"ok": True, "status_code": 200, "response": {"data_source": {"id": "ds-1"}}}
         adapter.update_data_source.return_value = {"ok": True, "status_code": 200, "response": {"data_source": {"id": "ds-1"}}}
+        adapter.activate_data_source.return_value = {"ok": True, "status_code": 200, "response": {"data_source": {"id": "ds-1"}}}
+        adapter.pause_data_source.return_value = {"ok": True, "status_code": 200, "response": {"data_source": {"id": "ds-1"}}}
+        adapter.delete_data_source.return_value = {"ok": True, "status_code": 200, "response": {"status": "deleted"}}
         adapter.create_notification_rule.return_value = {
             "ok": True,
             "status_code": 201,
@@ -3387,6 +3392,16 @@ class XynMcpAdapterTests(TestCase):
             workspace_id="w1",
             payload={"refresh_cadence_seconds": 86400},
         )
+        server.tools["list_data_sources"]["fn"](workspace_id="w1")
+        adapter.list_data_sources.assert_called_once_with(workspace_id="w1")
+        server.tools["get_data_source"]["fn"](source_id="ds-1", workspace_id="w1")
+        adapter.get_data_source.assert_called_once_with(source_id="ds-1", workspace_id="w1")
+        server.tools["activate_data_source"]["fn"](source_id="ds-1", workspace_id="w1")
+        adapter.activate_data_source.assert_called_once_with(source_id="ds-1", workspace_id="w1")
+        server.tools["pause_data_source"]["fn"](source_id="ds-1", workspace_id="w1")
+        adapter.pause_data_source.assert_called_once_with(source_id="ds-1", workspace_id="w1")
+        server.tools["delete_data_source"]["fn"](source_id="ds-1", workspace_id="w1")
+        adapter.delete_data_source.assert_called_once_with(source_id="ds-1", workspace_id="w1")
         server.tools["create_notification_rule"]["fn"](
             workspace_id="w1",
             address="alerts@example.com",

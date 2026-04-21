@@ -122,11 +122,22 @@ class GenericAppBuilderTests(unittest.TestCase):
         self.assertTrue(strict_result.ok, strict_result.errors)
 
     def test_structured_prompt_preserves_plan_sections_and_primitives(self):
-        spec = _build_app_spec(
-            workspace_id=uuid.uuid4(),
-            title="Real Estate Deal Finder",
-            raw_prompt=STRUCTURED_PLAN_PROMPT,
-        )
+        with mock.patch(
+            "core.appspec.semantic_extractor.extract_semantic_inference_with_diagnostics",
+            return_value=(
+                {
+                    "entities": ["parcels", "properties", "campaigns", "signals", "sources"],
+                    "entity_contracts": [],
+                    "requested_visuals": [],
+                },
+                {"llm_used": True, "fallback_used": False, "repair_used": False},
+            ),
+        ):
+            spec = _build_app_spec(
+                workspace_id=uuid.uuid4(),
+                title="Real Estate Deal Finder",
+                raw_prompt=STRUCTURED_PLAN_PROMPT,
+            )
 
         self.assertIn("structured_plan", spec)
         structured_plan = spec["structured_plan"]
@@ -180,22 +191,40 @@ class GenericAppBuilderTests(unittest.TestCase):
         self.assertTrue(any("strict profile" in row.lower() for row in strict_result.errors))
 
     def test_label_style_ui_expectations_are_captured_in_structured_plan(self):
-        spec = _build_app_spec(
-            workspace_id=uuid.uuid4(),
-            title="Example App",
-            raw_prompt=LABEL_STYLE_UI_PROMPT,
-            initial_intent={"requested_entities": ["campaigns"]},
-        )
+        with mock.patch(
+            "core.appspec.semantic_extractor.extract_semantic_inference_with_diagnostics",
+            return_value=(
+                {
+                    "entities": ["campaigns"],
+                    "entity_contracts": [],
+                    "requested_visuals": [],
+                },
+                {"llm_used": True, "fallback_used": False, "repair_used": False},
+            ),
+        ):
+            spec = _build_app_spec(
+                workspace_id=uuid.uuid4(),
+                title="Example App",
+                raw_prompt=LABEL_STYLE_UI_PROMPT,
+                initial_intent={"requested_entities": ["campaigns"]},
+            )
         self.assertTrue(str(spec.get("ui_surfaces") or "").strip())
         self.assertIn("campaign list view", str(spec.get("ui_surfaces") or "").lower())
 
     def test_generic_builder_does_not_silently_fall_back_to_inventory(self):
-        with self.assertRaisesRegex(RuntimeError, "must not silently fall back to inventory semantics"):
-            _build_app_spec(
-                workspace_id=uuid.uuid4(),
-                title="Mystery App",
-                raw_prompt="Build a useful internal application for my team.",
-            )
+        with mock.patch(
+            "core.appspec.semantic_extractor.extract_semantic_inference_with_diagnostics",
+            return_value=(
+                {"entities": [], "entity_contracts": [], "requested_visuals": []},
+                {"llm_used": True, "fallback_used": False, "repair_used": False},
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "must not silently fall back to inventory semantics"):
+                _build_app_spec(
+                    workspace_id=uuid.uuid4(),
+                    title="Mystery App",
+                    raw_prompt="Build a useful internal application for my team.",
+                )
 
     def test_compose_uses_generated_service_identity_for_non_inventory_apps(self):
         spec = _build_app_spec(

@@ -1,5 +1,6 @@
 import unittest
 import uuid
+from unittest import mock
 
 from core.app_jobs import _build_app_spec, _build_generated_artifact_manifest
 from core.capability_manifest import build_resolved_capability_manifest
@@ -127,15 +128,26 @@ class CapabilityManifestTests(unittest.TestCase):
             "entities": ["devices", "locations"],
             "reports": ["devices_by_status"],
         }
-        evolved = _build_app_spec(
-            workspace_id=workspace_id,
-            title="Net Inventory",
-            raw_prompt="Add interfaces and a chart that shows interfaces by status.",
-            initial_intent={"requested_entities": ["interfaces"], "requested_visuals": ["interfaces_by_status_chart"]},
-            current_app_spec=current_app_spec,
-            current_app_summary={"entities": ["devices", "locations"], "reports": ["devices_by_status"]},
-            revision_anchor={"anchor_type": "installed_generated_artifact"},
-        )
+        with mock.patch(
+            "core.appspec.semantic_extractor.extract_semantic_inference_with_diagnostics",
+            return_value=(
+                {
+                    "entities": ["interfaces"],
+                    "entity_contracts": [],
+                    "requested_visuals": ["interfaces_by_status_chart"],
+                },
+                {"llm_used": True, "fallback_used": False, "repair_used": False},
+            ),
+        ):
+            evolved = _build_app_spec(
+                workspace_id=workspace_id,
+                title="Net Inventory",
+                raw_prompt="Add interfaces and a chart that shows interfaces by status.",
+                initial_intent={"requested_entities": ["interfaces"], "requested_visuals": ["interfaces_by_status_chart"]},
+                current_app_spec=current_app_spec,
+                current_app_summary={"entities": ["devices", "locations"], "reports": ["devices_by_status"]},
+                revision_anchor={"anchor_type": "installed_generated_artifact"},
+            )
         artifact_manifest = _build_generated_artifact_manifest(app_spec=evolved, runtime_config={})
         suggestions = {entry["prompt"] for entry in artifact_manifest["suggestions"]}
         enabled = {entry["key"] for entry in artifact_manifest["resolved_capability_manifest"]["commands"]}

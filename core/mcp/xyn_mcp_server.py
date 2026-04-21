@@ -98,7 +98,12 @@ TOOL_NAMES = [
     "create_campaign",
     "update_campaign",
     "create_data_source",
+    "list_data_sources",
+    "get_data_source",
     "update_data_source",
+    "activate_data_source",
+    "pause_data_source",
+    "delete_data_source",
     "create_notification_rule",
     "update_notification_rule",
 ]
@@ -731,6 +736,35 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
             payload=payload,
         )
 
+    def list_data_sources(
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.list_data_sources(workspace_id=workspace_id)
+
+    def get_data_source(
+        source_id: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.get_data_source(source_id=source_id, workspace_id=workspace_id)
+
+    def activate_data_source(
+        source_id: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.activate_data_source(source_id=source_id, workspace_id=workspace_id)
+
+    def pause_data_source(
+        source_id: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.pause_data_source(source_id=source_id, workspace_id=workspace_id)
+
+    def delete_data_source(
+        source_id: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        return adapter.delete_data_source(source_id=source_id, workspace_id=workspace_id)
+
     def create_notification_rule(
         workspace_id: str = "",
         address: str = "",
@@ -1244,6 +1278,36 @@ def register_xyn_tools(mcp_server: Any, adapter: XynApiAdapter) -> None:
         name="update_data_source",
         description="Update a source connector (data source) within a workspace.",
         fn=update_data_source,
+    )
+    _register_tool(
+        mcp_server,
+        name="list_data_sources",
+        description="List data sources for a workspace.",
+        fn=list_data_sources,
+    )
+    _register_tool(
+        mcp_server,
+        name="get_data_source",
+        description="Get one data source by id.",
+        fn=get_data_source,
+    )
+    _register_tool(
+        mcp_server,
+        name="activate_data_source",
+        description="Enable/activate a data source.",
+        fn=activate_data_source,
+    )
+    _register_tool(
+        mcp_server,
+        name="pause_data_source",
+        description="Disable/pause a data source.",
+        fn=pause_data_source,
+    )
+    _register_tool(
+        mcp_server,
+        name="delete_data_source",
+        description="Delete a data source when supported by backend capabilities.",
+        fn=delete_data_source,
     )
     _register_tool(
         mcp_server,

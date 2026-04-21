@@ -2701,6 +2701,189 @@ class XynApiAdapter:
         }
         return result
 
+    def list_data_sources(
+        self,
+        *,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="GET",
+                path="/xyn/api/source-connectors",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=["/xyn/api/source-connectors", "/api/v1/source-connectors"],
+            params={"workspace_id": resolved_workspace_id},
+            base_urls=self._planner_base_urls(),
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        sources = body.get("sources") if isinstance(body.get("sources"), list) else []
+        result["response"] = {
+            "operation": "list_data_sources",
+            "workspace_id": resolved_workspace_id,
+            "sources": [{"type": "datasource", **item} for item in sources if isinstance(item, dict)],
+        }
+        return result
+
+    def get_data_source(
+        self,
+        *,
+        source_id: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="GET",
+                path=f"/xyn/api/source-connectors/{source_id}",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        result = self._request_with_fallback_paths(
+            method="GET",
+            paths=[f"/xyn/api/source-connectors/{source_id}", f"/api/v1/source-connectors/{source_id}"],
+            params={"workspace_id": resolved_workspace_id},
+            base_urls=self._planner_base_urls(),
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        result["response"] = {
+            "operation": "get_data_source",
+            "workspace_id": resolved_workspace_id,
+            "data_source": {"type": "datasource", **body},
+            "source_connector": body,
+        }
+        return result
+
+    def activate_data_source(
+        self,
+        *,
+        source_id: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        return self._set_data_source_active_state(source_id=source_id, workspace_id=workspace_id, action="activate")
+
+    def pause_data_source(
+        self,
+        *,
+        source_id: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        return self._set_data_source_active_state(source_id=source_id, workspace_id=workspace_id, action="pause")
+
+    def delete_data_source(
+        self,
+        *,
+        source_id: str,
+        workspace_id: str = "",
+    ) -> Dict[str, Any]:
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="DELETE",
+                path=f"/xyn/api/source-connectors/{source_id}",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        result = self._request_with_fallback_paths(
+            method="DELETE",
+            paths=[f"/xyn/api/source-connectors/{source_id}", f"/api/v1/source-connectors/{source_id}"],
+            params={"workspace_id": resolved_workspace_id},
+            base_urls=self._planner_base_urls(),
+            allow_reissue_on_transport_error=False,
+        )
+        if not result.get("ok"):
+            return result
+        result["response"] = {
+            "operation": "delete_data_source",
+            "workspace_id": resolved_workspace_id,
+            "source_id": source_id,
+            "status": "deleted",
+        }
+        return result
+
+    def _set_data_source_active_state(
+        self,
+        *,
+        source_id: str,
+        workspace_id: str,
+        action: str,
+    ) -> Dict[str, Any]:
+        normalized_action = str(action or "").strip().lower()
+        if normalized_action not in {"activate", "pause"}:
+            return {
+                "ok": False,
+                "status_code": 400,
+                "method": "POST",
+                "path": f"/xyn/api/source-connectors/{source_id}/{normalized_action}",
+                "base_url": str(self._config.control_api_base_url).rstrip("/"),
+                "response": {"error": "invalid action"},
+                "error_classification": "backend_validation_error",
+            }
+        resolved = self._resolve_workspace_for_request(
+            explicit_workspace_id=workspace_id,
+            require_workspace=True,
+            intent="user",
+        )
+        if not resolved.get("ok"):
+            return self._workspace_resolution_error_result(
+                method="POST",
+                path=f"/xyn/api/source-connectors/{source_id}/{normalized_action}",
+                error=str(resolved.get("error") or "workspace_required"),
+                detail=str(resolved.get("detail") or ""),
+                candidate_workspaces=resolved.get("candidate_workspaces") if isinstance(resolved.get("candidate_workspaces"), list) else [],
+                status_code=int(resolved.get("status_code") or 400),
+            )
+        resolved_workspace_id = str(resolved.get("workspace_id") or "").strip()
+        result = self._request_with_fallback_paths(
+            method="POST",
+            paths=[
+                f"/xyn/api/source-connectors/{source_id}/{normalized_action}",
+                f"/api/v1/source-connectors/{source_id}/{normalized_action}",
+            ],
+            json_payload={"workspace_id": resolved_workspace_id},
+            base_urls=self._planner_base_urls(),
+            allow_reissue_on_transport_error=False,
+        )
+        if not result.get("ok"):
+            return result
+        body = result.get("response") if isinstance(result.get("response"), dict) else {}
+        result["response"] = {
+            "operation": f"{normalized_action}_data_source",
+            "workspace_id": resolved_workspace_id,
+            "data_source": {"type": "datasource", **body},
+            "source_connector": body,
+        }
+        return result
+
     def create_notification_rule(
         self,
         *,

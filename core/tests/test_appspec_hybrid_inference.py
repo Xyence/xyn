@@ -651,13 +651,13 @@ class AppSpecHybridInferencePersistenceIntegrationTests(unittest.TestCase):
                 "name": "free_form_semantic",
                 "prompt": "Create an internal customer ticket tracker with notes.",
                 "expect_warning": False,
-                "expect_limited_mode_warning": True,
+                "expect_limited_mode_warning": False,
             },
             {
                 "name": "consistency_warning",
                 "prompt": "Build campaign operations tooling with interfaces by status charts.",
                 "expect_warning": False,
-                "expect_limited_mode_warning": True,
+                "expect_limited_mode_warning": False,
             },
         ]
 
@@ -796,7 +796,18 @@ class AppSpecHybridInferencePersistenceIntegrationTests(unittest.TestCase):
                 },
             ):
                 with mock.patch("core.app_jobs._import_generated_artifact_package", return_value={}):
-                    output, _ = _handle_generate_app_spec(db, job, [])
+                    with mock.patch(
+                        "core.appspec.semantic_extractor.extract_semantic_inference_with_diagnostics",
+                        return_value=(
+                            {
+                                "entities": ["notes", "documents"],
+                                "entity_contracts": [],
+                                "requested_visuals": [],
+                            },
+                            {"llm_used": True, "fallback_used": False, "repair_used": False},
+                        ),
+                    ):
+                        output, _ = _handle_generate_app_spec(db, job, [])
             db.commit()
 
             app_spec_artifact_id = uuid.UUID(str(output["app_spec_artifact_id"]))
