@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import secrets
 import json
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple, List
 
@@ -109,6 +110,35 @@ TOOL_NAMES = [
     "update_notification_rule",
 ]
 
+DEAL_FINDER_TOOL_NAMES = [
+    "create_campaign",
+    "update_campaign",
+    "create_data_source",
+    "list_data_sources",
+    "get_data_source",
+    "update_data_source",
+    "activate_data_source",
+    "pause_data_source",
+    "delete_data_source",
+    "create_notification_rule",
+    "update_notification_rule",
+]
+
+TOOL_GROUPS: Dict[str, tuple[str, ...]] = {
+    "deal-finder": tuple(DEAL_FINDER_TOOL_NAMES),
+}
+
+TOOL_PROFILES: Dict[str, tuple[str, ...]] = {
+    "root": tuple(TOOL_NAMES),
+    "deal-finder": tuple(DEAL_FINDER_TOOL_NAMES),
+}
+
+_CURRENT_BINDING_NAME: ContextVar[str] = ContextVar("xyn_mcp_binding_name", default="root")
+_CURRENT_ALLOWED_TOOLS: ContextVar[frozenset[str]] = ContextVar(
+    "xyn_mcp_allowed_tools",
+    default=frozenset(TOOL_NAMES),
+)
+
 _TOOL_ROUTE_PROBES: Dict[str, tuple[str, str, str]] = {
     "list_change_efforts": ("GET", "/api/v1/change-efforts", "code"),
     "list_runtime_runs": ("GET", "/api/v1/runs", "code"),
@@ -185,6 +215,11 @@ class McpEndpointBinding:
     profile_name: str
     environment: str = ""
     deployment_namespace: str = ""
+    host: str = ""
+    hosts: tuple[str, ...] = ()
+    tool_profile: str = ""
+    allowed_tool_groups: tuple[str, ...] = ()
+    allowed_tools: tuple[str, ...] = ()
 
 
 def _normalize_path(value: str, *, default: str) -> str:
@@ -194,6 +229,25 @@ def _normalize_path(value: str, *, default: str) -> str:
     if not raw.startswith("/"):
         raw = f"/{raw}"
     return raw.rstrip("/") or "/"
+
+
+def _normalize_host(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    if ":" in raw:
+        raw = raw.split(":", 1)[0].strip()
+    return raw
+
+
+def _as_csv_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw = str(value or "").strip()
+        raw_items = [] if not raw else raw.split(",")
+    parsed = [str(item or "").strip() for item in raw_items]
+    return [item for item in parsed if item]
 
 
 def _default_endpoint_bindings(profile_name: str) -> List[McpEndpointBinding]:
@@ -258,6 +312,24 @@ def _load_endpoint_bindings(profile_name: str) -> List[McpEndpointBinding]:
                 profile_name=str(item.get("profile_name") or "").strip() or profile_name,
                 environment=str(item.get("environment") or "").strip(),
                 deployment_namespace=str(item.get("deployment_namespace") or "").strip(),
+                host=_normalize_host(str(item.get("host") or "").strip()),
+                hosts=tuple(
+                    [
+                        normalized
+                        for normalized in [
+                            _normalize_host(entry)
+                            for entry in (
+                                item.get("hosts")
+                                if isinstance(item.get("hosts"), list)
+                                else ([] if not str(item.get("hosts") or "").strip() else [str(item.get("hosts"))])
+                            )
+                        ]
+                        if normalized
+                    ]
+                ),
+                tool_profile=str(item.get("tool_profile") or "").strip().lower(),
+                allowed_tool_groups=tuple([group.strip().lower() for group in _as_csv_list(item.get("allowed_tool_groups"))]),
+                allowed_tools=tuple([tool.strip() for tool in _as_csv_list(item.get("allowed_tools"))]),
             )
         )
     if not bindings:
@@ -272,12 +344,28 @@ def _register_tool(mcp_server: Any, *, name: str, description: str, fn: Callable
     enabled_tools = getattr(mcp_server, "_xyn_enabled_tools", None)
     if isinstance(enabled_tools, set) and enabled_tools and name not in enabled_tools:
         return
+    def _guarded_tool(*args, **kwargs):
+        allowed = _CURRENT_ALLOWED_TOOLS.get()
+        if allowed and name not in allowed:
+            binding_name = _CURRENT_BINDING_NAME.get()
+            return {
+                "ok": False,
+                "status_code": 403,
+                "response": {
+                    "blocked_reason": "tool_not_allowed_for_binding",
+                    "error_summary": f"Tool '{name}' is not exposed for binding '{binding_name}'",
+                    "binding_name": binding_name,
+                    "tool_name": name,
+                },
+            }
+        return fn(*args, **kwargs)
+
     if hasattr(mcp_server, "add_tool"):
-        mcp_server.add_tool(fn, name=name, description=description)
+        mcp_server.add_tool(_guarded_tool, name=name, description=description)
         return
     if hasattr(mcp_server, "tool"):
         decorator = mcp_server.tool(name=name, description=description)
-        decorator(fn)
+        decorator(_guarded_tool)
         return
     raise RuntimeError("MCP server does not expose add_tool/tool registration API")
 
@@ -1518,6 +1606,24 @@ def _assert_critical_planner_tools_available(tool_surface: Dict[str, Any]) -> No
         )
 
 
+def _resolve_binding_allowed_tools(
+    *,
+    binding: McpEndpointBinding,
+    globally_enabled_tools: set[str],
+) -> set[str]:
+    allowed: set[str] = set()
+    profile = str(binding.tool_profile or "").strip().lower()
+    if profile:
+        allowed.update(TOOL_PROFILES.get(profile, ()))
+    for group in binding.allowed_tool_groups:
+        allowed.update(TOOL_GROUPS.get(group, ()))
+    if binding.allowed_tools:
+        allowed.update(binding.allowed_tools)
+    if not allowed:
+        allowed.update(globally_enabled_tools)
+    return {tool for tool in allowed if tool in globally_enabled_tools}
+
+
 def _build_upstream_health(adapter: XynApiAdapter) -> Dict[str, Any]:
     probes: Dict[str, Dict[str, Any]] = {}
     for probe_name, (method, path, base) in _UPSTREAM_HEALTH_PROBES.items():
@@ -1579,11 +1685,18 @@ def _create_xyn_mcp_http_subapp(
     tool_surface = getattr(mcp_server, "_xyn_tool_surface", {}) if mcp_server is not None else {}
     upstream_health = _build_upstream_health(adapter)
     enabled_tools = list(tool_surface.get("enabled_tools") or TOOL_NAMES)
-    disabled_tools = list(tool_surface.get("disabled_tools") or [])
     parity = tool_surface.get("parity") if isinstance(tool_surface.get("parity"), dict) else {}
     runtime_identity = McpRuntimeIdentity.from_env()
     endpoint_bindings = _load_endpoint_bindings(profile_name)
     endpoint_bindings_by_name = {binding.name: binding for binding in endpoint_bindings}
+    globally_enabled_tools = set(enabled_tools)
+    binding_allowed_tools = {
+        binding.name: _resolve_binding_allowed_tools(
+            binding=binding,
+            globally_enabled_tools=globally_enabled_tools,
+        )
+        for binding in endpoint_bindings
+    }
     deprecated_alias_enabled = (
         str(os.getenv("XYN_MCP_ENABLE_DEPRECATED_DEAL_FINDER_ALIAS", "false")).strip().lower() in {"1", "true", "yes"}
     )
@@ -1608,73 +1721,213 @@ def _create_xyn_mcp_http_subapp(
             "binding_name": binding.name,
             "binding_mcp_path_prefix": binding.mcp_path_prefix,
             "binding_resource_path": binding.resource_path,
+            "binding_host": binding.host,
+            "binding_hosts": list(binding.hosts),
         }
 
-    async def healthz(_request):
-        root_binding = endpoint_bindings_by_name.get("root", endpoint_bindings[0])
+    def _binding_payload(binding: McpEndpointBinding) -> Dict[str, Any]:
+        return {
+            "name": binding.name,
+            "mcp_path_prefix": binding.mcp_path_prefix,
+            "resource_path": binding.resource_path,
+            "oauth_protected_resource_path": binding.oauth_protected_resource_path,
+            "health_path": binding.health_path,
+            "rewrite_to_prefix": binding.rewrite_to_prefix,
+            "environment": binding.environment,
+            "deployment_namespace": binding.deployment_namespace,
+            "host": binding.host,
+            "hosts": list(binding.hosts),
+        }
+
+    def _health_payload(binding: McpEndpointBinding) -> Dict[str, Any]:
+        allowed_tools = sorted(binding_allowed_tools.get(binding.name, globally_enabled_tools))
+        disabled_for_binding = sorted(tool for tool in enabled_tools if tool not in set(allowed_tools))
+        return {
+            "status": "ok",
+            "service": "xyn-mcp-adapter",
+            "mcp_profile": binding.profile_name,
+            "app_scope": binding.app_scope,
+            "tool_count": len(allowed_tools),
+            "tools": allowed_tools,
+            "disabled_tools": disabled_for_binding,
+            "tool_parity": parity,
+            "upstream_health": upstream_health,
+            "xyn_control_api_base_url": adapter.config.control_api_base_url,
+            "xyn_code_api_base_url": adapter.config.code_api_base_url or adapter.config.control_api_base_url,
+            "auth": {
+                "has_bearer_token": bool(adapter.config.bearer_token),
+                "has_internal_token": bool(adapter.config.internal_token),
+                "mcp_auth_mode": auth_config.mode,
+                "mcp_auth_token_configured": bool(auth_config.bearer_token),
+                "mcp_auth_oidc_configured": bool(auth_config.oidc_issuer and auth_config.oidc_client_id),
+            },
+            "runtime_identity": _runtime_identity_payload(binding),
+            "deprecated_alias_mode_enabled": deprecated_alias_enabled,
+            "endpoint_binding": _binding_payload(binding),
+        }
+
+    def _extract_jsonrpc_message(request_body: bytes) -> Dict[str, Any]:
+        if not request_body:
+            return {}
+        try:
+            payload = json.loads(request_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _filter_tools_list_result(payload: Dict[str, Any], allowed: set[str]) -> Dict[str, Any]:
+        if not payload:
+            return payload
+        result = payload.get("result")
+        if isinstance(result, dict):
+            if isinstance(result.get("tools"), list):
+                result["tools"] = [
+                    tool
+                    for tool in result.get("tools", [])
+                    if isinstance(tool, dict) and str(tool.get("name") or "") in allowed
+                ]
+            structured = result.get("structuredContent")
+            if isinstance(structured, dict) and isinstance(structured.get("tools"), list):
+                structured["tools"] = [
+                    tool
+                    for tool in structured.get("tools", [])
+                    if isinstance(tool, dict) and str(tool.get("name") or "") in allowed
+                ]
+        return payload
+
+    async def _filter_tools_list_response(response: Response, *, allowed: set[str]) -> Response:
+        content_type = str(response.headers.get("content-type", "")).lower()
+        if "application/json" not in content_type and "text/event-stream" not in content_type:
+            return response
+
+        if not hasattr(response, "body_iterator"):
+            return response
+
+        chunks = [chunk async for chunk in response.body_iterator]  # type: ignore[attr-defined]
+        raw_body = b"".join(chunks)
+        if not raw_body:
+            return response
+
+        response_headers = dict(response.headers)
+        response_headers.pop("content-length", None)
+
+        body_text = raw_body.decode("utf-8", errors="ignore")
+        rewritten = body_text
+        changed = False
+
+        if "application/json" in content_type:
+            try:
+                parsed = json.loads(body_text)
+                if isinstance(parsed, dict):
+                    filtered = _filter_tools_list_result(parsed, allowed)
+                    rewritten = json.dumps(filtered)
+                    changed = True
+            except json.JSONDecodeError:
+                return Response(content=raw_body, status_code=response.status_code, headers=response_headers)
+        else:
+            lines = body_text.splitlines()
+            rewritten_lines: list[str] = []
+            for line in lines:
+                if not line.startswith("data: "):
+                    rewritten_lines.append(line)
+                    continue
+                payload_text = line[len("data: ") :].strip()
+                try:
+                    parsed = json.loads(payload_text)
+                except json.JSONDecodeError:
+                    rewritten_lines.append(line)
+                    continue
+                if isinstance(parsed, dict):
+                    filtered = _filter_tools_list_result(parsed, allowed)
+                    rewritten_lines.append(f"data: {json.dumps(filtered)}")
+                    changed = True
+                else:
+                    rewritten_lines.append(line)
+            rewritten = "\n".join(rewritten_lines)
+            if body_text.endswith("\n"):
+                rewritten = f"{rewritten}\n"
+
+        if not changed:
+            return Response(content=raw_body, status_code=response.status_code, headers=response_headers)
+        return Response(content=rewritten, status_code=response.status_code, headers=response_headers)
+
+    def _request_host(request) -> str:
+        forwarded = str(request.headers.get("x-forwarded-host", "") or "").split(",")[0].strip()
+        host = forwarded or str(request.headers.get("host", "")).strip() or str(request.url.netloc or "").strip()
+        return _normalize_host(host)
+
+    def _host_match_rank(binding: McpEndpointBinding, request_host: str) -> int:
+        if not request_host:
+            return 0
+        if binding.host and request_host == binding.host:
+            return 2
+        if binding.hosts and request_host in set(binding.hosts):
+            return 1
+        return 0
+
+    def _path_prefix_matches(prefix: str, path: str) -> bool:
+        normalized_prefix = prefix.rstrip("/") or "/"
+        if path == normalized_prefix:
+            return True
+        return path.startswith(f"{normalized_prefix}/")
+
+    def _resolve_binding(
+        *,
+        request_host: str,
+        path: str,
+        route_kind: str,
+    ) -> Optional[McpEndpointBinding]:
+        scored: list[tuple[int, int, McpEndpointBinding]] = []
+        for binding in endpoint_bindings:
+            host_rank = _host_match_rank(binding, request_host)
+            has_host_constraint = bool(binding.host or binding.hosts)
+            if route_kind == "mcp":
+                path_matches = _path_prefix_matches(binding.mcp_path_prefix, path)
+                if not path_matches:
+                    continue
+                if host_rank > 0 and binding.mcp_path_prefix == "/mcp":
+                    scored.append((300 + host_rank, len(binding.mcp_path_prefix), binding))
+                    continue
+                if host_rank > 0:
+                    scored.append((200 + host_rank, len(binding.mcp_path_prefix), binding))
+                    continue
+                if not has_host_constraint:
+                    scored.append((100, len(binding.mcp_path_prefix), binding))
+            elif route_kind == "health":
+                if path != binding.health_path:
+                    continue
+                if host_rank > 0 and path == "/healthz":
+                    scored.append((300 + host_rank, len(binding.health_path), binding))
+                    continue
+                if host_rank > 0:
+                    scored.append((200 + host_rank, len(binding.health_path), binding))
+                    continue
+                if not has_host_constraint:
+                    scored.append((100, len(binding.health_path), binding))
+            elif route_kind == "oauth":
+                if path != binding.oauth_protected_resource_path:
+                    continue
+                if host_rank > 0 and path == "/.well-known/oauth-protected-resource":
+                    scored.append((300 + host_rank, len(binding.oauth_protected_resource_path), binding))
+                    continue
+                if host_rank > 0:
+                    scored.append((200 + host_rank, len(binding.oauth_protected_resource_path), binding))
+                    continue
+                if not has_host_constraint:
+                    scored.append((100, len(binding.oauth_protected_resource_path), binding))
+        if not scored:
+            return None
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return scored[0][2]
+
+    async def healthz(request):
+        request_host = _request_host(request)
+        binding = _resolve_binding(request_host=request_host, path=str(request.url.path or ""), route_kind="health")
+        if binding is None:
+            binding = endpoint_bindings_by_name.get("root", endpoint_bindings[0])
         return JSONResponse(
-            {
-                "status": "ok",
-                "service": "xyn-mcp-adapter",
-                "mcp_profile": root_binding.profile_name,
-                "app_scope": root_binding.app_scope,
-                "tool_count": len(enabled_tools),
-                "tools": enabled_tools,
-                "disabled_tools": disabled_tools,
-                "tool_parity": parity,
-                "upstream_health": upstream_health,
-                "xyn_control_api_base_url": adapter.config.control_api_base_url,
-                "xyn_code_api_base_url": adapter.config.code_api_base_url
-                or adapter.config.control_api_base_url,
-                "auth": {
-                    "has_bearer_token": bool(adapter.config.bearer_token),
-                    "has_internal_token": bool(adapter.config.internal_token),
-                    "mcp_auth_mode": auth_config.mode,
-                    "mcp_auth_token_configured": bool(auth_config.bearer_token),
-                    "mcp_auth_oidc_configured": bool(auth_config.oidc_issuer and auth_config.oidc_client_id),
-                },
-                "runtime_identity": _runtime_identity_payload(root_binding),
-                "deprecated_alias_mode_enabled": deprecated_alias_enabled,
-            }
+            _health_payload(binding)
         )
-
-    def _binding_health_handler(binding: McpEndpointBinding) -> Callable[..., Any]:
-        async def _health(_request):
-            payload = {
-                "status": "ok",
-                "service": "xyn-mcp-adapter",
-                "mcp_profile": binding.profile_name,
-                "app_scope": binding.app_scope,
-                "tool_count": len(enabled_tools),
-                "tools": enabled_tools,
-                "disabled_tools": disabled_tools,
-                "tool_parity": parity,
-                "upstream_health": upstream_health,
-                "xyn_control_api_base_url": adapter.config.control_api_base_url,
-                "xyn_code_api_base_url": adapter.config.code_api_base_url or adapter.config.control_api_base_url,
-                "auth": {
-                    "has_bearer_token": bool(adapter.config.bearer_token),
-                    "has_internal_token": bool(adapter.config.internal_token),
-                    "mcp_auth_mode": auth_config.mode,
-                    "mcp_auth_token_configured": bool(auth_config.bearer_token),
-                    "mcp_auth_oidc_configured": bool(auth_config.oidc_issuer and auth_config.oidc_client_id),
-                },
-                "runtime_identity": _runtime_identity_payload(binding),
-                "deprecated_alias_mode_enabled": deprecated_alias_enabled,
-                "endpoint_binding": {
-                    "name": binding.name,
-                    "mcp_path_prefix": binding.mcp_path_prefix,
-                    "resource_path": binding.resource_path,
-                    "oauth_protected_resource_path": binding.oauth_protected_resource_path,
-                    "health_path": binding.health_path,
-                    "rewrite_to_prefix": binding.rewrite_to_prefix,
-                    "environment": binding.environment,
-                    "deployment_namespace": binding.deployment_namespace,
-                },
-            }
-            return JSONResponse(payload)
-
-        return _health
 
     def _base_url_for(request) -> str:
         proto = str(request.headers.get("x-forwarded-proto", "") or "").split(",")[0].strip() or str(request.url.scheme or "https")
@@ -1773,27 +2026,18 @@ def _create_xyn_mcp_http_subapp(
             return False, "Invalid OIDC bearer token audience"
         return True, ""
 
-    def _oauth_protected_resource_handler(binding: McpEndpointBinding) -> Callable[..., Any]:
-        async def _handler(request) -> Response:
-            if auth_config.mode != "oidc":
-                return Response(status_code=404)
-            return JSONResponse(
-                _oauth_protected_resource_metadata(request, resource_path=binding.resource_path, binding=binding),
-                status_code=200,
-            )
-
-        return _handler
-
-    def _binding_for_request_path(path: str) -> Optional[McpEndpointBinding]:
-        matched: Optional[McpEndpointBinding] = None
-        matched_len = -1
-        for binding in endpoint_bindings:
-            prefix = binding.mcp_path_prefix
-            if path == prefix or path.startswith(f"{prefix}/"):
-                if len(prefix) > matched_len:
-                    matched = binding
-                    matched_len = len(prefix)
-        return matched
+    async def oauth_protected_resource(request) -> Response:
+        if auth_config.mode != "oidc":
+            return Response(status_code=404)
+        request_host = _request_host(request)
+        path = str(request.url.path or "")
+        binding = _resolve_binding(request_host=request_host, path=path, route_kind="oauth")
+        if binding is None:
+            binding = endpoint_bindings_by_name.get("root", endpoint_bindings[0])
+        return JSONResponse(
+            _oauth_protected_resource_metadata(request, resource_path=binding.resource_path, binding=binding),
+            status_code=200,
+        )
 
     public_paths = {
         binding.health_path for binding in endpoint_bindings
@@ -1801,7 +2045,8 @@ def _create_xyn_mcp_http_subapp(
 
     async def _mcp_auth_guard(request, call_next):
         original_path = str(request.url.path or "")
-        matched_binding = _binding_for_request_path(original_path)
+        request_host = _request_host(request)
+        matched_binding = _resolve_binding(request_host=request_host, path=original_path, route_kind="mcp")
         path = original_path
         if matched_binding is not None:
             normalized_prefix = matched_binding.mcp_path_prefix.rstrip("/") or "/"
@@ -1813,10 +2058,54 @@ def _create_xyn_mcp_http_subapp(
                 request.scope["path"] = rewritten_path
                 request.scope["raw_path"] = rewritten_path.encode("utf-8")
                 path = rewritten_path
+        request.scope["xyn_mcp_binding_name"] = matched_binding.name if matched_binding is not None else "root"
         if original_path in public_paths or not path.startswith("/mcp"):
             return await call_next(request)
+        request_body = b""
+        jsonrpc_message: Dict[str, Any] = {}
+        if str(request.method or "").upper() == "POST":
+            content_type = str(request.headers.get("content-type", "")).lower()
+            if "application/json" in content_type:
+                request_body = await request.body()
+                jsonrpc_message = _extract_jsonrpc_message(request_body)
+        selected_binding = matched_binding or endpoint_bindings_by_name.get("root", endpoint_bindings[0])
+        allowed_for_binding = binding_allowed_tools.get(selected_binding.name, globally_enabled_tools)
+        requested_tool = ""
+        if jsonrpc_message.get("method") == "tools/call":
+            params = jsonrpc_message.get("params")
+            if isinstance(params, dict):
+                requested_tool = str(params.get("name") or "").strip()
+
+        def _blocked_tool_response() -> JSONResponse:
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": jsonrpc_message.get("id"),
+                    "error": {
+                        "code": -32001,
+                        "message": "tool_not_allowed_for_binding",
+                        "data": {
+                            "binding_name": selected_binding.name,
+                            "tool_name": requested_tool,
+                            "allowed_tools": sorted(allowed_for_binding),
+                        },
+                    },
+                },
+                status_code=403,
+            )
         if auth_config.mode == "none":
-            return await call_next(request)
+            if requested_tool and requested_tool not in allowed_for_binding:
+                return _blocked_tool_response()
+            binding_token = _CURRENT_BINDING_NAME.set(selected_binding.name)
+            tools_token = _CURRENT_ALLOWED_TOOLS.set(frozenset(allowed_for_binding))
+            try:
+                response = await call_next(request)
+            finally:
+                _CURRENT_ALLOWED_TOOLS.reset(tools_token)
+                _CURRENT_BINDING_NAME.reset(binding_token)
+            if jsonrpc_message.get("method") == "tools/list":
+                return await _filter_tools_list_response(response, allowed=allowed_for_binding)
+            return response
         token = _extract_bearer_token(request.headers.get("Authorization", ""))
         if not token:
             return _unauthorized(
@@ -1834,37 +2123,50 @@ def _create_xyn_mcp_http_subapp(
                 )
             if not secrets.compare_digest(token, auth_config.bearer_token):
                 return _unauthorized(request, "Invalid bearer token", binding=matched_binding)
+            if requested_tool and requested_tool not in allowed_for_binding:
+                return _blocked_tool_response()
             token_ctx = set_request_bearer_token(token)
+            binding_token = _CURRENT_BINDING_NAME.set(selected_binding.name)
+            tools_token = _CURRENT_ALLOWED_TOOLS.set(frozenset(allowed_for_binding))
             try:
-                return await call_next(request)
+                response = await call_next(request)
             finally:
+                _CURRENT_ALLOWED_TOOLS.reset(tools_token)
+                _CURRENT_BINDING_NAME.reset(binding_token)
                 if token_ctx is not None:
                     reset_request_bearer_token(token_ctx)
+            if jsonrpc_message.get("method") == "tools/list":
+                return await _filter_tools_list_response(response, allowed=allowed_for_binding)
+            return response
         ok, message = await _validate_oidc_bearer(token)
         if not ok:
             return _unauthorized(request, message, binding=matched_binding)
+        if requested_tool and requested_tool not in allowed_for_binding:
+            return _blocked_tool_response()
         token_ctx = set_request_bearer_token(token)
+        binding_token = _CURRENT_BINDING_NAME.set(selected_binding.name)
+        tools_token = _CURRENT_ALLOWED_TOOLS.set(frozenset(allowed_for_binding))
         try:
-            return await call_next(request)
+            response = await call_next(request)
         finally:
+            _CURRENT_ALLOWED_TOOLS.reset(tools_token)
+            _CURRENT_BINDING_NAME.reset(binding_token)
             if token_ctx is not None:
                 reset_request_bearer_token(token_ctx)
+        if jsonrpc_message.get("method") == "tools/list":
+            return await _filter_tools_list_response(response, allowed=allowed_for_binding)
+        return response
     app.add_middleware(BaseHTTPMiddleware, dispatch=_mcp_auth_guard)
 
     # Add diagnostics routes directly on the same MCP Starlette app so lifespan/task-group init stays intact.
-    app.add_route("/healthz", healthz, methods=["GET"])
-    seen_health_paths = {"/healthz"}
+    seen_health_paths = set()
     seen_oauth_paths = set()
     for binding in endpoint_bindings:
         if binding.health_path not in seen_health_paths:
-            app.add_route(binding.health_path, _binding_health_handler(binding), methods=["GET"])
+            app.add_route(binding.health_path, healthz, methods=["GET"])
             seen_health_paths.add(binding.health_path)
         if binding.oauth_protected_resource_path not in seen_oauth_paths:
-            app.add_route(
-                binding.oauth_protected_resource_path,
-                _oauth_protected_resource_handler(binding),
-                methods=["GET"],
-            )
+            app.add_route(binding.oauth_protected_resource_path, oauth_protected_resource, methods=["GET"])
             seen_oauth_paths.add(binding.oauth_protected_resource_path)
     return app
 

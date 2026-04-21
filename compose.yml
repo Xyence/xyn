@@ -237,8 +237,10 @@ services:
       XYN_MCP_IMAGE_TAG: ${XYN_MCP_IMAGE_TAG:-local-dev}
       XYN_MCP_RELEASE_TARGET: ${XYN_MCP_RELEASE_TARGET:-local}
       XYN_MCP_ENABLE_DEPRECATED_DEAL_FINDER_ALIAS: ${XYN_MCP_ENABLE_DEPRECATED_DEAL_FINDER_ALIAS:-false}
+      XYN_DEAL_FINDER_MCP_PROD_HOST: ${XYN_DEAL_FINDER_MCP_PROD_HOST:-deal-finder-mcp.localhost}
+      XYN_DEAL_FINDER_MCP_TEST_HOST: ${XYN_DEAL_FINDER_MCP_TEST_HOST:-deal-finder-test-mcp.localhost}
       XYN_MCP_ENDPOINT_BINDINGS: >-
-        ${XYN_MCP_ENDPOINT_BINDINGS:-[{"name":"root","mcp_path_prefix":"/mcp","resource_path":"/mcp","health_path":"/healthz","oauth_protected_resource_path":"/.well-known/oauth-protected-resource","rewrite_to_prefix":"/mcp","app_scope":"root","profile_name":"root","environment":"local"},{"name":"deal-finder","mcp_path_prefix":"/deal-finder/mcp","resource_path":"/deal-finder/mcp","health_path":"/deal-finder/healthz","oauth_protected_resource_path":"/deal-finder/.well-known/oauth-protected-resource","rewrite_to_prefix":"/mcp","app_scope":"deal-finder","profile_name":"root","environment":"local"}]}
+        ${XYN_MCP_ENDPOINT_BINDINGS:-[{"name":"root","host":"mcp.localhost","mcp_path_prefix":"/mcp","resource_path":"/mcp","health_path":"/healthz","oauth_protected_resource_path":"/.well-known/oauth-protected-resource","rewrite_to_prefix":"/mcp","app_scope":"root","profile_name":"root","tool_profile":"root","environment":"local"},{"name":"deal-finder-prod","host":"deal-finder-mcp.localhost","mcp_path_prefix":"/mcp","resource_path":"/mcp","health_path":"/healthz","oauth_protected_resource_path":"/.well-known/oauth-protected-resource","rewrite_to_prefix":"/mcp","app_scope":"deal-finder","profile_name":"root","tool_profile":"deal-finder","environment":"prod","deployment_namespace":"deal-finder-prod"},{"name":"deal-finder-test","host":"deal-finder-test-mcp.localhost","mcp_path_prefix":"/mcp","resource_path":"/mcp","health_path":"/healthz","oauth_protected_resource_path":"/.well-known/oauth-protected-resource","rewrite_to_prefix":"/mcp","app_scope":"deal-finder","profile_name":"root","tool_profile":"deal-finder","environment":"test","deployment_namespace":"deal-finder-test"},{"name":"deal-finder-path-compat","mcp_path_prefix":"/deal-finder/mcp","resource_path":"/deal-finder/mcp","health_path":"/deal-finder/healthz","oauth_protected_resource_path":"/deal-finder/.well-known/oauth-protected-resource","rewrite_to_prefix":"/mcp","app_scope":"deal-finder","profile_name":"root","tool_profile":"deal-finder","environment":"local","deployment_namespace":"deal-finder-compat"}]}
     volumes:
       - ./core:/app/core:z
       - ${XYN_PLATFORM_HOST_SRC_PATH:-${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn-platform}:/workspace/xyn-platform:z
@@ -265,6 +267,22 @@ services:
       - "traefik.http.routers.mcp-https.service=mcp-svc"
       - "traefik.http.routers.mcp-https.tls=${XYN_TRAEFIK_ENABLE_TLS:-false}"
       - "traefik.http.routers.mcp-https.tls.certresolver=${XYN_TRAEFIK_CERT_RESOLVER:-letsencrypt}"
+      - "traefik.http.routers.mcp-df-prod-http.rule=Host(`${XYN_DEAL_FINDER_MCP_PROD_HOST:-deal-finder-mcp.localhost}`)"
+      - "traefik.http.routers.mcp-df-prod-http.entrypoints=web"
+      - "traefik.http.routers.mcp-df-prod-http.service=mcp-svc"
+      - "traefik.http.routers.mcp-df-prod-https.rule=Host(`${XYN_DEAL_FINDER_MCP_PROD_HOST:-deal-finder-mcp.localhost}`)"
+      - "traefik.http.routers.mcp-df-prod-https.entrypoints=websecure"
+      - "traefik.http.routers.mcp-df-prod-https.service=mcp-svc"
+      - "traefik.http.routers.mcp-df-prod-https.tls=${XYN_TRAEFIK_ENABLE_TLS:-false}"
+      - "traefik.http.routers.mcp-df-prod-https.tls.certresolver=${XYN_TRAEFIK_CERT_RESOLVER:-letsencrypt}"
+      - "traefik.http.routers.mcp-df-test-http.rule=Host(`${XYN_DEAL_FINDER_MCP_TEST_HOST:-deal-finder-test-mcp.localhost}`)"
+      - "traefik.http.routers.mcp-df-test-http.entrypoints=web"
+      - "traefik.http.routers.mcp-df-test-http.service=mcp-svc"
+      - "traefik.http.routers.mcp-df-test-https.rule=Host(`${XYN_DEAL_FINDER_MCP_TEST_HOST:-deal-finder-test-mcp.localhost}`)"
+      - "traefik.http.routers.mcp-df-test-https.entrypoints=websecure"
+      - "traefik.http.routers.mcp-df-test-https.service=mcp-svc"
+      - "traefik.http.routers.mcp-df-test-https.tls=${XYN_TRAEFIK_ENABLE_TLS:-false}"
+      - "traefik.http.routers.mcp-df-test-https.tls.certresolver=${XYN_TRAEFIK_CERT_RESOLVER:-letsencrypt}"
     networks:
       - default
       - traefik

@@ -16,9 +16,12 @@ from core.mcp.xyn_api_adapter import (
     set_request_bearer_token,
 )
 from core.mcp.xyn_mcp_server import (
+    DEAL_FINDER_TOOL_NAMES,
     TOOL_NAMES,
+    McpEndpointBinding,
     _assert_critical_planner_tools_available,
     _build_tool_surface,
+    _resolve_binding_allowed_tools,
     create_xyn_mcp_http_app,
     register_xyn_tools,
 )
@@ -58,6 +61,66 @@ class XynMcpAdapterTests(TestCase):
                     "rewrite_to_prefix": "/mcp",
                     "app_scope": "deal-finder",
                     "profile_name": "root",
+                    "tool_profile": "deal-finder",
+                    "environment": "local",
+                },
+            ]
+        )
+
+    @staticmethod
+    def _host_based_bindings() -> str:
+        return json.dumps(
+            [
+                {
+                    "name": "root",
+                    "host": "mcp.example.com",
+                    "mcp_path_prefix": "/mcp",
+                    "resource_path": "/mcp",
+                    "health_path": "/healthz",
+                    "oauth_protected_resource_path": "/.well-known/oauth-protected-resource",
+                    "rewrite_to_prefix": "/mcp",
+                    "app_scope": "root",
+                    "profile_name": "root",
+                    "environment": "local",
+                },
+                {
+                    "name": "deal-finder-prod",
+                    "host": "deal-finder-mcp.example.com",
+                    "mcp_path_prefix": "/mcp",
+                    "resource_path": "/mcp",
+                    "health_path": "/healthz",
+                    "oauth_protected_resource_path": "/.well-known/oauth-protected-resource",
+                    "rewrite_to_prefix": "/mcp",
+                    "app_scope": "deal-finder",
+                    "profile_name": "root",
+                    "tool_profile": "deal-finder",
+                    "environment": "prod",
+                    "deployment_namespace": "deal-finder-prod",
+                },
+                {
+                    "name": "deal-finder-test",
+                    "host": "deal-finder-test-mcp.example.com",
+                    "mcp_path_prefix": "/mcp",
+                    "resource_path": "/mcp",
+                    "health_path": "/healthz",
+                    "oauth_protected_resource_path": "/.well-known/oauth-protected-resource",
+                    "rewrite_to_prefix": "/mcp",
+                    "app_scope": "deal-finder",
+                    "profile_name": "root",
+                    "tool_profile": "deal-finder",
+                    "environment": "test",
+                    "deployment_namespace": "deal-finder-test",
+                },
+                {
+                    "name": "deal-finder-path-compat",
+                    "mcp_path_prefix": "/deal-finder/mcp",
+                    "resource_path": "/deal-finder/mcp",
+                    "health_path": "/deal-finder/healthz",
+                    "oauth_protected_resource_path": "/deal-finder/.well-known/oauth-protected-resource",
+                    "rewrite_to_prefix": "/mcp",
+                    "app_scope": "deal-finder",
+                    "profile_name": "root",
+                    "tool_profile": "deal-finder",
                     "environment": "local",
                 },
             ]
@@ -71,6 +134,15 @@ class XynMcpAdapterTests(TestCase):
                 archive.writestr(path, payload)
         return buffer.getvalue()
 
+    @staticmethod
+    def _parse_sse_data_payload(raw_body: str) -> Dict[str, Any]:
+        for line in raw_body.splitlines():
+            if line.startswith("data: "):
+                payload = line[len("data: ") :].strip()
+                if payload:
+                    return json.loads(payload)
+        return {}
+
     def test_register_xyn_tools_registers_expected_surface(self) -> None:
         adapter = mock.Mock()
         server = FakeMcpServer()
@@ -78,6 +150,37 @@ class XynMcpAdapterTests(TestCase):
         register_xyn_tools(server, adapter)
 
         self.assertEqual(sorted(server.tools.keys()), sorted(TOOL_NAMES))
+
+    def test_resolve_binding_allowed_tools_deal_finder_profile_filters_root_tools(self) -> None:
+        binding = McpEndpointBinding(
+            name="deal-finder",
+            mcp_path_prefix="/deal-finder/mcp",
+            resource_path="/deal-finder/mcp",
+            health_path="/deal-finder/healthz",
+            oauth_protected_resource_path="/deal-finder/.well-known/oauth-protected-resource",
+            rewrite_to_prefix="/mcp",
+            app_scope="deal-finder",
+            profile_name="root",
+            tool_profile="deal-finder",
+        )
+        allowed = _resolve_binding_allowed_tools(binding=binding, globally_enabled_tools=set(TOOL_NAMES))
+        self.assertEqual(sorted(allowed), sorted(DEAL_FINDER_TOOL_NAMES))
+        self.assertNotIn("list_applications", allowed)
+
+    def test_resolve_binding_allowed_tools_supports_explicit_allowlist(self) -> None:
+        binding = McpEndpointBinding(
+            name="deal-finder-custom",
+            mcp_path_prefix="/deal-finder/mcp",
+            resource_path="/deal-finder/mcp",
+            health_path="/deal-finder/healthz",
+            oauth_protected_resource_path="/deal-finder/.well-known/oauth-protected-resource",
+            rewrite_to_prefix="/mcp",
+            app_scope="deal-finder",
+            profile_name="root",
+            allowed_tools=("create_campaign",),
+        )
+        allowed = _resolve_binding_allowed_tools(binding=binding, globally_enabled_tools=set(TOOL_NAMES))
+        self.assertEqual(sorted(allowed), ["create_campaign"])
 
     @mock.patch.dict(
         "os.environ",
@@ -5143,8 +5246,9 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual((payload.get("runtime_identity") or {}).get("environment"), "local")
         tools = payload.get("tools") if isinstance(payload.get("tools"), list) else []
         self.assertIn("create_data_source", tools)
-        self.assertIn("list_runtime_runs", tools)
-        self.assertIn("create_change_effort", tools)
+        self.assertIn("create_campaign", tools)
+        self.assertNotIn("list_runtime_runs", tools)
+        self.assertNotIn("list_applications", tools)
 
     def test_deal_finder_healthz_not_exposed_without_explicit_binding(self) -> None:
         adapter = XynApiAdapter(
@@ -5235,6 +5339,64 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(mcp_response.status_code, 401)
         self.assertEqual(root_health.status_code, 200)
 
+    def test_host_based_binding_resolution_sets_runtime_identity_by_host(self) -> None:
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://localhost",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "XYN_MCP_ENDPOINT_BINDINGS": self._host_based_bindings(),
+                "XYN_MCP_AUTH_MODE": "none",
+            },
+            clear=False,
+        ):
+            app = create_xyn_mcp_http_app(adapter)
+            with TestClient(app) as client:
+                root_health = client.get("/healthz", headers={"Host": "mcp.example.com"})
+                prod_health = client.get("/healthz", headers={"Host": "deal-finder-mcp.example.com"})
+                test_health = client.get("/healthz", headers={"Host": "deal-finder-test-mcp.example.com"})
+        self.assertEqual(root_health.status_code, 200)
+        self.assertEqual(prod_health.status_code, 200)
+        self.assertEqual(test_health.status_code, 200)
+        self.assertEqual((root_health.json().get("runtime_identity") or {}).get("app_scope"), "root")
+        self.assertEqual((prod_health.json().get("runtime_identity") or {}).get("app_scope"), "deal-finder")
+        self.assertEqual((prod_health.json().get("runtime_identity") or {}).get("environment"), "prod")
+        self.assertEqual((test_health.json().get("runtime_identity") or {}).get("environment"), "test")
+
+    def test_host_based_binding_prefers_host_before_path_only_compat(self) -> None:
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://localhost",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "XYN_MCP_AUTH_MODE": "none",
+                "XYN_MCP_ENDPOINT_BINDINGS": self._host_based_bindings(),
+            },
+            clear=False,
+        ):
+            app = create_xyn_mcp_http_app(adapter)
+            with TestClient(app) as client:
+                host_health = client.get("/healthz", headers={"Host": "deal-finder-mcp.example.com"})
+                path_health = client.get("/deal-finder/healthz", headers={"Host": "mcp.example.com"})
+        self.assertEqual(host_health.status_code, 200)
+        self.assertEqual(path_health.status_code, 200)
+        self.assertEqual((host_health.json().get("runtime_identity") or {}).get("binding_name"), "deal-finder-prod")
+        self.assertEqual((path_health.json().get("runtime_identity") or {}).get("binding_name"), "deal-finder-path-compat")
+
     def test_mcp_route_rejects_missing_bearer_when_token_mode_enabled(self) -> None:
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
@@ -5300,6 +5462,80 @@ class XynMcpAdapterTests(TestCase):
                     },
                 )
         self.assertNotEqual(response.status_code, 401)
+
+    def test_deal_finder_tool_surface_filters_root_tools_and_rejects_forbidden_execution(self) -> None:
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://localhost",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "XYN_MCP_AUTH_MODE": "none",
+                "XYN_MCP_ENDPOINT_BINDINGS": self._explicit_deal_finder_bindings(),
+            },
+            clear=False,
+        ):
+            app = create_xyn_mcp_http_app(adapter)
+            with TestClient(app) as client:
+                init_response = client.post(
+                    "/deal-finder/mcp",
+                    headers={"content-type": "application/json", "accept": "application/json, text/event-stream"},
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": "init-1",
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2025-03-26",
+                            "capabilities": {},
+                            "clientInfo": {"name": "unit-test", "version": "1.0.0"},
+                        },
+                    },
+                )
+                self.assertEqual(init_response.status_code, 200)
+                session_id = str(init_response.headers.get("mcp-session-id") or "")
+                self.assertTrue(session_id)
+
+                tools_list = client.post(
+                    "/deal-finder/mcp",
+                    headers={
+                        "content-type": "application/json",
+                        "accept": "application/json, text/event-stream",
+                        "mcp-session-id": session_id,
+                    },
+                    json={"jsonrpc": "2.0", "id": "list-1", "method": "tools/list", "params": {}},
+                )
+                self.assertEqual(tools_list.status_code, 200)
+                payload = self._parse_sse_data_payload(tools_list.text)
+                result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+                tools = result.get("tools") if isinstance(result.get("tools"), list) else []
+                tool_names = [str(item.get("name") or "") for item in tools if isinstance(item, dict)]
+                self.assertIn("create_data_source", tool_names)
+                self.assertNotIn("list_applications", tool_names)
+
+                forbidden_call = client.post(
+                    "/deal-finder/mcp",
+                    headers={
+                        "content-type": "application/json",
+                        "accept": "application/json, text/event-stream",
+                        "mcp-session-id": session_id,
+                    },
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": "call-1",
+                        "method": "tools/call",
+                        "params": {"name": "list_applications", "arguments": {}},
+                    },
+                )
+                self.assertEqual(forbidden_call.status_code, 403)
+                forbidden_payload = forbidden_call.json()
+                error = forbidden_payload.get("error") if isinstance(forbidden_payload.get("error"), dict) else {}
+                self.assertEqual(str(error.get("message") or ""), "tool_not_allowed_for_binding")
 
     @mock.patch("core.mcp.xyn_mcp_server.httpx.request")
     def test_mcp_route_oidc_mode_rejects_invalid_token(self, mock_request: mock.Mock) -> None:

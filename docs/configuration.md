@@ -165,8 +165,12 @@ Required MCP env:
 - `XYN_MCP_XYN_CODE_API_BASE_URL` (code-plane upstream base URL; when set, source/code tools prefer this upstream before falling back to `XYN_MCP_XYN_CONTROL_API_BASE_URL`)
 - `XYN_MCP_PORT` (default `8011`)
 - `XYN_MCP_BIND_HOST` (default `0.0.0.0`)
-- `XYN_MCP_ENDPOINT_BINDINGS` (JSON array defining explicit MCP endpoint bindings; each entry can set `name`, `mcp_path_prefix`, `resource_path`, `health_path`, `oauth_protected_resource_path`, `rewrite_to_prefix`, `app_scope`, `profile_name`, `environment`, `deployment_namespace`)
+- `XYN_MCP_ENDPOINT_BINDINGS` (JSON array defining explicit MCP endpoint bindings; each entry can set `name`, `mcp_path_prefix`, `resource_path`, `health_path`, `oauth_protected_resource_path`, `rewrite_to_prefix`, `app_scope`, `profile_name`, `environment`, `deployment_namespace`, plus tool-surface policy fields `tool_profile`, `allowed_tool_groups`, `allowed_tools`)
+  - host-based keys are also supported: `host` (exact host) and `hosts` (exact host aliases)
 - `XYN_MCP_DEPLOYMENT_ID` / `XYN_MCP_BUILD_SHA` / `XYN_MCP_IMAGE_TAG` / `XYN_MCP_RELEASE_TARGET` (runtime identity metadata surfaced by MCP health and protected-resource metadata)
+- host-based dedicated endpoint routing vars:
+  - `XYN_DEAL_FINDER_MCP_PROD_HOST` (default `deal-finder-mcp.localhost`)
+  - `XYN_DEAL_FINDER_MCP_TEST_HOST` (default `deal-finder-test-mcp.localhost`)
 
 MCP auth modes:
 
@@ -180,6 +184,21 @@ Notes:
 - `/mcp` is protected whenever MCP auth mode is `token` or `oidc`.
 - Dedicated endpoint aliases (for example `/deal-finder/mcp`) must be configured in `XYN_MCP_ENDPOINT_BINDINGS`; no implicit alias is added by default.
 - Temporary fallback alias mode is available only when explicitly enabled: `XYN_MCP_ENABLE_DEPRECATED_DEAL_FINDER_ALIAS=true` (deprecated migration gate).
+- Tool exposure is binding-aware:
+  - `tool_profile=deal-finder` narrows the endpoint to Deal Finder MCP tools.
+  - `allowed_tool_groups` and `allowed_tools` can further shape the binding's discoverable/executable surface.
+
+Binding precedence (request binding resolution):
+
+1. exact host match first (host-bound binding on canonical `/mcp` / `/healthz` / `/.well-known/oauth-protected-resource`)
+2. then host + path match
+3. then legacy path-only fallback (bindings without `host` / `hosts`)
+
+Recommended host naming convention:
+
+- root: `mcp.<domain>`
+- dedicated prod: `<app>-mcp.<domain>` (example: `deal-finder-mcp.<domain>`)
+- dedicated test: `<app>-test-mcp.<domain>` (example: `deal-finder-test-mcp.<domain>`)
 
 ## Compatibility Aliases (Migration Window)
 
