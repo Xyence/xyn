@@ -1429,7 +1429,11 @@ def _build_upstream_health(adapter: XynApiAdapter) -> Dict[str, Any]:
     return {"ok": overall_ok, "probes": probes}
 
 
-def create_xyn_mcp_server(adapter: XynApiAdapter | None = None) -> Any:
+def create_xyn_mcp_server(
+    adapter: XynApiAdapter | None = None,
+    *,
+    profile_name: str = "root",
+) -> Any:
     from mcp.server.fastmcp import FastMCP
 
     configured_adapter = adapter or XynApiAdapter(XynApiAdapterConfig.from_env())
@@ -1442,12 +1446,19 @@ def create_xyn_mcp_server(adapter: XynApiAdapter | None = None) -> Any:
     return server
 
 
-def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
-    configured_adapter = adapter or XynApiAdapter(XynApiAdapterConfig.from_env())
-    auth_config = McpAuthConfig.from_env()
-    mcp_server = create_xyn_mcp_server(configured_adapter)
+def _create_xyn_mcp_http_subapp(
+    *,
+    adapter: XynApiAdapter,
+    auth_config: McpAuthConfig,
+    mcp_resource_path: str = "/mcp",
+    profile_name: str = "root",
+) -> Starlette:
+    mcp_server = create_xyn_mcp_server(
+        adapter,
+        profile_name=profile_name,
+    )
     tool_surface = getattr(mcp_server, "_xyn_tool_surface", {}) if mcp_server is not None else {}
-    upstream_health = _build_upstream_health(configured_adapter)
+    upstream_health = _build_upstream_health(adapter)
     enabled_tools = list(tool_surface.get("enabled_tools") or TOOL_NAMES)
     disabled_tools = list(tool_surface.get("disabled_tools") or [])
     parity = tool_surface.get("parity") if isinstance(tool_surface.get("parity"), dict) else {}
@@ -1463,17 +1474,18 @@ def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
             {
                 "status": "ok",
                 "service": "xyn-mcp-adapter",
+                "mcp_profile": profile_name,
                 "tool_count": len(enabled_tools),
                 "tools": enabled_tools,
                 "disabled_tools": disabled_tools,
                 "tool_parity": parity,
                 "upstream_health": upstream_health,
-                "xyn_control_api_base_url": configured_adapter.config.control_api_base_url,
-                "xyn_code_api_base_url": configured_adapter.config.code_api_base_url
-                or configured_adapter.config.control_api_base_url,
+                "xyn_control_api_base_url": adapter.config.control_api_base_url,
+                "xyn_code_api_base_url": adapter.config.code_api_base_url
+                or adapter.config.control_api_base_url,
                 "auth": {
-                    "has_bearer_token": bool(configured_adapter.config.bearer_token),
-                    "has_internal_token": bool(configured_adapter.config.internal_token),
+                    "has_bearer_token": bool(adapter.config.bearer_token),
+                    "has_internal_token": bool(adapter.config.internal_token),
                     "mcp_auth_mode": auth_config.mode,
                     "mcp_auth_token_configured": bool(auth_config.bearer_token),
                     "mcp_auth_oidc_configured": bool(auth_config.oidc_issuer and auth_config.oidc_client_id),
@@ -1488,9 +1500,9 @@ def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
             host = str(request.url.netloc or "").strip()
         return f"{proto}://{host}" if host else ""
 
-    def _oauth_protected_resource_metadata(request) -> Dict[str, Any]:
+    def _oauth_protected_resource_metadata(request, *, resource_path: str = mcp_resource_path) -> Dict[str, Any]:
         base_url = _base_url_for(request)
-        resource = f"{base_url}/mcp" if base_url else "/mcp"
+        resource = f"{base_url}{resource_path}" if base_url else resource_path
         metadata: Dict[str, Any] = {
             "resource": resource,
             "bearer_methods_supported": ["header"],
@@ -1528,7 +1540,7 @@ def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
     async def _validate_oidc_bearer(token: str) -> Tuple[bool, str]:
         if not auth_config.oidc_issuer or not auth_config.oidc_client_id:
             return False, "OIDC auth mode requires OIDC_ISSUER and OIDC_CLIENT_ID"
-        timeout_seconds = min(float(configured_adapter.config.timeout_seconds), 10.0)
+        timeout_seconds = min(float(adapter.config.timeout_seconds), 10.0)
         try:
             config_response = httpx.request(
                 method="GET",
@@ -1575,8 +1587,22 @@ def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
             return Response(status_code=404)
         return JSONResponse(_oauth_protected_resource_metadata(request), status_code=200)
 
+    async def oauth_protected_resource_deal_finder(request) -> Response:
+        if auth_config.mode != "oidc":
+            return Response(status_code=404)
+        return JSONResponse(
+            _oauth_protected_resource_metadata(request, resource_path="/deal-finder/mcp"),
+            status_code=200,
+        )
+
     async def _mcp_auth_guard(request, call_next):
         path = str(request.url.path or "")
+        if path.startswith("/deal-finder/mcp"):
+            suffix = path[len("/deal-finder") :]
+            rewritten_path = suffix if suffix.startswith("/mcp") else f"/mcp{suffix}"
+            request.scope["path"] = rewritten_path
+            request.scope["raw_path"] = rewritten_path.encode("utf-8")
+            path = rewritten_path
         if path in {"/healthz", "/.well-known/oauth-protected-resource"} or not path.startswith("/mcp"):
             return await call_next(request)
         if auth_config.mode == "none":
@@ -1609,8 +1635,25 @@ def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
 
     # Add diagnostics route directly on the same MCP Starlette app so lifespan/task-group init stays intact.
     app.add_route("/healthz", healthz, methods=["GET"])
+    app.add_route("/deal-finder/healthz", healthz, methods=["GET"])
     app.add_route("/.well-known/oauth-protected-resource", oauth_protected_resource, methods=["GET"])
+    app.add_route(
+        "/deal-finder/.well-known/oauth-protected-resource",
+        oauth_protected_resource_deal_finder,
+        methods=["GET"],
+    )
     return app
+
+
+def create_xyn_mcp_http_app(adapter: XynApiAdapter | None = None) -> Starlette:
+    configured_adapter = adapter or XynApiAdapter(XynApiAdapterConfig.from_env())
+    auth_config = McpAuthConfig.from_env()
+    return _create_xyn_mcp_http_subapp(
+        adapter=configured_adapter,
+        auth_config=auth_config,
+        mcp_resource_path="/mcp",
+        profile_name="root",
+    )
 
 def main() -> None:
     bind_host = str(os.getenv("XYN_MCP_BIND_HOST", "")).strip()

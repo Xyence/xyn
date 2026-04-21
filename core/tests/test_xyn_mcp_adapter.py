@@ -5092,6 +5092,27 @@ class XynMcpAdapterTests(TestCase):
                 response = client.get("/healthz")
         self.assertEqual(response.status_code, 200)
 
+    def test_deal_finder_healthz_profile_and_tool_surface(self) -> None:
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://localhost",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        app = create_xyn_mcp_http_app(adapter)
+        with TestClient(app) as client:
+            response = client.get("/deal-finder/healthz")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload.get("mcp_profile"), "root")
+        tools = payload.get("tools") if isinstance(payload.get("tools"), list) else []
+        self.assertIn("create_data_source", tools)
+        self.assertIn("list_runtime_runs", tools)
+        self.assertIn("create_change_effort", tools)
+
     def test_mcp_route_rejects_missing_bearer_when_token_mode_enabled(self) -> None:
         adapter = XynApiAdapter(
             XynApiAdapterConfig(
@@ -5106,6 +5127,24 @@ class XynMcpAdapterTests(TestCase):
             app = create_xyn_mcp_http_app(adapter)
             with TestClient(app) as client:
                 response = client.get("/mcp", headers={"Accept": "text/event-stream"})
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload.get("error"), "unauthorized")
+
+    def test_deal_finder_mcp_route_rejects_missing_bearer_when_token_mode_enabled(self) -> None:
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://localhost",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        with mock.patch.dict("os.environ", {"XYN_MCP_AUTH_MODE": "token", "XYN_MCP_AUTH_BEARER_TOKEN": "top-secret"}, clear=False):
+            app = create_xyn_mcp_http_app(adapter)
+            with TestClient(app) as client:
+                response = client.get("/deal-finder/mcp", headers={"Accept": "text/event-stream"})
         self.assertEqual(response.status_code, 401)
         payload = response.json()
         self.assertEqual(payload.get("error"), "unauthorized")
@@ -5203,6 +5242,33 @@ class XynMcpAdapterTests(TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload.get("resource"), "http://mcp.example.com/mcp")
+        self.assertEqual(payload.get("authorization_servers"), ["https://issuer.example.com"])
+
+    def test_deal_finder_oidc_well_known_oauth_protected_resource_route_is_available(self) -> None:
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://localhost",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "XYN_MCP_AUTH_MODE": "oidc",
+                "OIDC_ISSUER": "https://issuer.example.com",
+                "OIDC_CLIENT_ID": "client-id",
+            },
+            clear=False,
+        ):
+            app = create_xyn_mcp_http_app(adapter)
+            with TestClient(app) as client:
+                response = client.get("/deal-finder/.well-known/oauth-protected-resource", headers={"Host": "mcp.example.com"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload.get("resource"), "http://mcp.example.com/deal-finder/mcp")
         self.assertEqual(payload.get("authorization_servers"), ["https://issuer.example.com"])
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
