@@ -3740,6 +3740,61 @@ class XynMcpAdapterTests(TestCase):
         kwargs = mock_request.call_args.kwargs
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer request-token-abc")
 
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_prefers_request_bearer_for_xyn_local_api_by_default(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"applications": []}
+        mock_request.return_value = response
+
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn-local-api:8000",
+                bearer_token="static-upstream-token",
+                internal_token="",
+                cookie="",
+                timeout_seconds=11.0,
+            )
+        )
+
+        token = set_request_bearer_token("request-token-local")
+        try:
+            result = adapter.list_applications(workspace_id="ws-1")
+        finally:
+            reset_request_bearer_token(token)
+
+        self.assertTrue(result["ok"])
+        kwargs = mock_request.call_args.kwargs
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer request-token-local")
+
+    @mock.patch.dict("os.environ", {"XYN_MCP_FORCE_STATIC_BEARER_FOR_LOCAL_API": "true"}, clear=False)
+    @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
+    def test_adapter_can_force_static_bearer_for_xyn_local_api(self, mock_request: mock.Mock) -> None:
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"applications": []}
+        mock_request.return_value = response
+
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://xyn-local-api:8000",
+                bearer_token="static-upstream-token",
+                internal_token="",
+                cookie="",
+                timeout_seconds=11.0,
+            )
+        )
+
+        token = set_request_bearer_token("request-token-local")
+        try:
+            result = adapter.list_applications(workspace_id="ws-1")
+        finally:
+            reset_request_bearer_token(token)
+
+        self.assertTrue(result["ok"])
+        kwargs = mock_request.call_args.kwargs
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer static-upstream-token")
+
     @mock.patch.object(XynApiAdapter, "_request")
     def test_tool_surface_is_not_cookie_gated_and_hides_unsupported_list_change_efforts(
         self, mock_request: mock.Mock

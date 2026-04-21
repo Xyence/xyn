@@ -303,9 +303,19 @@ class XynApiAdapter:
         # Prefer per-request bearer propagated by MCP auth middleware so OAuth sessions
         # can flow through ChatGPT -> MCP -> Xyn backend. Fall back to static config token.
         request_bearer = get_request_bearer_token() if prefer_request_bearer else ""
-        # Local control-plane containers do not consistently accept forwarded OAuth
-        # principals; pin to configured upstream bearer for local API hosts.
-        if "xyn-local-api" in str(self._config.control_api_base_url or "").strip().lower() and self._config.bearer_token:
+        # Optional escape hatch for environments that explicitly require static bearer
+        # when routing through local control-plane hosts.
+        force_static_local_api = str(os.getenv("XYN_MCP_FORCE_STATIC_BEARER_FOR_LOCAL_API", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if (
+            force_static_local_api
+            and "xyn-local-api" in str(self._config.control_api_base_url or "").strip().lower()
+            and self._config.bearer_token
+        ):
             request_bearer = ""
         bearer = request_bearer or self._config.bearer_token
         if bearer:
