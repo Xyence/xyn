@@ -233,6 +233,12 @@ services:
       XYN_PUBLIC_BASE_URL: ${XYN_PUBLIC_BASE_URL:-}
       XYN_MCP_UPSTREAM_HOST_HEADER: ${XYN_MCP_UPSTREAM_HOST_HEADER:-}
       XYN_MCP_UPSTREAM_FORWARDED_PROTO: ${XYN_MCP_UPSTREAM_FORWARDED_PROTO:-}
+      XYN_MCP_DEPLOYMENT_ID: ${XYN_MCP_DEPLOYMENT_ID:-xyn-local-mcp}
+      XYN_MCP_IMAGE_TAG: ${XYN_MCP_IMAGE_TAG:-local-dev}
+      XYN_MCP_RELEASE_TARGET: ${XYN_MCP_RELEASE_TARGET:-local}
+      XYN_MCP_ENABLE_DEPRECATED_DEAL_FINDER_ALIAS: ${XYN_MCP_ENABLE_DEPRECATED_DEAL_FINDER_ALIAS:-false}
+      XYN_MCP_ENDPOINT_BINDINGS: >-
+        ${XYN_MCP_ENDPOINT_BINDINGS:-[{"name":"root","mcp_path_prefix":"/mcp","resource_path":"/mcp","health_path":"/healthz","oauth_protected_resource_path":"/.well-known/oauth-protected-resource","rewrite_to_prefix":"/mcp","app_scope":"root","profile_name":"root","environment":"local"},{"name":"deal-finder","mcp_path_prefix":"/deal-finder/mcp","resource_path":"/deal-finder/mcp","health_path":"/deal-finder/healthz","oauth_protected_resource_path":"/deal-finder/.well-known/oauth-protected-resource","rewrite_to_prefix":"/mcp","app_scope":"deal-finder","profile_name":"root","environment":"local"}]}
     volumes:
       - ./core:/app/core:z
       - ${XYN_PLATFORM_HOST_SRC_PATH:-${XYN_HOST_SRC_ROOT:-${PWD}/..}/xyn-platform}:/workspace/xyn-platform:z

@@ -165,6 +165,8 @@ Required MCP env:
 - `XYN_MCP_XYN_CODE_API_BASE_URL` (code-plane upstream base URL; when set, source/code tools prefer this upstream before falling back to `XYN_MCP_XYN_CONTROL_API_BASE_URL`)
 - `XYN_MCP_PORT` (default `8011`)
 - `XYN_MCP_BIND_HOST` (default `0.0.0.0`)
+- `XYN_MCP_ENDPOINT_BINDINGS` (JSON array defining explicit MCP endpoint bindings; each entry can set `name`, `mcp_path_prefix`, `resource_path`, `health_path`, `oauth_protected_resource_path`, `rewrite_to_prefix`, `app_scope`, `profile_name`, `environment`, `deployment_namespace`)
+- `XYN_MCP_DEPLOYMENT_ID` / `XYN_MCP_BUILD_SHA` / `XYN_MCP_IMAGE_TAG` / `XYN_MCP_RELEASE_TARGET` (runtime identity metadata surfaced by MCP health and protected-resource metadata)
 
 MCP auth modes:
 
@@ -176,6 +178,8 @@ Notes:
 
 - `/healthz` remains unauthenticated by design.
 - `/mcp` is protected whenever MCP auth mode is `token` or `oidc`.
+- Dedicated endpoint aliases (for example `/deal-finder/mcp`) must be configured in `XYN_MCP_ENDPOINT_BINDINGS`; no implicit alias is added by default.
+- Temporary fallback alias mode is available only when explicitly enabled: `XYN_MCP_ENABLE_DEPRECATED_DEAL_FINDER_ALIAS=true` (deprecated migration gate).
 
 ## Compatibility Aliases (Migration Window)
 

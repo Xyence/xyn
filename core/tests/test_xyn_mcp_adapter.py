@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import io
+import json
 import zipfile
 from typing import Any, Dict
 from unittest import TestCase, mock
@@ -33,6 +34,35 @@ class FakeMcpServer:
 
 
 class XynMcpAdapterTests(TestCase):
+    @staticmethod
+    def _explicit_deal_finder_bindings() -> str:
+        return json.dumps(
+            [
+                {
+                    "name": "root",
+                    "mcp_path_prefix": "/mcp",
+                    "resource_path": "/mcp",
+                    "health_path": "/healthz",
+                    "oauth_protected_resource_path": "/.well-known/oauth-protected-resource",
+                    "rewrite_to_prefix": "/mcp",
+                    "app_scope": "root",
+                    "profile_name": "root",
+                    "environment": "local",
+                },
+                {
+                    "name": "deal-finder",
+                    "mcp_path_prefix": "/deal-finder/mcp",
+                    "resource_path": "/deal-finder/mcp",
+                    "health_path": "/deal-finder/healthz",
+                    "oauth_protected_resource_path": "/deal-finder/.well-known/oauth-protected-resource",
+                    "rewrite_to_prefix": "/mcp",
+                    "app_scope": "deal-finder",
+                    "profile_name": "root",
+                    "environment": "local",
+                },
+            ]
+        )
+
     @staticmethod
     def _build_zip_bytes(files: Dict[str, bytes]) -> bytes:
         buffer = io.BytesIO()
@@ -5102,16 +5132,108 @@ class XynMcpAdapterTests(TestCase):
                 timeout_seconds=10.0,
             )
         )
-        app = create_xyn_mcp_http_app(adapter)
-        with TestClient(app) as client:
-            response = client.get("/deal-finder/healthz")
+        with mock.patch.dict("os.environ", {"XYN_MCP_ENDPOINT_BINDINGS": self._explicit_deal_finder_bindings()}, clear=False):
+            app = create_xyn_mcp_http_app(adapter)
+            with TestClient(app) as client:
+                response = client.get("/deal-finder/healthz")
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload.get("mcp_profile"), "root")
+        self.assertEqual((payload.get("runtime_identity") or {}).get("app_scope"), "deal-finder")
+        self.assertEqual((payload.get("runtime_identity") or {}).get("environment"), "local")
         tools = payload.get("tools") if isinstance(payload.get("tools"), list) else []
         self.assertIn("create_data_source", tools)
         self.assertIn("list_runtime_runs", tools)
         self.assertIn("create_change_effort", tools)
+
+    def test_deal_finder_healthz_not_exposed_without_explicit_binding(self) -> None:
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://localhost",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "XYN_MCP_ENDPOINT_BINDINGS": "",
+                "XYN_MCP_ENABLE_DEPRECATED_DEAL_FINDER_ALIAS": "false",
+            },
+            clear=False,
+        ):
+            app = create_xyn_mcp_http_app(adapter)
+            with TestClient(app) as client:
+                response = client.get("/deal-finder/healthz")
+        self.assertEqual(response.status_code, 404)
+
+    def test_deprecated_deal_finder_alias_can_be_opted_in(self) -> None:
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://localhost",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "XYN_MCP_ENDPOINT_BINDINGS": "",
+                "XYN_MCP_ENABLE_DEPRECATED_DEAL_FINDER_ALIAS": "true",
+            },
+            clear=False,
+        ):
+            app = create_xyn_mcp_http_app(adapter)
+            with TestClient(app) as client:
+                response = client.get("/deal-finder/healthz")
+        self.assertEqual(response.status_code, 200)
+
+    def test_custom_endpoint_binding_health_and_auth_guard(self) -> None:
+        adapter = XynApiAdapter(
+            XynApiAdapterConfig(
+                control_api_base_url="http://localhost",
+                bearer_token="",
+                internal_token="",
+                cookie="",
+                timeout_seconds=10.0,
+            )
+        )
+        binding_payload = json.dumps(
+            [
+                {
+                    "name": "deal-finder-test",
+                    "mcp_path_prefix": "/apps/deal-finder/mcp",
+                    "resource_path": "/apps/deal-finder/mcp",
+                    "health_path": "/apps/deal-finder/healthz",
+                    "oauth_protected_resource_path": "/apps/deal-finder/.well-known/oauth-protected-resource",
+                    "rewrite_to_prefix": "/mcp",
+                    "app_scope": "deal-finder-test",
+                }
+            ]
+        )
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "XYN_MCP_AUTH_MODE": "token",
+                "XYN_MCP_AUTH_BEARER_TOKEN": "top-secret",
+                "XYN_MCP_ENDPOINT_BINDINGS": binding_payload,
+            },
+            clear=False,
+        ):
+            app = create_xyn_mcp_http_app(adapter)
+            with TestClient(app) as client:
+                health_response = client.get("/apps/deal-finder/healthz")
+                mcp_response = client.get("/apps/deal-finder/mcp", headers={"Accept": "text/event-stream"})
+                root_health = client.get("/healthz")
+        self.assertEqual(health_response.status_code, 200)
+        health_payload = health_response.json()
+        self.assertEqual((health_payload.get("runtime_identity") or {}).get("app_scope"), "deal-finder-test")
+        self.assertEqual(mcp_response.status_code, 401)
+        self.assertEqual(root_health.status_code, 200)
 
     def test_mcp_route_rejects_missing_bearer_when_token_mode_enabled(self) -> None:
         adapter = XynApiAdapter(
@@ -5141,7 +5263,15 @@ class XynMcpAdapterTests(TestCase):
                 timeout_seconds=10.0,
             )
         )
-        with mock.patch.dict("os.environ", {"XYN_MCP_AUTH_MODE": "token", "XYN_MCP_AUTH_BEARER_TOKEN": "top-secret"}, clear=False):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "XYN_MCP_AUTH_MODE": "token",
+                "XYN_MCP_AUTH_BEARER_TOKEN": "top-secret",
+                "XYN_MCP_ENDPOINT_BINDINGS": self._explicit_deal_finder_bindings(),
+            },
+            clear=False,
+        ):
             app = create_xyn_mcp_http_app(adapter)
             with TestClient(app) as client:
                 response = client.get("/deal-finder/mcp", headers={"Accept": "text/event-stream"})
@@ -5206,6 +5336,7 @@ class XynMcpAdapterTests(TestCase):
                 "XYN_MCP_AUTH_MODE": "oidc",
                 "OIDC_ISSUER": "https://issuer.example.com",
                 "OIDC_CLIENT_ID": "client-id",
+                "XYN_MCP_ENDPOINT_BINDINGS": self._explicit_deal_finder_bindings(),
             },
             clear=False,
         ):
@@ -5233,6 +5364,7 @@ class XynMcpAdapterTests(TestCase):
                 "XYN_MCP_AUTH_MODE": "oidc",
                 "OIDC_ISSUER": "https://issuer.example.com",
                 "OIDC_CLIENT_ID": "client-id",
+                "XYN_MCP_ENDPOINT_BINDINGS": self._explicit_deal_finder_bindings(),
             },
             clear=False,
         ):
@@ -5270,6 +5402,7 @@ class XynMcpAdapterTests(TestCase):
         payload = response.json()
         self.assertEqual(payload.get("resource"), "http://mcp.example.com/deal-finder/mcp")
         self.assertEqual(payload.get("authorization_servers"), ["https://issuer.example.com"])
+        self.assertEqual((payload.get("xyn_runtime_identity") or {}).get("app_scope"), "deal-finder")
 
     @mock.patch("core.mcp.xyn_api_adapter.httpx.request")
     def test_adapter_list_discovery_endpoints_return_empty_lists_without_errors(self, mock_request: mock.Mock) -> None:
